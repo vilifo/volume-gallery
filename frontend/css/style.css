@@ -1,0 +1,253 @@
+/*
+  Design notes (kept here rather than in a separate doc so they travel with the code):
+  Palette — instrument-panel dark: base #14171C, panel #1C2026, line #2B3038,
+    text #E7E5E0, dim text #8B919B, accent (calibration amber) #E8A33D, danger #D9694F.
+  Type — system sans for UI text; system mono for slugs, filenames, byte counts and
+    coordinates, since this is a scientific-imaging tool and those really are data,
+    not decoration.
+  Layout — a fixed left rail (role + nav) and a content column, left-aligned,
+    max content width ~1100px. No card-grid-with-shadows kit; volumes are listed as
+    dense rows with a thumbnail swatch, closer to a lab instrument's sample list than
+    a marketing grid.
+*/
+
+:root {
+  --bg: #14171c;
+  --panel: #1c2026;
+  --panel-raised: #22262d;
+  --line: #2b3038;
+  --text: #e7e5e0;
+  --text-dim: #8b919b;
+  --accent: #e8a33d;
+  --accent-dim: #a97a34;
+  --danger: #d9694f;
+  --ok: #6fae7c;
+  --radius: 3px;
+  --sans: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --mono: ui-monospace, "SF Mono", "Cascadia Mono", Consolas, monospace;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 15px;
+  line-height: 1.5;
+}
+
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+button, input, select {
+  font-family: inherit;
+  font-size: inherit;
+  color: var(--text);
+}
+
+button {
+  background: var(--panel-raised);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 0.5em 1em;
+  cursor: pointer;
+}
+button:hover { border-color: var(--accent-dim); }
+button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #1a1400;
+  font-weight: 600;
+}
+button.primary:hover { background: #f0ae4d; }
+button.danger { border-color: var(--danger); color: var(--danger); }
+button.danger:hover { background: rgba(217,105,79,0.12); }
+button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+input, select {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 0.5em 0.7em;
+  width: 100%;
+}
+
+label { display: block; font-size: 0.85em; color: var(--text-dim); margin-bottom: 0.3em; }
+.field { margin-bottom: 1em; }
+
+.app-shell { display: flex; min-height: 100vh; }
+
+.rail {
+  width: 220px;
+  flex-shrink: 0;
+  background: var(--panel);
+  border-right: 1px solid var(--line);
+  padding: 1.5em 1.2em;
+  display: flex;
+  flex-direction: column;
+}
+.rail .brand { font-weight: 600; font-size: 1.05em; margin-bottom: 0.1em; }
+.rail .role-tag {
+  font-family: var(--mono);
+  font-size: 0.78em;
+  color: var(--accent);
+  margin-bottom: 2em;
+}
+.rail nav { display: flex; flex-direction: column; gap: 0.3em; }
+.rail nav a {
+  color: var(--text-dim);
+  padding: 0.5em 0.6em;
+  border-radius: var(--radius);
+}
+.rail nav a:hover, .rail nav a.active {
+  color: var(--text);
+  background: var(--panel-raised);
+  text-decoration: none;
+}
+.rail .spacer { flex: 1; }
+.rail .signed-in-as { font-size: 0.85em; color: var(--text-dim); margin-bottom: 0.6em; }
+
+main { flex: 1; padding: 2.2em 2.6em; max-width: 1100px; }
+
+h1 { font-size: 1.5em; margin: 0 0 0.2em; }
+h2 { font-size: 1.1em; margin: 0 0 0.8em; }
+.subtitle { color: var(--text-dim); margin: 0 0 1.8em; }
+
+.mono { font-family: var(--mono); }
+.dim { color: var(--text-dim); }
+
+/* --- volume list (gallery) --- */
+.volume-row {
+  display: flex;
+  align-items: center;
+  gap: 1em;
+  padding: 0.9em 0;
+  border-bottom: 1px solid var(--line);
+}
+.volume-row:hover { background: rgba(255,255,255,0.02); }
+.swatch {
+  width: 48px; height: 48px;
+  border-radius: var(--radius);
+  background: linear-gradient(135deg, #2b3038, #1c2026);
+  border: 1px solid var(--line);
+  flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+  color: var(--text-dim);
+  font-size: 0.7em;
+}
+.volume-row .meta { flex: 1; min-width: 0; }
+.volume-row .title { font-weight: 600; }
+.volume-row .slug { font-family: var(--mono); font-size: 0.82em; color: var(--text-dim); }
+.volume-row .actions { display: flex; gap: 0.5em; flex-shrink: 0; }
+
+.empty-state {
+  border: 1px dashed var(--line);
+  border-radius: var(--radius);
+  padding: 2.5em;
+  text-align: center;
+  color: var(--text-dim);
+  margin-top: 1em;
+}
+
+/* --- viewer page --- */
+.viewer-layout { display: flex; gap: 1.5em; align-items: flex-start; }
+.viewer-canvas-wrap {
+  flex: 1;
+  aspect-ratio: 4 / 3;
+  background: #000;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  position: relative;
+  overflow: hidden;
+}
+.viewer-canvas-wrap canvas { width: 100%; height: 100%; display: block; }
+.viewer-side { width: 260px; flex-shrink: 0; }
+.viewer-side .panel {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 1em;
+  margin-bottom: 1em;
+}
+.viewer-status {
+  position: absolute; inset: 0;
+  display: flex; align-items: center; justify-content: center;
+  color: var(--text-dim); font-family: var(--mono); font-size: 0.85em;
+  background: rgba(0,0,0,0.6);
+}
+.slider-row { margin-bottom: 0.8em; }
+.slider-row .row-label { display: flex; justify-content: space-between; font-size: 0.82em; color: var(--text-dim); }
+
+/* --- tables (users / access) --- */
+table { width: 100%; border-collapse: collapse; }
+th, td { text-align: left; padding: 0.6em 0.5em; border-bottom: 1px solid var(--line); }
+th { color: var(--text-dim); font-weight: 500; font-size: 0.82em; }
+.pill {
+  display: inline-block;
+  font-family: var(--mono);
+  font-size: 0.75em;
+  padding: 0.15em 0.5em;
+  border-radius: var(--radius);
+  border: 1px solid var(--line);
+  color: var(--text-dim);
+}
+.pill.admin { color: var(--accent); border-color: var(--accent-dim); }
+.pill.editor { color: var(--ok); border-color: var(--ok); }
+
+.error-box {
+  background: rgba(217,105,79,0.12);
+  border: 1px solid var(--danger);
+  color: var(--danger);
+  padding: 0.7em 1em;
+  border-radius: var(--radius);
+  margin-bottom: 1em;
+  font-size: 0.9em;
+}
+
+.toolbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.2em; }
+
+/* --- login --- */
+.login-shell {
+  min-height: 100vh;
+  display: flex; align-items: center; justify-content: center;
+}
+.login-box {
+  width: 320px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 2em;
+}
+.login-box h1 { font-size: 1.2em; }
+
+/* --- modal --- */
+.modal-backdrop {
+  position: fixed; inset: 0; background: rgba(0,0,0,0.5);
+  display: flex; align-items: center; justify-content: center;
+  z-index: 10;
+}
+.modal {
+  width: 400px;
+  background: var(--panel-raised);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 1.5em;
+}
+.modal .modal-actions { display: flex; justify-content: flex-end; gap: 0.6em; margin-top: 1.2em; }
+
+@media (max-width: 800px) {
+  .app-shell { flex-direction: column; }
+  .rail { width: 100%; flex-direction: row; align-items: center; padding: 1em; }
+  .rail nav { flex-direction: row; }
+  .rail .spacer { display: none; }
+  main { padding: 1.4em; }
+  .viewer-layout { flex-direction: column; }
+  .viewer-side { width: 100%; }
+}

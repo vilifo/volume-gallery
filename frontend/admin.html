@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Users — Volume Gallery</title>
+<link rel="stylesheet" href="/css/style.css" />
+</head>
+<body>
+  <div class="app-shell" id="shell"></div>
+
+  <script type="module">
+    import { api, requireLogin, getRole, getUsername, renderShell, wireLogout } from "/js/api.js";
+
+    requireLogin();
+    const role = getRole();
+    if (role !== "admin") window.location.href = "/index.html";
+
+    document.getElementById("shell").innerHTML = `
+      ${renderShell("admin", role, getUsername())}
+      <main>
+        <div class="toolbar">
+          <h1>Users</h1>
+          <button class="primary" id="new-user-btn">Add user</button>
+        </div>
+        <div id="error" style="display:none" class="error-box"></div>
+        <table>
+          <thead><tr><th>Username</th><th>Role</th><th>Status</th><th></th></tr></thead>
+          <tbody id="users-body"></tbody>
+        </table>
+      </main>
+      <div id="modal-root"></div>
+    `;
+    wireLogout();
+
+    const me = getUsername();
+
+    async function load() {
+      let users;
+      try {
+        users = await api.listUsers();
+      } catch (err) {
+        document.getElementById("error").textContent = err.message;
+        document.getElementById("error").style.display = "block";
+        return;
+      }
+      document.getElementById("users-body").innerHTML = users
+        .map(
+          (u) => `
+        <tr>
+          <td>${escapeHtml(u.username)}</td>
+          <td><span class="pill ${u.role}">${u.role}</span></td>
+          <td>${u.disabled ? '<span class="dim">disabled</span>' : '<span style="color:var(--ok)">active</span>'}</td>
+          <td style="display:flex;gap:0.4em">
+            ${
+              u.username === me
+                ? '<span class="dim" style="font-size:0.85em">(you)</span>'
+                : `
+              <select data-role="${u.id}">
+                ${["reader", "editor", "admin"]
+                  .map((r) => `<option value="${r}" ${r === u.role ? "selected" : ""}>${r}</option>`)
+                  .join("")}
+              </select>
+              <button data-toggle="${u.id}" data-disabled="${u.disabled}">${u.disabled ? "Enable" : "Disable"}</button>
+              <button class="danger" data-delete="${u.id}">Delete</button>
+              `
+            }
+          </td>
+        </tr>`
+        )
+        .join("");
+
+      document.querySelectorAll("[data-role]").forEach((sel) => {
+        sel.addEventListener("change", async () => {
+          await api.updateUser(sel.dataset.role, { role: sel.value });
+          load();
+        });
+      });
+      document.querySelectorAll("[data-toggle]").forEach((btn) => {
+        btn.addEventListener("click", async () => {
+          const disabled = btn.dataset.disabled === "true";
+          await api.updateUser(btn.dataset.toggle, { disabled: !disabled });
+          load();
+        });
+      });
+      document.querySelectorAll("[data-delete]").forEach((btn) => {
+        btn.addEventListener("click", async () => {
+          if (!confirm("Delete this user? This cannot be undone.")) return;
+          await api.deleteUser(btn.dataset.delete);
+          load();
+        });
+      });
+    }
+
+    document.getElementById("new-user-btn").addEventListener("click", () => {
+      document.getElementById("modal-root").innerHTML = `
+        <div class="modal-backdrop" id="backdrop">
+          <div class="modal">
+            <h2>Add user</h2>
+            <div id="modal-error" style="display:none" class="error-box"></div>
+            <div class="field">
+              <label for="nu-username">Username</label>
+              <input id="nu-username" required />
+            </div>
+            <div class="field">
+              <label for="nu-password">Password</label>
+              <input id="nu-password" type="password" required />
+            </div>
+            <div class="field">
+              <label for="nu-role">Role</label>
+              <select id="nu-role">
+                <option value="reader">reader</option>
+                <option value="editor">editor</option>
+                <option value="admin">admin</option>
+              </select>
+            </div>
+            <div class="modal-actions">
+              <button id="nu-cancel">Cancel</button>
+              <button class="primary" id="nu-save">Create</button>
+            </div>
+          </div>
+        </div>
+      `;
+      document.getElementById("nu-cancel").addEventListener("click", () => {
+        document.getElementById("modal-root").innerHTML = "";
+      });
+      document.getElementById("nu-save").addEventListener("click", async () => {
+        const username = document.getElementById("nu-username").value.trim();
+        const password = document.getElementById("nu-password").value;
+        const userRole = document.getElementById("nu-role").value;
+        try {
+          await api.createUser({ username, password, role: userRole });
+          document.getElementById("modal-root").innerHTML = "";
+          load();
+        } catch (err) {
+          const box = document.getElementById("modal-error");
+          box.textContent = err.message;
+          box.style.display = "block";
+        }
+      });
+    });
+
+    function escapeHtml(s) {
+      const d = document.createElement("div");
+      d.textContent = s;
+      return d.innerHTML;
+    }
+
+    load();
+  </script>
+</body>
+</html>

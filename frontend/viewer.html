@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Viewer — Volume Gallery</title>
+<link rel="stylesheet" href="/css/style.css" />
+</head>
+<body>
+  <div class="app-shell" id="shell"></div>
+
+  <script type="module">
+    import { api, requireLogin, getRole, getUsername, renderShell, wireLogout } from "/js/api.js";
+    import { KilnViewer } from "/vendor/kiln-render/lib/kiln-render.js";
+
+    requireLogin();
+    const role = getRole();
+    const params = new URLSearchParams(window.location.search);
+    const volumeId = params.get("id");
+
+    document.getElementById("shell").innerHTML = `
+      ${renderShell("gallery", role, getUsername())}
+      <main>
+        <div id="content"></div>
+      </main>
+    `;
+    wireLogout();
+
+    const content = document.getElementById("content");
+
+    async function init() {
+      if (!volumeId) {
+        content.innerHTML = `<div class="error-box">No volume specified.</div>`;
+        return;
+      }
+      let volume;
+      try {
+        volume = await api.getVolume(volumeId);
+      } catch (err) {
+        content.innerHTML = `<div class="error-box">${err.message}</div>`;
+        return;
+      }
+
+      content.innerHTML = `
+        <h1>${escapeHtml(volume.title)}</h1>
+        <p class="subtitle mono">${escapeHtml(volume.slug)}</p>
+        <div class="viewer-layout">
+          <div class="viewer-canvas-wrap">
+            <canvas id="canvas"></canvas>
+            <div class="viewer-status" id="status">Requesting WebGPU device\u2026</div>
+          </div>
+          <div class="viewer-side">
+            <div class="panel">
+              <h2>Rendering</h2>
+              <div class="slider-row">
+                <div class="row-label"><span>Density</span><span id="density-val">1.0</span></div>
+                <input type="range" id="density" min="0.1" max="5" step="0.1" value="1.0" />
+              </div>
+              <div class="slider-row">
+                <div class="row-label"><span>Window width</span><span id="ww-val">1.0</span></div>
+                <input type="range" id="ww" min="0.01" max="1" step="0.01" value="1.0" />
+              </div>
+              <div class="slider-row">
+                <div class="row-label"><span>Window center</span><span id="wc-val">0.5</span></div>
+                <input type="range" id="wc" min="0" max="1" step="0.01" value="0.5" />
+              </div>
+            </div>
+            <div class="panel">
+              <h2>Description</h2>
+              <p class="dim" style="font-size:0.9em">${escapeHtml(volume.description || "\u2014")}</p>
+            </div>
+            <div class="panel">
+              <h2>Mesh</h2>
+              ${
+                volume.has_mesh
+                  ? `<button id="download-mesh" class="primary" style="width:100%">Download mesh</button>
+                     <p class="dim mono" style="font-size:0.8em;margin-top:0.6em">${escapeHtml(volume.mesh_filename)}</p>`
+                  : `<p class="dim" style="font-size:0.9em">No mesh for this volume.</p>`
+              }
+            </div>
+          </div>
+        </div>
+      `;
+
+      const statusEl = document.getElementById("status");
+
+      if (!("gpu" in navigator)) {
+        statusEl.textContent = "This browser does not support WebGPU. Try a recent Chrome or Edge.";
+        return;
+      }
+
+      try {
+        const access = await api.zarrAccessUrl(volumeId);
+        const canvas = document.getElementById("canvas");
+        const viewer = await KilnViewer.create(canvas, access.url);
+        statusEl.style.display = "none";
+
+        const density = document.getElementById("density");
+        const densityVal = document.getElementById("density-val");
+        density.addEventListener("input", () => {
+          viewer.renderer.densityScale = parseFloat(density.value);
+          densityVal.textContent = density.value;
+        });
+
+        const ww = document.getElementById("ww");
+        const wwVal = document.getElementById("ww-val");
+        ww.addEventListener("input", () => {
+          viewer.windowWidth = parseFloat(ww.value);
+          wwVal.textContent = ww.value;
+        });
+
+        const wc = document.getElementById("wc");
+        const wcVal = document.getElementById("wc-val");
+        wc.addEventListener("input", () => {
+          viewer.windowCenter = parseFloat(wc.value);
+          wcVal.textContent = wc.value;
+        });
+      } catch (err) {
+        statusEl.textContent = `Could not load volume: ${err.message}`;
+      }
+
+      const downloadBtn = document.getElementById("download-mesh");
+      if (downloadBtn) {
+        downloadBtn.addEventListener("click", async () => {
+          try {
+            const access = await api.meshAccessUrl(volumeId);
+            window.location.href = access.url;
+          } catch (err) {
+            alert(err.message);
+          }
+        });
+      }
+    }
+
+    function escapeHtml(s) {
+      const d = document.createElement("div");
+      d.textContent = s;
+      return d.innerHTML;
+    }
+
+    init();
+  </script>
+</body>
+</html>

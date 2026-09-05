@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Manage volume — Volume Gallery</title>
+<link rel="stylesheet" href="/css/style.css" />
+</head>
+<body>
+  <div class="app-shell" id="shell"></div>
+
+  <script type="module">
+    import { api, requireLogin, getRole, getUsername, renderShell, wireLogout } from "/js/api.js";
+
+    requireLogin();
+    const role = getRole();
+    if (role !== "editor" && role !== "admin") window.location.href = "/index.html";
+
+    const params = new URLSearchParams(window.location.search);
+    const volumeId = params.get("id");
+
+    document.getElementById("shell").innerHTML = `
+      ${renderShell("gallery", role, getUsername())}
+      <main><div id="content"></div></main>
+    `;
+    wireLogout();
+
+    const content = document.getElementById("content");
+
+    async function load() {
+      const [volume, granted, allUsers] = await Promise.all([
+        api.getVolume(volumeId),
+        api.listAccess(volumeId),
+        api.listUsers().catch(() => []), // editors may not have list-users; fall back gracefully
+      ]);
+
+      const grantedIds = new Set(granted.map((u) => u.id));
+      const readerCandidates = allUsers.filter((u) => u.role === "reader" && !grantedIds.has(u.id));
+
+      content.innerHTML = `
+        <h1>${escapeHtml(volume.title)}</h1>
+        <p class="subtitle mono">${escapeHtml(volume.slug)}</p>
+
+        <h2>Reader access</h2>
+        <table>
+          <thead><tr><th>User</th><th></th></tr></thead>
+          <tbody id="granted-body">
+            ${granted
+              .map(
+                (u) => `<tr>
+                  <td>${escapeHtml(u.username)}</td>
+                  <td><button class="danger" data-revoke="${u.id}">Revoke</button></td>
+                </tr>`
+              )
+              .join("") || `<tr><td colspan="2" class="dim">No readers granted yet.</td></tr>`}
+          </tbody>
+        </table>
+
+        ${
+          readerCandidates.length
+            ? `<div class="field" style="margin-top:1em;max-width:320px">
+                <label for="grant-select">Grant access to</label>
+                <div style="display:flex;gap:0.5em">
+                  <select id="grant-select">
+                    ${readerCandidates.map((u) => `<option value="${u.id}">${escapeHtml(u.username)}</option>`).join("")}
+                  </select>
+                  <button id="grant-btn" class="primary">Grant</button>
+                </div>
+              </div>`
+            : `<p class="dim" style="margin-top:1em">${allUsers.length ? "All readers already have access." : "Sign in as admin to see the full user list here."}</p>`
+        }
+
+        <h2 style="margin-top:2em">Mesh</h2>
+        <p class="dim" style="font-size:0.9em">${volume.has_mesh ? escapeHtml(volume.mesh_filename) : "No mesh uploaded."}</p>
+        <input type="file" id="mesh-file" style="max-width:320px" />
+        <button id="mesh-upload-btn" style="margin-top:0.6em">Upload / replace mesh</button>
+
+        <h2 style="margin-top:2em">Danger zone</h2>
+        <button class="danger" id="delete-btn">Delete this volume</button>
+      `;
+
+      content.querySelectorAll("[data-revoke]").forEach((btn) => {
+        btn.addEventListener("click", async () => {
+          await api.revokeAccess(volumeId, btn.dataset.revoke);
+          load();
+        });
+      });
+
+      const grantBtn = document.getElementById("grant-btn");
+      if (grantBtn) {
+        grantBtn.addEventListener("click", async () => {
+          const userId = document.getElementById("grant-select").value;
+          await api.grantAccess(volumeId, userId);
+          load();
+        });
+      }
+
+      document.getElementById("mesh-upload-btn").addEventListener("click", async () => {
+        const file = document.getElementById("mesh-file").files[0];
+        if (!file) return;
+        const fd = new FormData();
+        fd.append("mesh_file", file);
+        await api.uploadMesh(volumeId, fd);
+        load();
+      });
+
+      document.getElementById("delete-btn").addEventListener("click", async () => {
+        if (!confirm(`Delete "${volume.title}"? This removes its files permanently.`)) return;
+        await api.deleteVolume(volumeId);
+        window.location.href = "/index.html";
+      });
+    }
+
+    function escapeHtml(s) {
+      const d = document.createElement("div");
+      d.textContent = s;
+      return d.innerHTML;
+    }
+
+    load();
+  </script>
+</body>
+</html>

@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Gallery — Volume Gallery</title>
+<link rel="stylesheet" href="/css/style.css" />
+</head>
+<body>
+  <div class="app-shell" id="shell"></div>
+
+  <script type="module">
+    import { api, requireLogin, getRole, getUsername, renderShell, wireLogout } from "/js/api.js";
+
+    requireLogin();
+    const role = getRole();
+
+    document.getElementById("shell").innerHTML = `
+      ${renderShell("gallery", role, getUsername())}
+      <main>
+        <div class="toolbar">
+          <div>
+            <h1>Gallery</h1>
+            <p class="subtitle">Volumes you can view.</p>
+          </div>
+        </div>
+        <div id="list"></div>
+      </main>
+    `;
+    wireLogout();
+
+    async function load() {
+      const listEl = document.getElementById("list");
+      let volumes;
+      try {
+        volumes = await api.listVolumes();
+      } catch (err) {
+        listEl.innerHTML = `<div class="error-box">${err.message}</div>`;
+        return;
+      }
+      if (volumes.length === 0) {
+        listEl.innerHTML = `<div class="empty-state">
+          No volumes yet.${role !== "reader" ? " Use \u201cUpload volume\u201d to add one." : " Ask an editor to grant you access."}
+        </div>`;
+        return;
+      }
+      listEl.innerHTML = volumes
+        .map(
+          (v) => `
+        <div class="volume-row">
+          <div class="swatch">CT</div>
+          <div class="meta">
+            <div class="title"><a href="/viewer.html?id=${v.id}">${escapeHtml(v.title)}</a></div>
+            <div class="slug">${escapeHtml(v.slug)}${v.has_mesh ? " · mesh available" : ""}</div>
+          </div>
+          <div class="actions">
+            <a href="/viewer.html?id=${v.id}"><button>Open</button></a>
+            ${
+              role === "admin" || role === "editor"
+                ? `<button data-manage="${v.id}">Manage</button>`
+                : ""
+            }
+          </div>
+        </div>`
+        )
+        .join("");
+
+      listEl.querySelectorAll("[data-manage]").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          window.location.href = `/manage.html?id=${btn.dataset.manage}`;
+        });
+      });
+    }
+
+    function escapeHtml(s) {
+      const d = document.createElement("div");
+      d.textContent = s;
+      return d.innerHTML;
+    }
+
+    load();
+  </script>
+</body>
+</html>

@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Sign in — Volume Gallery</title>
+<link rel="stylesheet" href="/css/style.css" />
+</head>
+<body>
+  <div class="login-shell">
+    <div class="login-box">
+      <h1>Volume Gallery</h1>
+      <p class="subtitle">Sign in to view or manage volumes.</p>
+      <div id="error" style="display:none" class="error-box"></div>
+      <form id="login-form">
+        <div class="field">
+          <label for="username">Username</label>
+          <input id="username" name="username" autocomplete="username" required />
+        </div>
+        <div class="field">
+          <label for="password">Password</label>
+          <input id="password" name="password" type="password" autocomplete="current-password" required />
+        </div>
+        <button type="submit" class="primary" style="width:100%">Sign in</button>
+      </form>
+    </div>
+  </div>
+
+  <script type="module">
+    import { api, setSession, getToken } from "/js/api.js";
+
+    if (getToken()) window.location.href = "/index.html";
+
+    const form = document.getElementById("login-form");
+    const errorBox = document.getElementById("error");
+
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      errorBox.style.display = "none";
+      const username = document.getElementById("username").value.trim();
+      const password = document.getElementById("password").value;
+      try {
+        const data = await api.login(username, password);
+        setSession(data.access_token, data.role, data.username);
+        window.location.href = "/index.html";
+      } catch (err) {
+        errorBox.textContent = err.message;
+        errorBox.style.display = "block";
+      }
+    });
+  </script>
+</body>
+</html>

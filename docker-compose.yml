@@ -1,0 +1,19 @@
+services:
+  volume-gallery:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    image: volume-gallery:latest
+    container_name: volume-gallery
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      VG_SECRET_KEY: ${VG_SECRET_KEY}
+      VG_ADMIN_USER: ${VG_ADMIN_USER:-admin}
+      VG_ADMIN_PASSWORD: ${VG_ADMIN_PASSWORD}
+      VG_ACCESS_TOKEN_MINUTES: ${VG_ACCESS_TOKEN_MINUTES:-480}
+      VG_FILE_TOKEN_MINUTES: ${VG_FILE_TOKEN_MINUTES:-30}
+    volumes:
+      # Point this at a ZFS dataset, e.g. /mnt/tank/apps/volume-gallery/data
+      - ${VG_HOST_DATA_DIR:-./data}:/data

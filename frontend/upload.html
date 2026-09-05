@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Upload volume — Volume Gallery</title>
+<link rel="stylesheet" href="/css/style.css" />
+</head>
+<body>
+  <div class="app-shell" id="shell"></div>
+
+  <script type="module">
+    import { api, requireLogin, getRole, getUsername, renderShell, wireLogout } from "/js/api.js";
+
+    requireLogin();
+    const role = getRole();
+    if (role !== "editor" && role !== "admin") {
+      window.location.href = "/index.html";
+    }
+
+    document.getElementById("shell").innerHTML = `
+      ${renderShell("upload", role, getUsername())}
+      <main>
+        <h1>Upload volume</h1>
+        <p class="subtitle">
+          The OME-Zarr archive must be a .zip containing the .ome.zarr (or .zarr) directory.
+          A mesh file is optional and served separately for download.
+        </p>
+        <div id="error" style="display:none" class="error-box"></div>
+        <form id="form">
+          <div class="field">
+            <label for="slug">Slug (used in URLs, lowercase, no spaces)</label>
+            <input id="slug" required pattern="[a-z0-9][a-z0-9\-_]{1,62}" placeholder="femur-scan-01" />
+          </div>
+          <div class="field">
+            <label for="title">Title</label>
+            <input id="title" required placeholder="Femur scan #01" />
+          </div>
+          <div class="field">
+            <label for="description">Description</label>
+            <input id="description" placeholder="Optional" />
+          </div>
+          <div class="field">
+            <label for="zarr_zip">OME-Zarr archive (.zip)</label>
+            <input id="zarr_zip" type="file" accept=".zip" required />
+          </div>
+          <div class="field">
+            <label for="mesh_file">Mesh file (optional — .stl, .obj, .ply, \u2026)</label>
+            <input id="mesh_file" type="file" />
+          </div>
+          <button type="submit" class="primary">Upload</button>
+        </form>
+      </main>
+    `;
+    wireLogout();
+
+    const form = document.getElementById("form");
+    const errorBox = document.getElementById("error");
+
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      errorBox.style.display = "none";
+      const submitBtn = form.querySelector("button[type=submit]");
+      submitBtn.disabled = true;
+      submitBtn.textContent = "Uploading\u2026";
+
+      const fd = new FormData();
+      fd.append("slug", document.getElementById("slug").value.trim());
+      fd.append("title", document.getElementById("title").value.trim());
+      fd.append("description", document.getElementById("description").value.trim());
+      fd.append("zarr_zip", document.getElementById("zarr_zip").files[0]);
+      const meshFile = document.getElementById("mesh_file").files[0];
+      if (meshFile) fd.append("mesh_file", meshFile);
+
+      try {
+        const volume = await api.createVolume(fd);
+        window.location.href = `/viewer.html?id=${volume.id}`;
+      } catch (err) {
+        errorBox.textContent = err.message;
+        errorBox.style.display = "block";
+        submitBtn.disabled = false;
+        submitBtn.textContent = "Upload";
+      }
+    });
+  </script>
+</body>
+</html>
