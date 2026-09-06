@@ -5,6 +5,40 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Viewer — Volume Gallery</title>
 <link rel="stylesheet" href="/css/style.css" />
+<link rel="stylesheet" href="/vendor/lil-gui/lil-gui.css" />
+<style>
+  /* Dock lil-gui to the canvas instead of the page corner, and reskin it
+     to match the app's palette so it doesn't look like a foreign widget. */
+  .viewer-canvas-wrap .lil-gui.root {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    --background-color: #1c2026;
+    --widget-color: #22262d;
+    --hover-color: #2b3038;
+    --focus-color: #2b3038;
+    --text-color: #e7e5e0;
+    --title-background-color: #22262d;
+    --title-text-color: #e8a33d;
+    --number-color: #e8a33d;
+    --font-size: 11px;
+    --input-font-size: 11px;
+    --widget-height: 18px;
+    --padding: 4px;
+    --spacing: 4px;
+    --widget-padding: 0 4px;
+    --folder-indent: 10px;
+    max-height: calc(100% - 16px);
+    overflow-y: auto;
+  }
+  .stats-readout {
+    font-family: var(--mono);
+    font-size: 0.78em;
+    color: var(--text-dim);
+    line-height: 1.6;
+    white-space: pre-wrap;
+  }
+</style>
 </head>
 <body>
   <div class="app-shell" id="shell"></div>
@@ -12,6 +46,7 @@
   <script type="module">
     import { api, requireLogin, getRole, getUsername, renderShell, wireLogout } from "/js/api.js";
     import { KilnViewer } from "/vendor/kiln-render/lib/kiln-render.js";
+    import GUI from "/vendor/lil-gui/lil-gui.esm.js";
 
     requireLogin();
     const role = getRole();
@@ -27,6 +62,43 @@
     wireLogout();
 
     const content = document.getElementById("content");
+
+    function escapeHtml(s) {
+      const d = document.createElement("div");
+      d.textContent = s;
+      return d.innerHTML;
+    }
+
+    // WebGPU needs a *secure context* (https, or http://localhost) — a plain
+    // http://<lan-ip> origin never exposes navigator.gpu at all, regardless of
+    // browser or flags. This is almost always why "not supported" shows up on
+    // a NAS reached by IP. See the README's HTTPS section for how to fix it.
+    function webgpuStatus() {
+      if (!window.isSecureContext) {
+        const here = window.location.origin;
+        return {
+          ok: false,
+          message:
+            `WebGPU is blocked because this page isn't loaded from a secure origin ` +
+            `(currently ${here}). Browsers only expose WebGPU on https:// or ` +
+            `http://localhost — a plain http://<ip> address doesn't qualify, even ` +
+            `with a supported browser and GPU. Put this app behind HTTPS (see the ` +
+            `README's "HTTPS" section), or for quick LAN testing in Chrome/Edge, ` +
+            `visit chrome://flags/#unsafely-treat-insecure-origin-as-secure, add ` +
+            `${here}, and relaunch the browser.`,
+        };
+      }
+      if (!("gpu" in navigator)) {
+        return {
+          ok: false,
+          message:
+            "This browser doesn't implement WebGPU. Use Chrome/Edge 113+, Safari 26+, " +
+            "or Firefox 141+, and make sure hardware acceleration is enabled in the " +
+            "browser's settings.",
+        };
+      }
+      return { ok: true };
+    }
 
     async function init() {
       if (!volumeId) {
@@ -51,19 +123,8 @@
           </div>
           <div class="viewer-side">
             <div class="panel">
-              <h2>Rendering</h2>
-              <div class="slider-row">
-                <div class="row-label"><span>Density</span><span id="density-val">1.0</span></div>
-                <input type="range" id="density" min="0.1" max="5" step="0.1" value="1.0" />
-              </div>
-              <div class="slider-row">
-                <div class="row-label"><span>Window width</span><span id="ww-val">1.0</span></div>
-                <input type="range" id="ww" min="0.01" max="1" step="0.01" value="1.0" />
-              </div>
-              <div class="slider-row">
-                <div class="row-label"><span>Window center</span><span id="wc-val">0.5</span></div>
-                <input type="range" id="wc" min="0" max="1" step="0.01" value="0.5" />
-              </div>
+              <h2>Stats</h2>
+              <div class="stats-readout" id="stats">\u2014</div>
             </div>
             <div class="panel">
               <h2>Description</h2>
@@ -83,9 +144,14 @@
       `;
 
       const statusEl = document.getElementById("status");
+      const canvasWrap = document.querySelector(".viewer-canvas-wrap");
 
-      if (!("gpu" in navigator)) {
-        statusEl.textContent = "This browser does not support WebGPU. Try a recent Chrome or Edge.";
+      const gpu = webgpuStatus();
+      if (!gpu.ok) {
+        statusEl.textContent = gpu.message;
+        statusEl.style.padding = "1.5em";
+        statusEl.style.textAlign = "left";
+        statusEl.style.lineHeight = "1.5";
         return;
       }
 
@@ -94,27 +160,8 @@
         const canvas = document.getElementById("canvas");
         const viewer = await KilnViewer.create(canvas, access.url);
         statusEl.style.display = "none";
-
-        const density = document.getElementById("density");
-        const densityVal = document.getElementById("density-val");
-        density.addEventListener("input", () => {
-          viewer.renderer.densityScale = parseFloat(density.value);
-          densityVal.textContent = density.value;
-        });
-
-        const ww = document.getElementById("ww");
-        const wwVal = document.getElementById("ww-val");
-        ww.addEventListener("input", () => {
-          viewer.windowWidth = parseFloat(ww.value);
-          wwVal.textContent = ww.value;
-        });
-
-        const wc = document.getElementById("wc");
-        const wcVal = document.getElementById("wc-val");
-        wc.addEventListener("input", () => {
-          viewer.windowCenter = parseFloat(wc.value);
-          wcVal.textContent = wc.value;
-        });
+        buildControlPanel(viewer, canvasWrap);
+        startStatsLoop(viewer);
       } catch (err) {
         statusEl.textContent = `Could not load volume: ${err.message}`;
       }
@@ -132,10 +179,132 @@
       }
     }
 
-    function escapeHtml(s) {
-      const d = document.createElement("div");
-      d.textContent = s;
-      return d.innerHTML;
+    // Mirrors the full control surface of Kiln's own demo app (see the
+    // ViewerOptions / viewer-property list in kiln-render's docs): render
+    // mode, windowing, transfer function, clipping, slice planes, camera and
+    // debug overlays — all as live properties on the viewer/renderer/camera.
+    function buildControlPanel(viewer, container) {
+      const renderer = viewer.renderer;
+      const camera = viewer.camera;
+      const tf = viewer.transferFunction;
+
+      const gui = new GUI({ container, title: "Controls", width: 230 });
+
+      const state = {
+        mode: viewer.mode,
+        tfPreset: tf.preset,
+        upAxis: camera.getUpAxis(),
+        clipMinX: renderer.clipMin[0], clipMinY: renderer.clipMin[1], clipMinZ: renderer.clipMin[2],
+        clipMaxX: renderer.clipMax[0], clipMaxY: renderer.clipMax[1], clipMaxZ: renderer.clipMax[2],
+        resetView: () => { camera.setOrbitState([0, 0, 3]); camera.resetPan(); },
+      };
+
+      const rendering = gui.addFolder("Rendering");
+      rendering
+        .add(state, "mode", ["dvr", "mip", "iso", "lod", "slice", "slice-lod"])
+        .name("Mode")
+        .onChange((v) => { viewer.mode = v; });
+      rendering.add(renderer, "densityScale", 0.1, 5, 0.01).name("Density");
+      rendering.add(viewer, "isoValue", 0, 1, 0.001).name("Iso value");
+      rendering.add(viewer, "renderScale", 0.25, 1, 0.05).name("Render scale");
+      rendering.add(viewer.streamingManager, "maxPixelError", 0.5, 8, 0.1).name("Max px error");
+
+      const windowing = gui.addFolder("Windowing");
+      windowing.add(viewer, "windowCenter", 0, 1, 0.001).name("Center");
+      windowing.add(viewer, "windowWidth", 0, 1, 0.001).name("Width");
+      if (viewer.metadata.isFloat) {
+        windowing.add(viewer, "floatMin").name("Float min");
+        windowing.add(viewer, "floatMax").name("Float max");
+      }
+
+      const transferFn = gui.addFolder("Transfer function");
+      transferFn
+        .add(state, "tfPreset", [
+          "grayscale", "grayscale-inverted", "hot", "cool",
+          "viridis", "plasma", "coolwarm", "seismic",
+        ])
+        .name("Preset")
+        .onChange((v) => {
+          tf.setPreset(v);
+          renderer.markDirty();
+          renderer.resetAccumulation();
+        });
+
+      const clipping = gui.addFolder("Clipping");
+      clipping.close();
+      const applyClip = () => {
+        renderer.clipMin = new Float32Array([state.clipMinX, state.clipMinY, state.clipMinZ]);
+        renderer.clipMax = new Float32Array([state.clipMaxX, state.clipMaxY, state.clipMaxZ]);
+        renderer.markDirty();
+        renderer.resetAccumulation();
+      };
+      ["clipMinX", "clipMinY", "clipMinZ"].forEach((k) =>
+        clipping.add(state, k, 0, 1, 0.001).name(`Min ${k.slice(-1)}`).onChange(applyClip)
+      );
+      ["clipMaxX", "clipMaxY", "clipMaxZ"].forEach((k) =>
+        clipping.add(state, k, 0, 1, 0.001).name(`Max ${k.slice(-1)}`).onChange(applyClip)
+      );
+
+      const slicing = gui.addFolder("Slice planes");
+      slicing.close();
+      slicing.add(renderer, "sliceX", 0, 1, 0.001).name("X position");
+      slicing.add(renderer, "showSliceX").name("Show X");
+      slicing.add(renderer, "sliceY", 0, 1, 0.001).name("Y position");
+      slicing.add(renderer, "showSliceY").name("Show Y");
+      slicing.add(renderer, "sliceZ", 0, 1, 0.001).name("Z position");
+      slicing.add(renderer, "showSliceZ").name("Show Z");
+
+      const cameraFolder = gui.addFolder("Camera");
+      cameraFolder.close();
+      cameraFolder
+        .add(state, "upAxis", ["x", "y", "z", "-x", "-y", "-z"])
+        .name("Up axis")
+        .onChange((v) => camera.setUpAxis(v));
+      cameraFolder.add(state, "resetView").name("Reset view");
+
+      const overlays = gui.addFolder("Overlays");
+      overlays.close();
+      overlays.add(renderer, "showWireframe").name("Wireframe");
+      overlays.add(renderer, "showAxis").name("Axis");
+      overlays.add(renderer, "enableJitter").name("Jitter");
+      overlays.add(renderer, "enableTAA").name("TAA");
+      overlays.add(renderer, "useIndirection").name("Indirection");
+    }
+
+    function startStatsLoop(viewer) {
+      const statsEl = document.getElementById("stats");
+      const meta = viewer.metadata;
+      let frames = 0;
+      let lastFpsTime = performance.now();
+      let fps = 0;
+
+      viewer.onBeforeFrame = () => {
+        frames++;
+        const now = performance.now();
+        if (now - lastFpsTime >= 500) {
+          fps = (frames * 1000) / (now - lastFpsTime);
+          frames = 0;
+          lastFpsTime = now;
+        }
+      };
+
+      function render() {
+        const s = viewer.streamingManager.getStats();
+        const [dx, dy, dz] = meta.dimensions;
+        const mb = (s.totalBytesDownloaded / (1024 * 1024)).toFixed(1);
+        const kbs = (s.bytesPerSecond / 1024).toFixed(0);
+        statsEl.textContent =
+          `fps          ${fps.toFixed(0)}\n` +
+          `dimensions   ${dx}\u00d7${dy}\u00d7${dz}\n` +
+          `bit depth    ${meta.bitDepth}-bit \u00d7 ${meta.numChannels}ch\n` +
+          `lod levels   ${meta.maxLod + 1}\n` +
+          `bricks       ${s.loadedCount}/${s.desiredCount} loaded\n` +
+          `atlas        ${s.atlasUsage}/${s.atlasCapacity}\n` +
+          `downloaded   ${mb} MB (${kbs} KB/s)\n` +
+          (s.timeToFirstRender != null ? `first frame  ${s.timeToFirstRender.toFixed(0)} ms\n` : "");
+        requestAnimationFrame(render);
+      }
+      render();
     }
 
     init();

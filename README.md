@@ -32,8 +32,16 @@ data/       (created at runtime) SQLite DB + one folder per volume
 - kiln-render is vendored into `frontend/vendor/kiln-render` at build time
   from this repo — no CDN or internet access is needed at runtime, which
   matters for an appliance sitting on a NAS.
-- **Requires a browser with WebGPU** (current Chrome or Edge) to view
-  volumes; uploading and user management work in any modern browser.
+- **Requires a browser with WebGPU** (current Chrome/Edge 113+, Safari 26+,
+  Firefox 141+) **loaded over a secure origin** (HTTPS, or `http://localhost`)
+  to view volumes — see "Putting it behind HTTPS" below, this trips people up
+  on a bare LAN IP. Uploading and user management work over plain HTTP in any
+  modern browser.
+- The viewer's control panel mirrors kiln-render's own demo app: render mode
+  (DVR/MIP/ISO/LOD/slice), density/window/iso controls, transfer-function
+  presets, per-axis clipping, slice planes, camera up-axis and reset, debug
+  overlays (wireframe/axis/jitter/TAA/indirection), and a live stats readout
+  (fps, dataset dimensions, LOD/brick/atlas counts, bytes streamed).
 
 ## Preparing volumes to upload
 
@@ -153,12 +161,47 @@ docker compose up -d --build
   disable or delete the bootstrap admin later once you have another admin.
 - Have an editor upload the first volume and grant readers access.
 
-### 5. Putting it behind HTTPS (recommended)
+### 5. Putting it behind HTTPS (required for the viewer, not just recommended)
 
-The app itself serves plain HTTP. If TrueNAS SCALE isn't already fronted by
-a reverse proxy, put one in front of it (Traefik, Nginx Proxy Manager, or
-Caddy — all installable the same way as a Custom App) and terminate TLS
-there. This matters here specifically because JWTs and the signed file
+**This isn't optional the way it sounds.** WebGPU — which kiln-render needs to
+render anything — is only exposed by browsers on a *secure context*:
+`https://`, or `http://localhost`. A plain `http://<lan-ip>:8000` origin never
+gets `navigator.gpu` at all, in any browser, on any GPU. If you open the app
+at its bare TrueNAS IP over HTTP, the viewer page will correctly report that
+WebGPU isn't available — that's not a bug, it's the browser enforcing this
+rule. User management and volume upload work fine over plain HTTP; only the
+in-browser volume viewer needs the secure origin.
+
+Two ways to satisfy it:
+
+**A. Reverse proxy with TLS (recommended for anything beyond quick testing).**
+Put a reverse proxy in front of the app and terminate TLS there — Caddy is
+the least fuss for a home/lab TrueNAS box because it can mint its own
+certificates automatically. Install it the same way as this app (Custom App
+or `docker compose`), pointed at `volume-gallery:8000`, and give it either:
+- a real domain name with public DNS (Caddy gets you a trusted Let's Encrypt
+  cert automatically), or
+- an internal CA / self-signed cert for a `.local`/internal hostname, which
+  works for WebGPU's secure-context check but will show a browser warning
+  you'll need to click through (or install the CA cert on your devices to
+  avoid that).
+
+Minimal example `Caddyfile` if you go the internal-hostname route:
+```
+volume-gallery.home.arpa {
+    reverse_proxy volume-gallery:8000
+    tls internal
+}
+```
+
+**B. Quick LAN testing without setting up TLS at all.** Chrome and Edge let
+you manually mark a specific insecure origin as trusted for local
+development: visit `chrome://flags/#unsafely-treat-insecure-origin-as-secure`,
+add `http://<truenas-ip>:8000`, and relaunch the browser. This only affects
+that one browser profile and is meant for testing — use option A for
+anything other users will rely on.
+
+Beyond WebGPU, HTTPS also matters here because JWTs and the signed file
 tokens are passed as plain bearer tokens / URL query params, and you don't
 want those on the wire unencrypted outside your LAN.
 
