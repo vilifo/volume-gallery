@@ -1,10 +1,12 @@
+import json
 import re
 import shutil
 import zipfile
+from collections import deque
 from pathlib import Path
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Query
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Query, Request
 from fastapi.responses import FileResponse
 from sqlmodel import Session, select
 
@@ -22,6 +24,58 @@ SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-_]{1,62}$")
 
 def _volume_dir(slug: str) -> Path:
     return settings.VOLUMES_DIR / slug
+
+
+def _has_multiscales(attrs: dict) -> bool:
+    """Checks the two shapes OME-NGFF metadata can take: a flat
+    `multiscales` key (v2, and plain v3/v0.4), or one namespaced under
+    `ome` (v0.5's convention for zarr-v3 group attributes)."""
+    if not isinstance(attrs, dict):
+        return False
+    if "multiscales" in attrs:
+        return True
+    ome = attrs.get("ome")
+    return isinstance(ome, dict) and "multiscales" in ome
+
+
+def _read_group_attrs(directory: Path) -> Optional[dict]:
+    """Reads a Zarr group's attributes regardless of v2 (.zattrs) or v3
+    (zarr.json's "attributes" key) layout. Returns None if this directory
+    isn't a Zarr group/array at all."""
+    zattrs = directory / ".zattrs"
+    if zattrs.exists():
+        try:
+            return json.loads(zattrs.read_text())
+        except (json.JSONDecodeError, OSError):
+            return None
+    zarr_json = directory / "zarr.json"
+    if zarr_json.exists():
+        try:
+            data = json.loads(zarr_json.read_text())
+        except (json.JSONDecodeError, OSError):
+            return None
+        return data.get("attributes", {})
+    return None
+
+
+def _find_ome_zarr_root(vol_dir: Path) -> Optional[Path]:
+    """Breadth-first search for the shallowest directory whose Zarr group
+    attributes actually declare OME-NGFF multiscales metadata. BFS (rather
+    than rglob, whose traversal order isn't guaranteed) guarantees we can
+    never mistake a nested per-resolution array for the real multiscale
+    group, since every array in a Zarr v3 store has its own zarr.json too."""
+    queue = deque([vol_dir])
+    while queue:
+        current = queue.popleft()
+        attrs = _read_group_attrs(current)
+        if attrs is not None and _has_multiscales(attrs):
+            return current
+        try:
+            children = sorted(p for p in current.iterdir() if p.is_dir())
+        except OSError:
+            children = []
+        queue.extend(children)
+    return None
 
 
 def _can_see_volume(user: User, volume: Volume, session: Session) -> bool:
@@ -99,17 +153,26 @@ def create_volume(
     finally:
         zip_path.unlink(missing_ok=True)
 
-    # Find the extracted .zarr / .ome.zarr root (top-level dir containing .zattrs / zarr.json)
-    zarr_root = None
-    for candidate in vol_dir.rglob("*"):
-        if candidate.is_dir() and (
-            (candidate / ".zattrs").exists() or (candidate / "zarr.json").exists()
-        ):
-            zarr_root = candidate
-            break
+    # Find the OME-Zarr multiscale group root inside the extracted archive.
+    # In Zarr v3, *every* array and group has its own zarr.json — an array's
+    # zarr.json has no multiscales metadata, only the group above it does —
+    # so "a zarr.json exists here" isn't enough; the file's content has to
+    # actually declare multiscales. We do a shallowest-first (BFS) search so
+    # a nested per-resolution array can never be mistaken for the real root.
+    zarr_root = _find_ome_zarr_root(vol_dir)
     if zarr_root is None:
         shutil.rmtree(vol_dir, ignore_errors=True)
-        raise HTTPException(status_code=400, detail="No OME-Zarr root found in archive")
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "No OME-NGFF multiscales metadata found anywhere in the archive. "
+                "Every zarr.json/.zattrs found lacks a multiscales entry — check "
+                "that the archive contains the multiscale *group* (not just an "
+                "individual resolution-level array), and that it was written "
+                "with OME-NGFF metadata (attributes.multiscales for v2/plain v3, "
+                "or attributes.ome.multiscales for NGFF v0.5)."
+            ),
+        )
 
     mesh_filename = None
     has_mesh = False
@@ -229,14 +292,25 @@ def revoke_access(
 
 @router.get("/{volume_id}/zarr-access-url", response_model=FileAccessUrl)
 def zarr_access_url(
-    volume_id: int, session: Session = Depends(get_session), user: User = Depends(get_current_user)
+    volume_id: int,
+    request: Request,
+    session: Session = Depends(get_session),
+    user: User = Depends(get_current_user),
 ):
     volume = session.get(Volume, volume_id)
     if not volume or not _can_see_volume(user, volume, session):
         raise HTTPException(status_code=404, detail="Volume not found")
     token = create_file_token(subject=user.username, volume_id=volume_id, kind="zarr")
+    # kiln-render's KilnViewer.create() picks its data provider with a plain
+    # `url.includes(".zarr")` check — the path segment below must contain that
+    # literal substring or it silently falls back to its other (incompatible)
+    # provider and fails trying to fetch a manifest file that doesn't exist.
+    # kiln-render's KilnViewer.create() does `new URL(dataset)` internally —
+    # it requires a fully-qualified absolute URL, not a path, so we build one
+    # from the incoming request rather than returning a relative path.
+    base = str(request.base_url).rstrip("/")
     return FileAccessUrl(
-        url=f"/api/volumes/{volume_id}/zarr/{token}/",
+        url=f"{base}/api/volumes/{volume_id}/dataset.ome.zarr/{token}/",
         expires_in_minutes=settings.FILE_TOKEN_EXPIRE_MINUTES,
     )
 
@@ -269,7 +343,7 @@ def _check_file_token(token: str, volume_id: int, kind: str) -> str:
     return payload["sub"]
 
 
-@router.get("/{volume_id}/zarr/{token}/{path:path}")
+@router.get("/{volume_id}/dataset.ome.zarr/{token}/{path:path}")
 def serve_zarr_file(
     volume_id: int, token: str, path: str, session: Session = Depends(get_session)
 ):
@@ -280,9 +354,12 @@ def serve_zarr_file(
     volume = session.get(Volume, volume_id)
     if not volume:
         raise HTTPException(status_code=404, detail="Volume not found")
-    zarr_root = _volume_dir(volume.slug) / volume.zarr_path
-    target = (zarr_root / path).resolve()
-    if not str(target).startswith(str(zarr_root.resolve())):
+    zarr_root = (_volume_dir(volume.slug) / volume.zarr_path).resolve()
+    # Strip any leading slash first: pathlib treats "root / '/x'" as the
+    # absolute path "/x" (discarding root entirely) rather than joining them,
+    # which would otherwise defeat the containment check below.
+    target = (zarr_root / path.lstrip("/")).resolve()
+    if not str(target).startswith(str(zarr_root)):
         raise HTTPException(status_code=400, detail="Invalid path")
     if not target.exists() or not target.is_file():
         raise HTTPException(status_code=404, detail="Not found")

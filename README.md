@@ -194,6 +194,17 @@ volume-gallery.home.arpa {
 }
 ```
 
+One thing to get right when you add a proxy: the backend builds the absolute
+URLs it hands the browser (for streaming zarr data) from the incoming
+request's scheme, so it needs to know the *original* request was HTTPS even
+though the proxy talks to it over plain HTTP internally. The image's `uvicorn`
+already runs with `--proxy-headers`, which trusts a `X-Forwarded-Proto`
+header from the proxy — Caddy's `reverse_proxy` sets this automatically, no
+extra config needed. If you use a different proxy, make sure it forwards
+`X-Forwarded-Proto: https`. Once a proxy is in front, it's also worth
+removing the direct `8000:8000` port mapping in `docker-compose.yml` so the
+app is only reachable through the proxy.
+
 **B. Quick LAN testing without setting up TLS at all.** Chrome and Edge let
 you manually mark a specific insecure origin as trusted for local
 development: visit `chrome://flags/#unsafely-treat-insecure-origin-as-secure`,
