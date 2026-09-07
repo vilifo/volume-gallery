@@ -1,19 +1,46 @@
-services:
-  volume-gallery:
-    build:
-      context: .
-      dockerfile: backend/Dockerfile
-    image: volume-gallery:latest
-    container_name: volume-gallery
-    restart: unless-stopped
-    ports:
-      - "8000:8000"
-    environment:
-      VG_SECRET_KEY: ${VG_SECRET_KEY}
-      VG_ADMIN_USER: ${VG_ADMIN_USER:-admin}
-      VG_ADMIN_PASSWORD: ${VG_ADMIN_PASSWORD}
-      VG_ACCESS_TOKEN_MINUTES: ${VG_ACCESS_TOKEN_MINUTES:-480}
-      VG_FILE_TOKEN_MINUTES: ${VG_FILE_TOKEN_MINUTES:-30}
-    volumes:
-      # Point this at a ZFS dataset, e.g. /mnt/tank/apps/volume-gallery/data
-      - ${VG_HOST_DATA_DIR:-./data}:/data
+{
+  "services": {
+    "volume-gallery": {
+      "build": {
+        "context": ".",
+        "dockerfile": "backend/Dockerfile"
+      },
+      "image": "volume-gallery:latest",
+      "container_name": "volume-gallery",
+      "restart": "unless-stopped",
+      "expose": [
+        "8000"
+      ],
+      "environment": {
+        "VG_SECRET_KEY": "${VG_SECRET_KEY}",
+        "VG_ADMIN_USER": "${VG_ADMIN_USER:-admin}",
+        "VG_ADMIN_PASSWORD": "${VG_ADMIN_PASSWORD}",
+        "VG_ACCESS_TOKEN_MINUTES": "${VG_ACCESS_TOKEN_MINUTES:-480}",
+        "VG_FILE_TOKEN_MINUTES": "${VG_FILE_TOKEN_MINUTES:-30}"
+      },
+      "volumes": [
+        "${VG_HOST_DATA_DIR:-./data}:/data"
+      ]
+    },
+    "nginx": {
+      "image": "nginx:1.27-alpine",
+      "container_name": "volume-gallery-nginx",
+      "restart": "unless-stopped",
+      "depends_on": [
+        "volume-gallery"
+      ],
+      "ports": [
+        "8080:80",
+        "${VG_HTTPS_PORT:-8443}:443"
+      ],
+      "environment": {
+        "VG_HTTPS_PORT": "${VG_HTTPS_PORT:-8443}",
+        "NGINX_ENVSUBST_OUTPUT_DIR": "/etc/nginx"
+        },
+      "volumes": [
+        "./nginx/nginx.conf.template:/etc/nginx/templates/nginx.conf.template:ro",
+        "./nginx/certs:/etc/nginx/certs:ro"
+      ]
+    }
+  }
+}

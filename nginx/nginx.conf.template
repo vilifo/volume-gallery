@@ -1,0 +1,61 @@
+events {
+    worker_connections 1024;
+}
+ 
+http {
+    include       mime.types;
+    default_type  application/octet-stream;
+    sendfile      on;
+ 
+    # OME-Zarr/TIFF-stack archives can be large — don't cap upload size.
+    client_max_body_size 0;
+ 
+    # TIFF-stack conversion (see backend/app/tiff_convert.py) runs
+    # synchronously inside the upload request and can take a while for
+    # large stacks, so give it generous timeouts rather than nginx's
+    # 60s defaults.
+    proxy_read_timeout 600s;
+    proxy_send_timeout 600s;
+    client_body_timeout 600s;
+ 
+    # Plain HTTP just redirects to HTTPS. WebGPU (needed by the volume
+    # viewer) refuses to run outside a secure context, so there's no
+    # reason to ever serve the app itself over http://.
+    #
+    # IPv4 only by default — add "listen [::]:80;" / "listen [::]:443 ssl;"
+    # below if your Docker host has IPv6 enabled and you need LAN IPv6
+    # access; some Docker hosts (including some TrueNAS SCALE setups) don't
+    # have it enabled, and nginx fails to start entirely if told to bind an
+    # address family the host doesn't support
+
+	# HTTP block
+	server {
+		listen 80;
+		server_name _;
+		return 301 https://$host:${VG_HTTPS_PORT}$request_uri;
+	}
+
+	# HTTPS block
+	server {
+		listen 443 ssl;
+		server_name _;
+
+		ssl_certificate     /etc/nginx/certs/fullchain.pem;
+		ssl_certificate_key /etc/nginx/certs/privkey.pem;
+		ssl_protocols       TLSv1.2 TLSv1.3;
+		ssl_ciphers         HIGH:!aNULL:!MD5;
+		ssl_prefer_server_ciphers on;
+
+		location / {
+			proxy_pass http://volume-gallery:8000;
+			proxy_http_version 1.1;
+			
+			proxy_set_header Host $host:${VG_HTTPS_PORT};
+			
+			proxy_set_header X-Real-IP $remote_addr;
+			proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+			proxy_set_header X-Forwarded-Proto https;
+			proxy_set_header X-Forwarded-Port ${VG_HTTPS_PORT};
+		}
+	}
+}
