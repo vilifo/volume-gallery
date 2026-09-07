@@ -16,10 +16,11 @@ from ..schemas import VolumeRead, VolumeAccessGrant, FileAccessUrl, UserRead
 from ..deps import get_current_user, require_editor, require_admin
 from ..security import create_file_token, decode_token
 from ..config import settings
+from ..tiff_convert import convert_tiff_stack_to_ome_zarr
 
 router = APIRouter(prefix="/api/volumes", tags=["volumes"])
 
-SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-_]{1,62}$")
+SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{1,62}$")
 
 
 def _volume_dir(slug: str) -> Path:
@@ -127,52 +128,39 @@ def create_volume(
     slug: str = Form(...),
     title: str = Form(...),
     description: str = Form(""),
-    zarr_zip: UploadFile = File(..., description="Zip archive containing the .ome.zarr directory"),
+    zarr_zip: Optional[UploadFile] = File(
+        None, description="Zip archive containing the .ome.zarr directory"
+    ),
+    tiff_zip: Optional[UploadFile] = File(
+        None, description="Zip archive of a flat .tif/.tiff slice stack, converted to OME-Zarr on upload"
+    ),
     mesh_file: Optional[UploadFile] = File(None),
     session: Session = Depends(get_session),
     editor: User = Depends(require_editor),
 ):
     if not SLUG_RE.match(slug):
         raise HTTPException(status_code=400, detail="Slug must be lowercase alphanumeric/-/_ (2-63 chars)")
+    if zarr_zip is None and tiff_zip is None:
+        raise HTTPException(status_code=400, detail="Provide either zarr_zip or tiff_zip")
+    if zarr_zip is not None and tiff_zip is not None:
+        raise HTTPException(status_code=400, detail="Provide only one of zarr_zip or tiff_zip, not both")
     if session.exec(select(Volume).where(Volume.slug == slug)).first():
         raise HTTPException(status_code=409, detail="A volume with this slug already exists")
 
     vol_dir = _volume_dir(slug)
     vol_dir.mkdir(parents=True, exist_ok=False)
 
-    # Extract the OME-Zarr archive
-    zip_path = vol_dir / "_upload.zip"
-    with open(zip_path, "wb") as f:
-        shutil.copyfileobj(zarr_zip.file, f)
     try:
-        with zipfile.ZipFile(zip_path) as zf:
-            zf.extractall(vol_dir)
-    except zipfile.BadZipFile:
+        if zarr_zip is not None:
+            zarr_root = _extract_zarr_zip(zarr_zip, vol_dir)
+        else:
+            zarr_root = _convert_tiff_zip(tiff_zip, vol_dir)
+    except HTTPException:
         shutil.rmtree(vol_dir, ignore_errors=True)
-        raise HTTPException(status_code=400, detail="zarr_zip is not a valid zip file")
-    finally:
-        zip_path.unlink(missing_ok=True)
-
-    # Find the OME-Zarr multiscale group root inside the extracted archive.
-    # In Zarr v3, *every* array and group has its own zarr.json — an array's
-    # zarr.json has no multiscales metadata, only the group above it does —
-    # so "a zarr.json exists here" isn't enough; the file's content has to
-    # actually declare multiscales. We do a shallowest-first (BFS) search so
-    # a nested per-resolution array can never be mistaken for the real root.
-    zarr_root = _find_ome_zarr_root(vol_dir)
-    if zarr_root is None:
+        raise
+    except Exception as exc:  # noqa: BLE001 - surface conversion errors to the caller
         shutil.rmtree(vol_dir, ignore_errors=True)
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "No OME-NGFF multiscales metadata found anywhere in the archive. "
-                "Every zarr.json/.zattrs found lacks a multiscales entry — check "
-                "that the archive contains the multiscale *group* (not just an "
-                "individual resolution-level array), and that it was written "
-                "with OME-NGFF metadata (attributes.multiscales for v2/plain v3, "
-                "or attributes.ome.multiscales for NGFF v0.5)."
-            ),
-        )
+        raise HTTPException(status_code=400, detail=f"Could not process upload: {exc}")
 
     mesh_filename = None
     has_mesh = False
@@ -195,6 +183,97 @@ def create_volume(
     session.commit()
     session.refresh(volume)
     return _volume_read(volume)
+
+
+def _extract_zarr_zip(zarr_zip: UploadFile, vol_dir: Path) -> Path:
+    """Extracts an uploaded OME-Zarr .zip into vol_dir and locates its
+    multiscale group root (see _find_ome_zarr_root for why presence of a
+    zarr.json/.zattrs file alone isn't sufficient)."""
+    zip_path = vol_dir / "_upload.zip"
+    with open(zip_path, "wb") as f:
+        shutil.copyfileobj(zarr_zip.file, f)
+    try:
+        with zipfile.ZipFile(zip_path) as zf:
+            zf.extractall(vol_dir)
+    except zipfile.BadZipFile:
+        raise HTTPException(status_code=400, detail="zarr_zip is not a valid zip file")
+    finally:
+        zip_path.unlink(missing_ok=True)
+
+    zarr_root = _find_ome_zarr_root(vol_dir)
+    if zarr_root is None:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "No OME-NGFF multiscales metadata found anywhere in the archive. "
+                "Every zarr.json/.zattrs found lacks a multiscales entry — check "
+                "that the archive contains the multiscale *group* (not just an "
+                "individual resolution-level array), and that it was written "
+                "with OME-NGFF metadata (attributes.multiscales for v2/plain v3, "
+                "or attributes.ome.multiscales for NGFF v0.5)."
+            ),
+        )
+    return zarr_root
+
+
+def _convert_tiff_zip(tiff_zip: UploadFile, vol_dir: Path) -> Path:
+    """Extracts an uploaded TIFF-stack .zip into a scratch directory, converts
+    it to OME-Zarr under vol_dir, then deletes the extracted TIFF files —
+    only the converted OME-Zarr store is kept on disk afterward."""
+    scratch_dir = vol_dir / "_tiff_import"
+    scratch_dir.mkdir()
+    zip_path = vol_dir / "_upload.zip"
+    with open(zip_path, "wb") as f:
+        shutil.copyfileobj(tiff_zip.file, f)
+    try:
+        with zipfile.ZipFile(zip_path) as zf:
+            zf.extractall(scratch_dir)
+    except zipfile.BadZipFile:
+        raise HTTPException(status_code=400, detail="tiff_zip is not a valid zip file")
+    finally:
+        zip_path.unlink(missing_ok=True)
+
+    # Slices may be nested in a subfolder inside the zip rather than at its
+    # top level (e.g. a zip of "scan/slice_0001.tif" instead of
+    # "slice_0001.tif") — search shallowest-first for the folder that
+    # actually contains the .tif files, same rationale as _find_ome_zarr_root.
+    tiff_source_dir = _find_tiff_dir(scratch_dir)
+    if tiff_source_dir is None:
+        raise HTTPException(status_code=400, detail="No .tif/.tiff files found in tiff_zip")
+
+    zarr_dir = vol_dir / "data.ome.zarr"
+    try:
+        convert_tiff_stack_to_ome_zarr(tiff_source_dir, zarr_dir)
+    finally:
+        # Only the converted OME-Zarr store is kept — the source TIFFs are
+        # deleted whether conversion succeeded or failed.
+        shutil.rmtree(scratch_dir, ignore_errors=True)
+
+    zarr_root = _find_ome_zarr_root(vol_dir)
+    if zarr_root is None:
+        # Shouldn't happen — write_image() always emits multiscales metadata —
+        # but don't silently accept a store our own viewer couldn't load.
+        raise HTTPException(
+            status_code=500,
+            detail="TIFF conversion completed but produced no readable OME-NGFF metadata",
+        )
+    return zarr_root
+
+
+def _find_tiff_dir(scratch_dir: Path) -> Optional[Path]:
+    """Breadth-first search for the shallowest directory containing at least
+    one .tif/.tiff file."""
+    queue = deque([scratch_dir])
+    while queue:
+        current = queue.popleft()
+        try:
+            entries = list(current.iterdir())
+        except OSError:
+            continue
+        if any(p.is_file() and p.suffix.lower() in (".tif", ".tiff") for p in entries):
+            return current
+        queue.extend(sorted(p for p in entries if p.is_dir()))
+    return None
 
 
 @router.post("/{volume_id}/mesh", response_model=VolumeRead)

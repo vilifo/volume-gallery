@@ -5,58 +5,327 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Viewer — Volume Gallery</title>
 <link rel="stylesheet" href="/css/style.css" />
-<link rel="stylesheet" href="/vendor/lil-gui/lil-gui.css" />
 <style>
-  /* Dock lil-gui to the canvas instead of the page corner, and reskin it
-     to match the app's palette so it doesn't look like a foreign widget. */
-  .viewer-canvas-wrap .lil-gui.lil-root {
-    position: absolute;
-    top: 8px;
-    right: 8px;
-    --background-color: #1c2026;
-    --widget-color: #22262d;
-    --hover-color: #2b3038;
-    --focus-color: #2b3038;
-    --text-color: #e7e5e0;
-    --title-background-color: #22262d;
-    --title-text-color: #e8a33d;
-    --number-color: #e8a33d;
-    --font-size: 11px;
-    --input-font-size: 11px;
-    --widget-height: 18px;
-    --padding: 4px;
-    --spacing: 4px;
-    --widget-padding: 0 4px;
-    --folder-indent: 10px;
-    max-height: calc(100% - 16px);
-    overflow-y: auto;
+  /* This page trades the app's normal padded/max-width main column for an
+     edge-to-edge canvas — the render is the point of the page, everything
+     else (nav rail aside) should get out of its way. */
+  body.viewer-page { overflow: hidden; }
+  body.viewer-page .app-shell { height: 100vh; }
+  body.viewer-page main {
+    padding: 0;
+    max-width: none;
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    overflow: hidden;
   }
-  .stats-readout {
-    font-family: var(--mono);
-    font-size: 0.78em;
+
+  .viewer-topbar {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 1.5em;
+    padding: 0.9em 1.4em;
+    border-bottom: 1px solid var(--line);
+    flex-shrink: 0;
+    background: var(--panel);
+  }
+  .viewer-topbar .viewer-titles { min-width: 0; }
+  .viewer-topbar h1 {
+    font-size: 1.1em;
+    margin: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .viewer-topbar .viewer-desc {
+    font-size: 0.83em;
     color: var(--text-dim);
-    line-height: 1.6;
+    margin-top: 0.2em;
+    max-width: 60ch;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .viewer-topbar-actions { display: flex; gap: 0.6em; flex-shrink: 0; }
+
+  .icon-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5em;
+    padding: 0.5em 0.9em;
+    white-space: nowrap;
+  }
+  .icon-btn svg { width: 14px; height: 14px; flex-shrink: 0; }
+
+  .viewer-canvas-wrap {
+    flex: 1;
+    min-height: 0;
+    background: #000;
+    position: relative;
+    overflow: hidden;
+  }
+  .viewer-canvas-wrap canvas { width: 100%; height: 100%; display: block; }
+  /* When the canvas wrap itself is the fullscreen element, it should still
+     behave like a normal fill-the-box layout rather than picking up any
+     browser UA default fullscreen centering. */
+  .viewer-canvas-wrap:fullscreen { width: 100vw; height: 100vh; }
+
+  .viewer-status {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--text-dim);
+    font-family: var(--mono);
+    font-size: 0.85em;
+    background: rgba(0, 0, 0, 0.6);
+    padding: 1.5em;
+    text-align: left;
+    line-height: 1.5;
+  }
+
+  /* --- Custom control panel (mirrors kilnrender.com's own widget design):
+     a floating HUD-style card with a segmented mode switch, a swap region
+     for mode-dependent controls (transfer function / windowing / density),
+     and two collapsible sections for scene and advanced settings. --- */
+  .ctl-panel {
+    position: absolute;
+    top: 12px;
+    right: 12px;
+    width: 260px;
+    max-height: calc(100% - 24px);
+    display: flex;
+    flex-direction: column;
+    background: rgba(26, 29, 35, 0.92);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    border-radius: 10px;
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.05);
+    color: var(--text);
+    font-size: 12px;
+    overflow: hidden;
+  }
+  .ctl-panel-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+    background: rgba(20, 23, 28, 0.95);
+    border: none;
+    color: var(--accent);
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    font-size: 12px;
+    padding: 0.7em 0.9em;
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+  .ctl-panel-arrow { transition: transform 0.15s ease; flex-shrink: 0; }
+  .ctl-panel[data-collapsed="true"] .ctl-panel-arrow { transform: rotate(-90deg); }
+  .ctl-panel[data-collapsed="true"] .ctl-panel-body { display: none; }
+  .ctl-panel-body { padding: 0.85em; overflow-y: auto; }
+  .ctl-panel-body::-webkit-scrollbar { width: 6px; }
+  .ctl-panel-body::-webkit-scrollbar-track { background: transparent; }
+  .ctl-panel-body::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.15); border-radius: 3px; }
+
+  .ctl-segmented {
+    display: flex;
+    background: rgba(255, 255, 255, 0.05);
+    border-radius: 6px;
+    padding: 2px;
+    margin-bottom: 0.9em;
+  }
+  .ctl-segment {
+    flex: 1;
+    background: transparent;
+    border: none;
+    color: var(--text-dim);
+    padding: 0.45em 0;
+    border-radius: 5px;
+    font-size: 11px;
+    cursor: pointer;
+  }
+  .ctl-segment.active { background: var(--accent); color: #1a1400; font-weight: 600; }
+  .ctl-segment:not(.active):hover { color: var(--text); background: rgba(255, 255, 255, 0.06); }
+
+  .ctl-select-row { display: flex; align-items: center; justify-content: space-between; gap: 0.6em; margin-bottom: 0.7em; }
+  .ctl-row-label { color: var(--text-dim); font-size: 11px; flex-shrink: 0; }
+  .ctl-select-input {
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 4px;
+    color: var(--text);
+    font-size: 11px;
+    padding: 0.3em 0.4em;
+    flex: 1;
+    min-width: 0;
+  }
+
+  .ctl-tf-canvas-container {
+    position: relative;
+    margin-bottom: 0.9em;
+    border-radius: 6px;
+    overflow: hidden;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+  }
+  .ctl-tf-canvas { display: block; width: 100%; height: 80px; cursor: crosshair; background: #000; }
+  .ctl-tf-help { font-size: 9.5px; color: var(--text-dim); text-align: center; padding: 0.3em 0; background: rgba(0, 0, 0, 0.3); }
+
+  .ctl-slider-row { display: flex; align-items: center; gap: 0.6em; margin-bottom: 0.7em; }
+  .ctl-slider-label { width: 62px; flex-shrink: 0; color: var(--text-dim); font-size: 11px; }
+  .ctl-slider-track { position: relative; flex: 1; height: 4px; background: rgba(255, 255, 255, 0.1); border-radius: 2px; }
+  .ctl-slider-fill { position: absolute; top: 0; left: 0; height: 100%; background: var(--accent); border-radius: 2px; pointer-events: none; }
+  .ctl-slider-input {
+    position: absolute;
+    top: -6px;
+    left: 0;
+    width: 100%;
+    height: 16px;
+    margin: 0;
+    -webkit-appearance: none;
+    appearance: none;
+    background: transparent;
+    cursor: pointer;
+  }
+  .ctl-slider-input::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    width: 12px; height: 12px;
+    border-radius: 50%;
+    background: var(--accent);
+    border: 2px solid #14171c;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
+  }
+  .ctl-slider-input::-moz-range-thumb {
+    width: 12px; height: 12px;
+    border-radius: 50%;
+    background: var(--accent);
+    border: 2px solid #14171c;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
+  }
+  .ctl-slider-input::-moz-range-track { background: transparent; }
+  .ctl-row-value { width: 42px; flex-shrink: 0; text-align: right; color: var(--text-dim); font-size: 10.5px; }
+  .ctl-mono { font-family: var(--mono); }
+
+  .ctl-range-track { position: relative; flex: 1; height: 4px; background: rgba(255, 255, 255, 0.1); border-radius: 2px; }
+  .ctl-range-fill { position: absolute; top: 0; height: 100%; background: var(--accent); border-radius: 2px; pointer-events: none; }
+  .ctl-range-input {
+    position: absolute;
+    top: -6px;
+    left: 0;
+    width: 100%;
+    height: 16px;
+    margin: 0;
+    -webkit-appearance: none;
+    appearance: none;
+    background: transparent;
+    pointer-events: none;
+  }
+  .ctl-range-input::-webkit-slider-thumb {
+    pointer-events: auto;
+    -webkit-appearance: none;
+    width: 12px; height: 12px;
+    border-radius: 50%;
+    background: var(--accent);
+    border: 2px solid #14171c;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
+    cursor: pointer;
+  }
+  .ctl-range-input::-moz-range-thumb {
+    pointer-events: auto;
+    width: 12px; height: 12px;
+    border-radius: 50%;
+    background: var(--accent);
+    border: 2px solid #14171c;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
+    cursor: pointer;
+  }
+  .ctl-range-input::-moz-range-track { background: transparent; }
+
+  .ctl-toggle-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.7em; cursor: pointer; }
+  .ctl-toggle-row.disabled { cursor: not-allowed; opacity: 0.55; }
+  .ctl-toggle-label { font-size: 11px; color: var(--text-dim); }
+  .ctl-toggle-input { position: absolute; opacity: 0; width: 0; height: 0; }
+  .ctl-toggle-track {
+    position: relative;
+    width: 30px; height: 16px;
+    background: rgba(255, 255, 255, 0.12);
+    border-radius: 8px;
+    transition: background 0.15s ease;
+    flex-shrink: 0;
+  }
+  .ctl-toggle-track::after {
+    content: "";
+    position: absolute;
+    top: 2px; left: 2px;
+    width: 12px; height: 12px;
+    border-radius: 50%;
+    background: var(--text-dim);
+    transition: transform 0.15s ease, background 0.15s ease;
+  }
+  .ctl-toggle-input:checked + .ctl-toggle-track { background: rgba(232, 163, 61, 0.35); }
+  .ctl-toggle-input:checked + .ctl-toggle-track::after { transform: translateX(14px); background: var(--accent); }
+
+  .ctl-collapsible { border-top: 1px solid rgba(255, 255, 255, 0.06); margin-top: 0.4em; padding-top: 0.4em; }
+  .ctl-collapsible-header {
+    display: flex; align-items: center; gap: 0.4em;
+    background: none; border: none;
+    padding: 0.4em 0;
+    cursor: pointer;
+    width: 100%;
+  }
+  .ctl-collapsible-arrow { color: var(--text-dim); transition: transform 0.15s ease; flex-shrink: 0; }
+  .ctl-collapsible.open .ctl-collapsible-arrow { transform: rotate(90deg); }
+  .ctl-eyebrow { text-transform: uppercase; font-size: 10px; letter-spacing: 0.08em; color: var(--text-dim); font-weight: 600; }
+  .ctl-collapsible-body { display: none; padding-top: 0.5em; }
+  .ctl-collapsible.open .ctl-collapsible-body { display: block; }
+
+  .viewer-stats-hud {
+    position: absolute;
+    left: 12px;
+    bottom: 12px;
+    background: rgba(26, 29, 35, 0.85);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    border-radius: 10px;
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.4), 0 0 0 1px rgba(255, 255, 255, 0.05);
+    padding: 0.8em 1em;
+    font-family: var(--mono);
+    font-size: 0.72em;
+    color: var(--text-dim);
+    line-height: 1.65;
     white-space: pre-wrap;
+    pointer-events: none;
+  }
+
+  @media (max-width: 700px) {
+    .viewer-topbar { flex-wrap: wrap; }
+    .icon-btn .icon-btn-label { display: none; }
+    .viewer-stats-hud { font-size: 0.65em; }
   }
 </style>
 </head>
-<body>
+<body class="viewer-page">
   <div class="app-shell" id="shell"></div>
 
   <script type="module">
     import { api, requireLogin, getRole, getUsername, renderShell, wireLogout } from "/js/api.js";
     import { KilnViewer } from "/vendor/kiln-render/lib/kiln-render.js";
-    import GUI from "/vendor/lil-gui/lil-gui.esm.js";
 
     requireLogin();
     const role = getRole();
     const params = new URLSearchParams(window.location.search);
     const volumeId = params.get("id");
 
+    const EXPAND_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M21 16v3a2 2 0 0 1-2 2h-3M3 16v3a2 2 0 0 0 2 2h3"/></svg>`;
+    const COLLAPSE_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3v3a2 2 0 0 1-2 2H4M15 3v3a2 2 0 0 0 2 2h3M4 16h3a2 2 0 0 1 2 2v3M20 16h-3a2 2 0 0 0-2 2v3"/></svg>`;
+    const DOWNLOAD_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0-4-4m4 4 4-4M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>`;
+
     document.getElementById("shell").innerHTML = `
       ${renderShell("gallery", role, getUsername())}
       <main>
-        <div id="content"></div>
+        <div id="content" style="display:flex; flex-direction:column; height:100%;"></div>
       </main>
     `;
     wireLogout();
@@ -69,10 +338,6 @@
       return d.innerHTML;
     }
 
-    // WebGPU needs a *secure context* (https, or http://localhost) — a plain
-    // http://<lan-ip> origin never exposes navigator.gpu at all, regardless of
-    // browser or flags. This is almost always why "not supported" shows up on
-    // a NAS reached by IP. See the README's HTTPS section for how to fix it.
     function webgpuStatus() {
       if (!window.isSecureContext) {
         const here = window.location.origin;
@@ -102,56 +367,59 @@
 
     async function init() {
       if (!volumeId) {
-        content.innerHTML = `<div class="error-box">No volume specified.</div>`;
+        content.innerHTML = `<div class="error-box" style="margin:1.4em">No volume specified.</div>`;
         return;
       }
       let volume;
       try {
         volume = await api.getVolume(volumeId);
       } catch (err) {
-        content.innerHTML = `<div class="error-box">${err.message}</div>`;
+        content.innerHTML = `<div class="error-box" style="margin:1.4em">${err.message}</div>`;
         return;
       }
 
       content.innerHTML = `
-        <h1>${escapeHtml(volume.title)}</h1>
-        <p class="subtitle mono">${escapeHtml(volume.slug)}</p>
-        <div class="viewer-layout">
-          <div class="viewer-canvas-wrap">
-            <canvas id="canvas"></canvas>
-            <div class="viewer-status" id="status">Requesting WebGPU device\u2026</div>
+        <div class="viewer-topbar">
+          <div class="viewer-titles">
+            <h1>${escapeHtml(volume.title)}</h1>
+            ${volume.description ? `<div class="viewer-desc">${escapeHtml(volume.description)}</div>` : ""}
           </div>
-          <div class="viewer-side">
-            <div class="panel">
-              <h2>Stats</h2>
-              <div class="stats-readout" id="stats">\u2014</div>
-            </div>
-            <div class="panel">
-              <h2>Description</h2>
-              <p class="dim" style="font-size:0.9em">${escapeHtml(volume.description || "\u2014")}</p>
-            </div>
-            <div class="panel">
-              <h2>Mesh</h2>
-              ${
-                volume.has_mesh
-                  ? `<button id="download-mesh" class="primary" style="width:100%">Download mesh</button>
-                     <p class="dim mono" style="font-size:0.8em;margin-top:0.6em">${escapeHtml(volume.mesh_filename)}</p>`
-                  : `<p class="dim" style="font-size:0.9em">No mesh for this volume.</p>`
-              }
-            </div>
+          <div class="viewer-topbar-actions">
+            ${
+              volume.has_mesh
+                ? `<button id="download-mesh" class="icon-btn">${DOWNLOAD_ICON}<span class="icon-btn-label">Download mesh</span></button>`
+                : ""
+            }
+            <button id="fullscreen-btn" class="icon-btn primary">${EXPAND_ICON}<span class="icon-btn-label">Fullscreen</span></button>
           </div>
+        </div>
+        <div class="viewer-canvas-wrap" id="canvas-wrap">
+          <canvas id="canvas"></canvas>
+          <div class="viewer-status" id="status">Requesting WebGPU device\u2026</div>
         </div>
       `;
 
       const statusEl = document.getElementById("status");
-      const canvasWrap = document.querySelector(".viewer-canvas-wrap");
+      const canvasWrap = document.getElementById("canvas-wrap");
+
+      const fullscreenBtn = document.getElementById("fullscreen-btn");
+      fullscreenBtn.addEventListener("click", () => {
+        if (document.fullscreenElement) {
+          document.exitFullscreen();
+        } else {
+          canvasWrap.requestFullscreen().catch((err) => alert(`Couldn't enter fullscreen: ${err.message}`));
+        }
+      });
+      document.addEventListener("fullscreenchange", () => {
+        const isFull = document.fullscreenElement === canvasWrap;
+        fullscreenBtn.innerHTML = isFull
+          ? `${COLLAPSE_ICON}<span class="icon-btn-label">Exit fullscreen</span>`
+          : `${EXPAND_ICON}<span class="icon-btn-label">Fullscreen</span>`;
+      });
 
       const gpu = webgpuStatus();
       if (!gpu.ok) {
         statusEl.textContent = gpu.message;
-        statusEl.style.padding = "1.5em";
-        statusEl.style.textAlign = "left";
-        statusEl.style.lineHeight = "1.5";
         return;
       }
 
@@ -161,9 +429,10 @@
         const viewer = await KilnViewer.create(canvas, access.url);
         statusEl.style.display = "none";
         buildControlPanel(viewer, canvasWrap);
-        startStatsLoop(viewer);
+        startStatsLoop(viewer, canvasWrap);
       } catch (err) {
         statusEl.textContent = `Could not load volume: ${err.message}`;
+        statusEl.style.display = "flex";
       }
 
       const downloadBtn = document.getElementById("download-mesh");
@@ -179,100 +448,428 @@
       }
     }
 
-    // Mirrors the full control surface of Kiln's own demo app (see the
-    // ViewerOptions / viewer-property list in kiln-render's docs): render
-    // mode, windowing, transfer function, clipping, slice planes, camera and
-    // debug overlays — all as live properties on the viewer/renderer/camera.
+    // Mirrors kilnrender.com's own control panel: a segmented mode switch,
+    // a "swap region" whose contents depend on the selected mode (transfer
+    // function + windowing + density for DVR, just windowing for MIP/Slice,
+    // windowing + iso value for ISO), a collapsible Scene section (up axis,
+    // wireframe/axis overlays, per-axis clip range in voxel coordinates),
+    // and a collapsible Advanced section (render scale, LOD/jitter/TAA/
+    // indirection toggles).
     function buildControlPanel(viewer, container) {
       const renderer = viewer.renderer;
       const camera = viewer.camera;
       const tf = viewer.transferFunction;
-
-      const gui = new GUI({ container, title: "Controls", width: 230 });
+      const [dimX, dimY, dimZ] = viewer.metadata.dimensions;
 
       const state = {
-        mode: viewer.mode,
+        mode: ["dvr", "mip", "iso", "slice"].includes(viewer.mode) ? viewer.mode : "dvr",
+        lod: viewer.mode === "lod" || viewer.mode === "slice-lod",
         tfPreset: tf.preset,
         upAxis: camera.getUpAxis(),
-        clipMinX: renderer.clipMin[0], clipMinY: renderer.clipMin[1], clipMinZ: renderer.clipMin[2],
-        clipMaxX: renderer.clipMax[0], clipMaxY: renderer.clipMax[1], clipMaxZ: renderer.clipMax[2],
-        resetView: () => { camera.setOrbitState([0, 0, 3]); camera.resetPan(); },
+        clipMinX: Math.round(renderer.clipMin[0] * dimX),
+        clipMinY: Math.round(renderer.clipMin[1] * dimY),
+        clipMinZ: Math.round(renderer.clipMin[2] * dimZ),
+        clipMaxX: Math.round(renderer.clipMax[0] * dimX) || dimX,
+        clipMaxY: Math.round(renderer.clipMax[1] * dimY) || dimY,
+        clipMaxZ: Math.round(renderer.clipMax[2] * dimZ) || dimZ,
       };
 
-      const rendering = gui.addFolder("Rendering");
-      rendering
-        .add(state, "mode", ["dvr", "mip", "iso", "lod", "slice", "slice-lod"])
-        .name("Mode")
-        .onChange((v) => { viewer.mode = v; });
-      rendering.add(renderer, "densityScale", 0.1, 5, 0.01).name("Density");
-      rendering.add(viewer, "isoValue", 0, 1, 0.001).name("Iso value");
-      rendering.add(viewer, "renderScale", 0.25, 1, 0.05).name("Render scale");
-      rendering.add(viewer.streamingManager, "maxPixelError", 0.5, 8, 0.1).name("Max px error");
+      function effectiveMode() {
+        if (state.lod && state.mode === "dvr") return "lod";
+        if (state.lod && state.mode === "slice") return "slice-lod";
+        return state.mode; // MIP/ISO have no LOD-streaming variant
+      }
+      function applyMode() { viewer.mode = effectiveMode(); }
 
-      const windowing = gui.addFolder("Windowing");
-      windowing.add(viewer, "windowCenter", 0, 1, 0.001).name("Center");
-      windowing.add(viewer, "windowWidth", 0, 1, 0.001).name("Width");
-      if (viewer.metadata.isFloat) {
-        windowing.add(viewer, "floatMin").name("Float min");
-        windowing.add(viewer, "floatMax").name("Float max");
+      const arrowSvg = `<svg class="ctl-panel-arrow" viewBox="0 0 8 8" width="8" height="8"><path d="M2 0l4 4-4 4z" fill="currentColor"/></svg>`;
+
+      const panel = document.createElement("div");
+      panel.className = "ctl-panel";
+      panel.innerHTML = `
+        <button type="button" class="ctl-panel-header" aria-expanded="true">
+          <span>Controls</span>${arrowSvg}
+        </button>
+        <div class="ctl-panel-body">
+          <div class="ctl-segmented" data-role="mode-segmented">
+            ${["dvr", "mip", "iso", "slice"].map((m) => `
+              <button type="button" class="ctl-segment${state.mode === m ? " active" : ""}" data-mode="${m}">
+                ${m === "dvr" ? "DVR" : m === "mip" ? "MIP" : m === "iso" ? "ISO" : "Slice"}
+              </button>`).join("")}
+          </div>
+
+          <div class="ctl-swap-region" data-role="swap-region"></div>
+
+          <div class="ctl-collapsible open" data-role="scene-collapsible">
+            <button type="button" class="ctl-collapsible-header">
+              ${arrowSvg.replace('class="ctl-panel-arrow"', 'class="ctl-collapsible-arrow"')}
+              <span class="ctl-eyebrow">Scene</span>
+            </button>
+            <div class="ctl-collapsible-body">
+              <label class="ctl-select-row">
+                <span class="ctl-row-label ctl-select-label">Up Axis</span>
+                <select class="ctl-select-input" data-role="up-axis">
+                  ${["x", "y", "z", "-x", "-y", "-z"].map((a) =>
+                    `<option value="${a}"${state.upAxis === a ? " selected" : ""}>${a.toUpperCase()}</option>`
+                  ).join("")}
+                </select>
+              </label>
+              <label class="ctl-toggle-row">
+                <span class="ctl-row-label ctl-toggle-label">Wireframe</span>
+                <input type="checkbox" class="ctl-toggle-input" data-role="wireframe" ${renderer.showWireframe ? "checked" : ""}>
+                <span class="ctl-toggle-track"></span>
+              </label>
+              <label class="ctl-toggle-row">
+                <span class="ctl-row-label ctl-toggle-label">Axes</span>
+                <input type="checkbox" class="ctl-toggle-input" data-role="axes" ${renderer.showAxis ? "checked" : ""}>
+                <span class="ctl-toggle-track"></span>
+              </label>
+              <div data-role="clip-rows">
+                ${["X", "Y", "Z"].map((axis) => `
+                  <div class="ctl-slider-row">
+                    <span class="ctl-row-label ctl-slider-label">Clip ${axis}</span>
+                    <div class="ctl-range-track" data-role="clip-track-${axis}">
+                      <div class="ctl-range-fill" data-role="clip-fill-${axis}"></div>
+                      <input type="range" class="ctl-range-input" data-role="clip-min-${axis}" min="0" max="${axis === "X" ? dimX : axis === "Y" ? dimY : dimZ}" step="1" value="${state["clipMin" + axis]}">
+                      <input type="range" class="ctl-range-input" data-role="clip-max-${axis}" min="0" max="${axis === "X" ? dimX : axis === "Y" ? dimY : dimZ}" step="1" value="${state["clipMax" + axis]}">
+                    </div>
+                    <span class="ctl-row-value ctl-mono" data-role="clip-value-${axis}">${state["clipMin" + axis]}\u2013${state["clipMax" + axis]}</span>
+                  </div>
+                `).join("")}
+              </div>
+            </div>
+          </div>
+
+          <div class="ctl-collapsible" data-role="advanced-collapsible">
+            <button type="button" class="ctl-collapsible-header">
+              ${arrowSvg.replace('class="ctl-panel-arrow"', 'class="ctl-collapsible-arrow"')}
+              <span class="ctl-eyebrow">Advanced</span>
+            </button>
+            <div class="ctl-collapsible-body">
+              <div class="ctl-slider-row">
+                <span class="ctl-row-label ctl-slider-label">Render Scale</span>
+                <div class="ctl-slider-track">
+                  <div class="ctl-slider-fill" data-role="fill-renderScale"></div>
+                  <input type="range" class="ctl-slider-input" data-role="slider-renderScale" min="0.25" max="1" step="0.25" value="${viewer.renderScale}">
+                </div>
+                <span class="ctl-row-value ctl-mono" data-role="value-renderScale">${viewer.renderScale.toFixed(2)}</span>
+              </div>
+              <label class="ctl-toggle-row${state.mode !== "dvr" && state.mode !== "slice" ? " disabled" : ""}" title="Only available for DVR and Slice modes">
+                <span class="ctl-row-label ctl-toggle-label">LOD Levels</span>
+                <input type="checkbox" class="ctl-toggle-input" data-role="lod" ${state.lod ? "checked" : ""} ${state.mode !== "dvr" && state.mode !== "slice" ? "disabled" : ""}>
+                <span class="ctl-toggle-track"></span>
+              </label>
+              <label class="ctl-toggle-row">
+                <span class="ctl-row-label ctl-toggle-label">Jitter</span>
+                <input type="checkbox" class="ctl-toggle-input" data-role="jitter" ${renderer.enableJitter ? "checked" : ""}>
+                <span class="ctl-toggle-track"></span>
+              </label>
+              <label class="ctl-toggle-row">
+                <span class="ctl-row-label ctl-toggle-label">TAA</span>
+                <input type="checkbox" class="ctl-toggle-input" data-role="taa" ${renderer.enableTAA ? "checked" : ""}>
+                <span class="ctl-toggle-track"></span>
+              </label>
+              <label class="ctl-toggle-row">
+                <span class="ctl-row-label ctl-toggle-label">Indirection</span>
+                <input type="checkbox" class="ctl-toggle-input" data-role="indirection" ${renderer.useIndirection ? "checked" : ""}>
+                <span class="ctl-toggle-track"></span>
+              </label>
+            </div>
+          </div>
+        </div>
+      `;
+      container.appendChild(panel);
+
+      // --- top-level panel collapse ---
+      const panelHeader = panel.querySelector(".ctl-panel-header");
+      panelHeader.addEventListener("click", () => {
+        const collapsed = panel.getAttribute("data-collapsed") === "true";
+        panel.setAttribute("data-collapsed", collapsed ? "false" : "true");
+        panelHeader.setAttribute("aria-expanded", collapsed ? "true" : "false");
+      });
+
+      // --- generic slider row (single handle): wires an <input type=range>
+      // plus its fill bar and numeric readout, calling `apply(value)` live. ---
+      function wireSlider(root, role, apply, format) {
+        const input = root.querySelector(`[data-role="slider-${role}"]`);
+        const fill = root.querySelector(`[data-role="fill-${role}"]`);
+        const value = root.querySelector(`[data-role="value-${role}"]`);
+        const update = () => {
+          const v = parseFloat(input.value);
+          const pct = ((v - parseFloat(input.min)) / (parseFloat(input.max) - parseFloat(input.min))) * 100;
+          fill.style.width = `calc(${pct}% - ${pct / 100 * 12}px)`;
+          value.textContent = format(v);
+          apply(v);
+        };
+        input.addEventListener("input", update);
+        update();
       }
 
-      const transferFn = gui.addFolder("Transfer function");
-      transferFn
-        .add(state, "tfPreset", [
-          "grayscale", "grayscale-inverted", "hot", "cool",
-          "viridis", "plasma", "coolwarm", "seismic",
-        ])
-        .name("Preset")
-        .onChange((v) => {
-          tf.setPreset(v);
+      // --- generic dual-handle range row (clip sliders), values in voxel
+      // units. Both <input type=range> share one visual track; each only
+      // captures pointer events on its own thumb (see .ctl-range-input CSS),
+      // and JS clamps min <= max on interaction. ---
+      function wireClipAxis(axis, dim, apply) {
+        const minInput = panel.querySelector(`[data-role="clip-min-${axis}"]`);
+        const maxInput = panel.querySelector(`[data-role="clip-max-${axis}"]`);
+        const fill = panel.querySelector(`[data-role="clip-fill-${axis}"]`);
+        const valueEl = panel.querySelector(`[data-role="clip-value-${axis}"]`);
+        const update = () => {
+          let lo = parseInt(minInput.value, 10);
+          let hi = parseInt(maxInput.value, 10);
+          if (lo > hi) { [lo, hi] = [hi, lo]; minInput.value = lo; maxInput.value = hi; }
+          const loPct = (lo / dim) * 100;
+          const hiPct = (hi / dim) * 100;
+          fill.style.left = `calc(${loPct}% + ${6 - loPct / 100 * 12}px)`;
+          fill.style.width = `calc(${hiPct - loPct}% - ${(hiPct - loPct) / 100 * 12}px)`;
+          valueEl.textContent = `${lo}\u2013${hi}`;
+          apply(lo / dim, hi / dim);
+        };
+        minInput.addEventListener("input", update);
+        maxInput.addEventListener("input", update);
+        update();
+      }
+
+      // --- transfer function canvas: draws the gradient/opacity curve via
+      // kiln-render's own renderPreview(), then lets the user click to add
+      // a point, drag to move one, or double-click to remove one. ---
+      function wireTfCanvas(root) {
+        const canvas = root.querySelector(".ctl-tf-canvas");
+        canvas.width = 256;
+        canvas.height = 80;
+        let dragIndex = null;
+        let didDrag = false;
+
+        function redraw() {
+          tf.renderPreview(canvas, viewer.windowCenter, viewer.windowWidth);
+          const ctx = canvas.getContext("2d");
+          ctx.fillStyle = "#e8a33d";
+          ctx.strokeStyle = "rgba(20,23,28,0.9)";
+          for (const p of tf.getOpacityPoints()) {
+            const px = p.x * canvas.width;
+            const py = canvas.height - p.y * canvas.height;
+            ctx.beginPath();
+            ctx.arc(px, py, 4, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.stroke();
+          }
+        }
+
+        function pointFromEvent(evt) {
+          const rect = canvas.getBoundingClientRect();
+          const x = Math.min(1, Math.max(0, (evt.clientX - rect.left) / rect.width));
+          const y = Math.min(1, Math.max(0, 1 - (evt.clientY - rect.top) / rect.height));
+          return { x, y };
+        }
+
+        function nearestPointIndex(pt, thresholdPx = 8) {
+          const points = tf.getOpacityPoints();
+          const rect = canvas.getBoundingClientRect();
+          let best = -1, bestDist = Infinity;
+          points.forEach((p, i) => {
+            const dx = (p.x - pt.x) * rect.width;
+            const dy = (p.y - pt.y) * rect.height;
+            const dist = Math.sqrt(dx * dx + dy * dy);
+            if (dist < bestDist) { bestDist = dist; best = i; }
+          });
+          return bestDist <= thresholdPx ? best : -1;
+        }
+
+        function applyPoints(points) {
+          tf.setOpacityPoints(points);
           renderer.markDirty();
           renderer.resetAccumulation();
+          redraw();
+        }
+
+        canvas.addEventListener("mousedown", (evt) => {
+          const pt = pointFromEvent(evt);
+          dragIndex = nearestPointIndex(pt);
+          didDrag = false;
+        });
+        canvas.addEventListener("mousemove", (evt) => {
+          if (dragIndex === null) return;
+          didDrag = true;
+          const pt = pointFromEvent(evt);
+          const points = tf.getOpacityPoints();
+          if (dragIndex >= 0 && dragIndex < points.length) {
+            points[dragIndex] = pt;
+            applyPoints(points);
+          }
+        });
+        window.addEventListener("mouseup", () => {
+          if (dragIndex !== null && !didDrag) {
+            // treated as a click below via the click handler; nothing to do here
+          }
+          dragIndex = null;
+        });
+        canvas.addEventListener("click", (evt) => {
+          if (didDrag) return; // this click terminated a drag, not a fresh click
+          const pt = pointFromEvent(evt);
+          if (nearestPointIndex(pt) >= 0) return; // clicking an existing point is handled by drag
+          const points = tf.getOpacityPoints();
+          points.push(pt);
+          points.sort((a, b) => a.x - b.x);
+          applyPoints(points);
+        });
+        canvas.addEventListener("dblclick", (evt) => {
+          const pt = pointFromEvent(evt);
+          const idx = nearestPointIndex(pt);
+          if (idx < 0) return;
+          const points = tf.getOpacityPoints();
+          points.splice(idx, 1);
+          applyPoints(points);
         });
 
-      const clipping = gui.addFolder("Clipping");
-      clipping.close();
+        redraw();
+        return redraw;
+      }
+
+      // --- swap region: rebuilt whenever the mode changes, since which
+      // sliders are relevant differs by mode (kilnrender.com's own panel
+      // shows the transfer function + density for DVR; this is the same
+      // idea, generalized to MIP/ISO/Slice). ---
+      let redrawTf = null;
+      function renderSwapRegion() {
+        const swap = panel.querySelector('[data-role="swap-region"]');
+        const showDensity = state.mode === "dvr";
+        const showIso = state.mode === "iso";
+        swap.innerHTML = `
+          <label class="ctl-select-row">
+            <span class="ctl-row-label ctl-select-label">Preset</span>
+            <select class="ctl-select-input" data-role="tf-preset">
+              ${[
+                ["coolwarm", "Cool-Warm"], ["grayscale", "Grayscale"],
+                ["grayscale-inverted", "Grayscale (inverted)"], ["hot", "Hot"],
+                ["cool", "Cool"], ["viridis", "Viridis"], ["plasma", "Plasma"],
+                ["seismic", "Seismic"],
+              ].map(([v, label]) => `<option value="${v}"${state.tfPreset === v ? " selected" : ""}>${label}</option>`).join("")}
+            </select>
+          </label>
+          <div class="ctl-tf-canvas-container">
+            <canvas class="ctl-tf-canvas"></canvas>
+            <div class="ctl-tf-help">Click to add, drag to move, dbl-click to remove</div>
+          </div>
+          <div class="ctl-slider-row">
+            <span class="ctl-row-label ctl-slider-label">Center</span>
+            <div class="ctl-slider-track">
+              <div class="ctl-slider-fill" data-role="fill-center"></div>
+              <input type="range" class="ctl-slider-input" data-role="slider-center" min="0" max="1" step="0.01" value="${viewer.windowCenter}">
+            </div>
+            <span class="ctl-row-value ctl-mono" data-role="value-center">${viewer.windowCenter.toFixed(2)}</span>
+          </div>
+          <div class="ctl-slider-row">
+            <span class="ctl-row-label ctl-slider-label">Width</span>
+            <div class="ctl-slider-track">
+              <div class="ctl-slider-fill" data-role="fill-width"></div>
+              <input type="range" class="ctl-slider-input" data-role="slider-width" min="0.01" max="1" step="0.01" value="${viewer.windowWidth}">
+            </div>
+            <span class="ctl-row-value ctl-mono" data-role="value-width">${viewer.windowWidth.toFixed(2)}</span>
+          </div>
+          ${showDensity ? `
+          <div class="ctl-slider-row">
+            <span class="ctl-row-label ctl-slider-label">Density</span>
+            <div class="ctl-slider-track">
+              <div class="ctl-slider-fill" data-role="fill-density"></div>
+              <input type="range" class="ctl-slider-input" data-role="slider-density" min="0.1" max="10" step="0.1" value="${renderer.densityScale}">
+            </div>
+            <span class="ctl-row-value ctl-mono" data-role="value-density">${renderer.densityScale.toFixed(2)}</span>
+          </div>` : ""}
+          ${showIso ? `
+          <div class="ctl-slider-row">
+            <span class="ctl-row-label ctl-slider-label">Iso value</span>
+            <div class="ctl-slider-track">
+              <div class="ctl-slider-fill" data-role="fill-iso"></div>
+              <input type="range" class="ctl-slider-input" data-role="slider-iso" min="0" max="1" step="0.001" value="${viewer.isoValue}">
+            </div>
+            <span class="ctl-row-value ctl-mono" data-role="value-iso">${viewer.isoValue.toFixed(3)}</span>
+          </div>` : ""}
+        `;
+
+        wireSlider(swap, "center", (v) => { viewer.windowCenter = v; if (redrawTf) redrawTf(); }, (v) => v.toFixed(2));
+        wireSlider(swap, "width", (v) => { viewer.windowWidth = v; if (redrawTf) redrawTf(); }, (v) => v.toFixed(2));
+        if (showDensity) wireSlider(swap, "density", (v) => { renderer.densityScale = v; }, (v) => v.toFixed(2));
+        if (showIso) wireSlider(swap, "iso", (v) => { viewer.isoValue = v; }, (v) => v.toFixed(3));
+
+        swap.querySelector('[data-role="tf-preset"]').addEventListener("change", (evt) => {
+          state.tfPreset = evt.target.value;
+          tf.setPreset(state.tfPreset);
+          renderer.markDirty();
+          renderer.resetAccumulation();
+          if (redrawTf) redrawTf();
+        });
+
+        redrawTf = wireTfCanvas(swap);
+      }
+      renderSwapRegion();
+
+      // --- mode segmented control ---
+      panel.querySelectorAll('[data-role="mode-segmented"] .ctl-segment').forEach((btn) => {
+        btn.addEventListener("click", () => {
+          state.mode = btn.dataset.mode;
+          panel.querySelectorAll('[data-role="mode-segmented"] .ctl-segment').forEach((b) =>
+            b.classList.toggle("active", b === btn)
+          );
+          applyMode();
+          renderSwapRegion();
+          // LOD toggle availability depends on mode — rebuild the Advanced
+          // section's toggle state rather than re-render the whole panel.
+          const lodInput = panel.querySelector('[data-role="lod"]');
+          const lodRow = lodInput.closest(".ctl-toggle-row");
+          const lodAvailable = state.mode === "dvr" || state.mode === "slice";
+          lodInput.disabled = !lodAvailable;
+          lodRow.classList.toggle("disabled", !lodAvailable);
+        });
+      });
+
+      // --- Scene section ---
+      panel.querySelector('[data-role="up-axis"]').addEventListener("change", (evt) => {
+        camera.setUpAxis(evt.target.value);
+      });
+      panel.querySelector('[data-role="wireframe"]').addEventListener("change", (evt) => {
+        renderer.showWireframe = evt.target.checked;
+      });
+      panel.querySelector('[data-role="axes"]').addEventListener("change", (evt) => {
+        renderer.showAxis = evt.target.checked;
+      });
+
       const applyClip = () => {
-        renderer.clipMin = new Float32Array([state.clipMinX, state.clipMinY, state.clipMinZ]);
-        renderer.clipMax = new Float32Array([state.clipMaxX, state.clipMaxY, state.clipMaxZ]);
         renderer.markDirty();
         renderer.resetAccumulation();
       };
-      ["clipMinX", "clipMinY", "clipMinZ"].forEach((k) =>
-        clipping.add(state, k, 0, 1, 0.001).name(`Min ${k.slice(-1)}`).onChange(applyClip)
-      );
-      ["clipMaxX", "clipMaxY", "clipMaxZ"].forEach((k) =>
-        clipping.add(state, k, 0, 1, 0.001).name(`Max ${k.slice(-1)}`).onChange(applyClip)
-      );
+      wireClipAxis("X", dimX, (lo, hi) => { renderer.clipMin[0] = lo; renderer.clipMax[0] = hi; applyClip(); });
+      wireClipAxis("Y", dimY, (lo, hi) => { renderer.clipMin[1] = lo; renderer.clipMax[1] = hi; applyClip(); });
+      wireClipAxis("Z", dimZ, (lo, hi) => { renderer.clipMin[2] = lo; renderer.clipMax[2] = hi; applyClip(); });
 
-      const slicing = gui.addFolder("Slice planes");
-      slicing.close();
-      slicing.add(renderer, "sliceX", 0, 1, 0.001).name("X position");
-      slicing.add(renderer, "showSliceX").name("Show X");
-      slicing.add(renderer, "sliceY", 0, 1, 0.001).name("Y position");
-      slicing.add(renderer, "showSliceY").name("Show Y");
-      slicing.add(renderer, "sliceZ", 0, 1, 0.001).name("Z position");
-      slicing.add(renderer, "showSliceZ").name("Show Z");
+      // --- Advanced section ---
+      wireSlider(panel, "renderScale", (v) => { viewer.renderScale = v; }, (v) => v.toFixed(2));
+      panel.querySelector('[data-role="lod"]').addEventListener("change", (evt) => {
+        state.lod = evt.target.checked;
+        applyMode();
+      });
+      panel.querySelector('[data-role="jitter"]').addEventListener("change", (evt) => {
+        renderer.enableJitter = evt.target.checked;
+      });
+      panel.querySelector('[data-role="taa"]').addEventListener("change", (evt) => {
+        renderer.enableTAA = evt.target.checked;
+      });
+      panel.querySelector('[data-role="indirection"]').addEventListener("change", (evt) => {
+        renderer.useIndirection = evt.target.checked;
+      });
 
-      const cameraFolder = gui.addFolder("Camera");
-      cameraFolder.close();
-      cameraFolder
-        .add(state, "upAxis", ["x", "y", "z", "-x", "-y", "-z"])
-        .name("Up axis")
-        .onChange((v) => camera.setUpAxis(v));
-      cameraFolder.add(state, "resetView").name("Reset view");
-
-      const overlays = gui.addFolder("Overlays");
-      overlays.close();
-      overlays.add(renderer, "showWireframe").name("Wireframe");
-      overlays.add(renderer, "showAxis").name("Axis");
-      overlays.add(renderer, "enableJitter").name("Jitter");
-      overlays.add(renderer, "enableTAA").name("TAA");
-      overlays.add(renderer, "useIndirection").name("Indirection");
+      // --- collapsible sections (Scene / Advanced) ---
+      panel.querySelectorAll(".ctl-collapsible").forEach((section) => {
+        section.querySelector(".ctl-collapsible-header").addEventListener("click", () => {
+          section.classList.toggle("open");
+        });
+      });
     }
 
-    function startStatsLoop(viewer) {
-      const statsEl = document.getElementById("stats");
+    function startStatsLoop(viewer, container) {
+      const statsEl = document.createElement("div");
+      statsEl.className = "viewer-stats-hud";
+      statsEl.textContent = "\u2014";
+      container.appendChild(statsEl);
+
       const meta = viewer.metadata;
       let frames = 0;
       let lastFpsTime = performance.now();

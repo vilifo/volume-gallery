@@ -37,11 +37,13 @@ data/       (created at runtime) SQLite DB + one folder per volume
   to view volumes — see "Putting it behind HTTPS" below, this trips people up
   on a bare LAN IP. Uploading and user management work over plain HTTP in any
   modern browser.
-- The viewer's control panel mirrors kiln-render's own demo app: render mode
-  (DVR/MIP/ISO/LOD/slice), density/window/iso controls, transfer-function
-  presets, per-axis clipping, slice planes, camera up-axis and reset, debug
-  overlays (wireframe/axis/jitter/TAA/indirection), and a live stats readout
-  (fps, dataset dimensions, LOD/brick/atlas counts, bytes streamed).
+- The viewer's control panel is a custom widget built to match kilnrender.com's
+  own demo: a segmented DVR/MIP/ISO/Slice mode switch, an interactive transfer
+  function editor (click to add an opacity point, drag to move one,
+  double-click to remove one) with 8 color presets, mode-dependent windowing
+  controls, per-axis clip range sliders in voxel coordinates, LOD/jitter/TAA/
+  indirection toggles, and a live stats readout (fps, dataset dimensions,
+  brick/atlas counts, bytes streamed).
 
 ## Preparing volumes to upload
 
@@ -57,6 +59,20 @@ zip -r ../my-scan.zip .
 
 The mesh field accepts any file (STL/OBJ/PLY/...) — it's stored and served
 as-is for download, kiln-render never touches it.
+
+### Uploading a TIFF stack instead
+
+The uploader can also take a **.zip of a flat TIFF stack** (one .tif/.tiff
+file per Z slice) and convert it to OME-Zarr on the server — pick "TIFF
+stack" instead of "OME-Zarr" on the upload page. Slice order is taken from
+sorting the filenames, so name them so alphabetical order matches
+acquisition order (`slice_0001.tif`, `slice_0002.tif`, ...; a plain numeric
+`1.tif, 2.tif, ...` sorts wrong once you hit two digits, so zero-pad).
+Conversion runs synchronously as part of the upload request and can take a
+while for large stacks — the whole stack is decoded into memory at once, so
+keep an eye on available RAM for very large scans. Once conversion finishes,
+the original TIFF files are deleted; only the resulting OME-Zarr store is
+kept on disk.
 
 ## Local development
 

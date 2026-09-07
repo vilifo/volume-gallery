@@ -5,6 +5,21 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Upload volume — Volume Gallery</title>
 <link rel="stylesheet" href="/css/style.css" />
+<style>
+  .source-toggle { display: flex; gap: 0.5em; margin-bottom: 1.4em; }
+  .source-toggle button {
+    flex: 1;
+    padding: 0.7em 1em;
+    text-align: center;
+  }
+  .source-toggle button.active {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #1a1400;
+    font-weight: 600;
+  }
+  .field-hint { font-size: 0.82em; color: var(--text-dim); margin-top: 0.35em; }
+</style>
 </head>
 <body>
   <div class="app-shell" id="shell"></div>
@@ -18,19 +33,34 @@
       window.location.href = "/index.html";
     }
 
+    // Deliberately NOT using the JS RegExp "v" (unicodeSets) flag or an HTML
+    // pattern="..." attribute here — browsers increasingly compile <input
+    // pattern> with the "v" flag, whose character-class grammar is stricter
+    // (and inconsistent across engines) than a plain RegExp literal like
+    // this one. Keep this in sync with SLUG_RE in backend/app/routers/volumes.py.
+    const SLUG_RE = /^[a-z0-9][a-z0-9_-]{1,62}$/;
+
     document.getElementById("shell").innerHTML = `
       ${renderShell("upload", role, getUsername())}
       <main>
         <h1>Upload volume</h1>
         <p class="subtitle">
-          The OME-Zarr archive must be a .zip containing the .ome.zarr (or .zarr) directory.
-          A mesh file is optional and served separately for download.
+          Provide either an OME-Zarr archive or a TIFF stack — a TIFF stack is
+          converted to OME-Zarr on the server, then the original TIFF files
+          are deleted. A mesh file is optional and served separately for
+          download.
         </p>
         <div id="error" style="display:none" class="error-box"></div>
+
+        <div class="source-toggle">
+          <button type="button" id="src-zarr" class="active">OME-Zarr (.zip)</button>
+          <button type="button" id="src-tiff">TIFF stack (.zip of .tif files)</button>
+        </div>
+
         <form id="form">
           <div class="field">
             <label for="slug">Slug (used in URLs, lowercase, no spaces)</label>
-            <input id="slug" required pattern="[a-z0-9][a-z0-9\-_]{1,62}" placeholder="femur-scan-01" />
+            <input id="slug" required placeholder="femur-scan-01" />
           </div>
           <div class="field">
             <label for="title">Title</label>
@@ -40,10 +70,25 @@
             <label for="description">Description</label>
             <input id="description" placeholder="Optional" />
           </div>
-          <div class="field">
+
+          <div class="field" id="zarr-field">
             <label for="zarr_zip">OME-Zarr archive (.zip)</label>
-            <input id="zarr_zip" type="file" accept=".zip" required />
+            <input id="zarr_zip" type="file" accept=".zip" />
+            <div class="field-hint">A .zip containing the .ome.zarr (or .zarr) directory.</div>
           </div>
+
+          <div class="field" id="tiff-field" style="display:none">
+            <label for="tiff_zip">TIFF stack (.zip of .tif files)</label>
+            <input id="tiff_zip" type="file" accept=".zip" />
+            <div class="field-hint">
+              A flat .zip of single-slice .tif/.tiff files (one per Z position). Filenames
+              are sorted to determine slice order, so name them so alphabetical order
+              matches acquisition order (e.g. slice_0001.tif, slice_0002.tif, \u2026).
+              Large stacks are loaded into memory in full during conversion, so keep an
+              eye on available RAM for very large scans.
+            </div>
+          </div>
+
           <div class="field">
             <label for="mesh_file">Mesh file (optional — .stl, .obj, .ply, \u2026)</label>
             <input id="mesh_file" type="file" />
@@ -54,21 +99,63 @@
     `;
     wireLogout();
 
+    let source = "zarr";
+    const srcZarrBtn = document.getElementById("src-zarr");
+    const srcTiffBtn = document.getElementById("src-tiff");
+    const zarrField = document.getElementById("zarr-field");
+    const tiffField = document.getElementById("tiff-field");
+
+    function setSource(next) {
+      source = next;
+      srcZarrBtn.classList.toggle("active", source === "zarr");
+      srcTiffBtn.classList.toggle("active", source === "tiff");
+      zarrField.style.display = source === "zarr" ? "" : "none";
+      tiffField.style.display = source === "tiff" ? "" : "none";
+    }
+    srcZarrBtn.addEventListener("click", () => setSource("zarr"));
+    srcTiffBtn.addEventListener("click", () => setSource("tiff"));
+
     const form = document.getElementById("form");
     const errorBox = document.getElementById("error");
 
     form.addEventListener("submit", async (e) => {
       e.preventDefault();
       errorBox.style.display = "none";
+
+      const slug = document.getElementById("slug").value.trim();
+      if (!SLUG_RE.test(slug)) {
+        errorBox.textContent =
+          "Slug must start with a lowercase letter or digit, and contain only " +
+          "lowercase letters, digits, hyphens, and underscores (2\u201363 characters).";
+        errorBox.style.display = "block";
+        return;
+      }
+
+      const sourceFile =
+        source === "zarr"
+          ? document.getElementById("zarr_zip").files[0]
+          : document.getElementById("tiff_zip").files[0];
+      if (!sourceFile) {
+        errorBox.textContent =
+          source === "zarr" ? "Choose an OME-Zarr .zip file." : "Choose a TIFF stack .zip file.";
+        errorBox.style.display = "block";
+        return;
+      }
+
       const submitBtn = form.querySelector("button[type=submit]");
       submitBtn.disabled = true;
-      submitBtn.textContent = "Uploading\u2026";
+      submitBtn.textContent =
+        source === "tiff" ? "Converting\u2026 this can take a while for large stacks" : "Uploading\u2026";
 
       const fd = new FormData();
-      fd.append("slug", document.getElementById("slug").value.trim());
+      fd.append("slug", slug);
       fd.append("title", document.getElementById("title").value.trim());
       fd.append("description", document.getElementById("description").value.trim());
-      fd.append("zarr_zip", document.getElementById("zarr_zip").files[0]);
+      if (source === "zarr") {
+        fd.append("zarr_zip", sourceFile);
+      } else {
+        fd.append("tiff_zip", sourceFile);
+      }
       const meshFile = document.getElementById("mesh_file").files[0];
       if (meshFile) fd.append("mesh_file", meshFile);
 
