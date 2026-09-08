@@ -1,6 +1,6 @@
 from typing import Optional, List
 from pydantic import BaseModel
-from .models import Role
+from .models import Role, VolumeStatus
 
 
 class Token(BaseModel):
@@ -43,6 +43,14 @@ class VolumeRead(BaseModel):
     has_mesh: bool
     mesh_filename: Optional[str] = None
     created_at: str
+    status: VolumeStatus
+    status_log: List[str] = []
+
+
+class VolumeStatusRead(BaseModel):
+    id: int
+    status: VolumeStatus
+    status_log: List[str] = []
 
 
 class VolumeAccessGrant(BaseModel):

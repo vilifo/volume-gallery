@@ -8,13 +8,10 @@ whose slices are in whatever order the filesystem happened to return them,
 not the intended acquisition order.
 """
 
-import os
 from pathlib import Path
-from concurrent.futures import ThreadPoolExecutor
 
 import dask
 import dask.array as da
-import numpy as np
 import tifffile
 import zarr
 from ome_zarr.io import parse_url

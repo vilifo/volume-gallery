@@ -66,6 +66,42 @@ export const api = {
   createVolume(formData) {
     return request("/api/volumes", { method: "POST", body: formData });
   },
+  // XHR-based (not fetch) specifically to get real upload-progress events —
+  // fetch has no stable cross-browser API for tracking request-body upload
+  // progress, only response-download progress. onProgress(fraction 0..1)
+  // fires as bytes actually leave the browser; it does NOT track server-side
+  // processing (that's what /status polling is for, since processing now
+  // happens in a background task after this request already returned).
+  createVolumeWithProgress(formData, onProgress) {
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open("POST", "/api/volumes");
+      const token = getToken();
+      if (token) xhr.setRequestHeader("Authorization", `Bearer ${token}`);
+      xhr.upload.addEventListener("progress", (evt) => {
+        if (evt.lengthComputable && onProgress) onProgress(evt.loaded / evt.total);
+      });
+      xhr.addEventListener("load", () => {
+        if (xhr.status === 401) {
+          clearSession();
+          window.location.href = "/login.html";
+          reject(new Error("Not authenticated"));
+          return;
+        }
+        let data = null;
+        try { data = JSON.parse(xhr.responseText); } catch (_) {}
+        if (xhr.status >= 200 && xhr.status < 300) {
+          resolve(data);
+        } else {
+          reject(new Error((data && data.detail) || xhr.statusText || "Upload failed"));
+        }
+      });
+      xhr.addEventListener("error", () => reject(new Error("Network error during upload")));
+      xhr.addEventListener("abort", () => reject(new Error("Upload cancelled")));
+      xhr.send(formData);
+    });
+  },
+  getVolumeStatus(id) { return request(`/api/volumes/${id}/status`); },
   deleteVolume(id) { return request(`/api/volumes/${id}`, { method: "DELETE" }); },
   uploadMesh(id, formData) {
     return request(`/api/volumes/${id}/mesh`, { method: "POST", body: formData });

@@ -40,6 +40,16 @@
       content.innerHTML = `
         <h1>${escapeHtml(volume.title)}</h1>
         <p class="subtitle mono">${escapeHtml(volume.slug)}</p>
+        ${
+          volume.status !== "ready"
+            ? `<div class="${volume.status === "failed" ? "error-box" : "dim"}" style="margin-bottom:1.2em">
+                <strong>${volume.status === "failed" ? "Processing failed" : "Still processing"}</strong>
+                ${volume.status_log && volume.status_log.length
+                  ? `<div class="mono" style="margin-top:0.4em;font-size:0.85em;white-space:pre-wrap">${escapeHtml(volume.status_log.join("\n"))}</div>`
+                  : ""}
+              </div>`
+            : ""
+        }
 
         <h2>Reader access</h2>
         <table>

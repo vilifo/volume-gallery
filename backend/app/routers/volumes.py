@@ -3,17 +3,18 @@ import re
 import shutil
 import zipfile
 from collections import deque
+from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Query, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, UploadFile, File, Form, Request
 from fastapi.responses import FileResponse
 from sqlmodel import Session, select
 
-from ..database import get_session
-from ..models import User, Role, Volume, VolumeAccess
-from ..schemas import VolumeRead, VolumeAccessGrant, FileAccessUrl, UserRead
-from ..deps import get_current_user, require_editor, require_admin
+from ..database import get_session, engine
+from ..models import User, Role, Volume, VolumeAccess, VolumeStatus
+from ..schemas import VolumeRead, VolumeStatusRead, VolumeAccessGrant, FileAccessUrl, UserRead
+from ..deps import get_current_user, require_editor
 from ..security import create_file_token, decode_token
 from ..config import settings
 from ..tiff_convert import convert_tiff_stack_to_ome_zarr
@@ -91,6 +92,7 @@ def _can_see_volume(user: User, volume: Volume, session: Session) -> bool:
 
 
 def _volume_read(v: Volume) -> VolumeRead:
+    log_lines = [line for line in (v.status_log or "").split("\n") if line]
     return VolumeRead(
         id=v.id,
         slug=v.slug,
@@ -99,6 +101,8 @@ def _volume_read(v: Volume) -> VolumeRead:
         has_mesh=v.has_mesh,
         mesh_filename=v.mesh_filename,
         created_at=v.created_at.isoformat(),
+        status=v.status,
+        status_log=log_lines,
     )
 
 
@@ -121,10 +125,25 @@ def get_volume(
     return _volume_read(volume)
 
 
+@router.get("/{volume_id}/status", response_model=VolumeStatusRead)
+def get_volume_status(
+    volume_id: int, session: Session = Depends(get_session), user: User = Depends(get_current_user)
+):
+    """Lightweight endpoint for the gallery page to poll while a volume is
+    still processing — same payload shape as VolumeRead's status fields,
+    without re-sending everything else."""
+    volume = session.get(Volume, volume_id)
+    if not volume or not _can_see_volume(user, volume, session):
+        raise HTTPException(status_code=404, detail="Volume not found")
+    log_lines = [line for line in (volume.status_log or "").split("\n") if line]
+    return VolumeStatusRead(id=volume.id, status=volume.status, status_log=log_lines)
+
+
 # ---------- Editor: create / upload / delete ----------
 
 @router.post("", response_model=VolumeRead)
 def create_volume(
+    background_tasks: BackgroundTasks,
     slug: str = Form(...),
     title: str = Form(...),
     description: str = Form(""),
@@ -150,86 +169,124 @@ def create_volume(
     vol_dir = _volume_dir(slug)
     vol_dir.mkdir(parents=True, exist_ok=False)
 
+    # Only the actual byte-copying happens here, synchronously — this is
+    # already-received request data, not CPU/IO-heavy work, so it's fast
+    # regardless of file size. Extraction/conversion (the slow part) happens
+    # in a background task after we respond, so the client isn't stuck
+    # holding the HTTP request open for however long that takes; instead the
+    # gallery polls GET /{id}/status for progress.
+    source_kind = "zarr" if zarr_zip is not None else "tiff"
+    source_upload = zarr_zip if zarr_zip is not None else tiff_zip
     try:
-        if zarr_zip is not None:
-            zarr_root = _extract_zarr_zip(zarr_zip, vol_dir)
-        else:
-            zarr_root = _convert_tiff_zip(tiff_zip, vol_dir)
-    except HTTPException:
-        shutil.rmtree(vol_dir, ignore_errors=True)
-        raise
-    except Exception as exc:  # noqa: BLE001 - surface conversion errors to the caller
-        shutil.rmtree(vol_dir, ignore_errors=True)
-        raise HTTPException(status_code=400, detail=f"Could not process upload: {exc}")
+        zip_path = vol_dir / "_upload.zip"
+        with open(zip_path, "wb") as f:
+            shutil.copyfileobj(source_upload.file, f)
 
-    mesh_filename = None
-    has_mesh = False
-    if mesh_file is not None:
-        mesh_filename = Path(mesh_file.filename).name
-        with open(vol_dir / mesh_filename, "wb") as f:
-            shutil.copyfileobj(mesh_file.file, f)
-        has_mesh = True
+        mesh_filename = None
+        has_mesh = False
+        if mesh_file is not None:
+            mesh_filename = Path(mesh_file.filename).name
+            with open(vol_dir / mesh_filename, "wb") as f:
+                shutil.copyfileobj(mesh_file.file, f)
+            has_mesh = True
+    except Exception as exc:  # noqa: BLE001 - surface save errors to the caller
+        shutil.rmtree(vol_dir, ignore_errors=True)
+        raise HTTPException(status_code=400, detail=f"Could not save upload: {exc}")
 
     volume = Volume(
         slug=slug,
         title=title,
         description=description,
-        zarr_path=str(zarr_root.relative_to(vol_dir)),
+        zarr_path="",  # filled in by _process_upload once conversion/extraction finishes
         has_mesh=has_mesh,
         mesh_filename=mesh_filename,
         created_by=editor.id,
+        status=VolumeStatus.processing,
+        status_log=f"{_now()}  Upload received, queued for processing\n",
     )
     session.add(volume)
     session.commit()
     session.refresh(volume)
+
+    background_tasks.add_task(_process_upload, volume.id, str(vol_dir), source_kind)
+
     return _volume_read(volume)
 
 
-def _extract_zarr_zip(zarr_zip: UploadFile, vol_dir: Path) -> Path:
-    """Extracts an uploaded OME-Zarr .zip into vol_dir and locates its
-    multiscale group root (see _find_ome_zarr_root for why presence of a
-    zarr.json/.zattrs file alone isn't sufficient)."""
-    zip_path = vol_dir / "_upload.zip"
-    with open(zip_path, "wb") as f:
-        shutil.copyfileobj(zarr_zip.file, f)
+def _now() -> str:
+    return datetime.utcnow().strftime("%H:%M:%S")
+
+
+def _process_upload(volume_id: int, vol_dir_str: str, source_kind: str) -> None:
+    """Runs after create_volume's response has already been sent. Opens its
+    own DB session — the request-scoped one from create_volume is closed by
+    the time this runs."""
+    vol_dir = Path(vol_dir_str)
+    with Session(engine) as session:
+        volume = session.get(Volume, volume_id)
+        if volume is None:
+            return
+
+        def log(message: str) -> None:
+            volume.status_log = (volume.status_log or "") + f"{_now()}  {message}\n"
+            session.add(volume)
+            session.commit()
+
+        try:
+            zip_path = vol_dir / "_upload.zip"
+            if source_kind == "zarr":
+                log("Extracting OME-Zarr archive")
+                zarr_root = _extract_zarr_zip_from_path(zip_path, vol_dir)
+            else:
+                zarr_root = _convert_tiff_zip_from_path(zip_path, vol_dir, log)
+            volume.zarr_path = str(zarr_root.relative_to(vol_dir))
+            volume.status = VolumeStatus.ready
+            log("Ready")
+        except Exception as exc:  # noqa: BLE001 - the failure message IS the point, shown to the user
+            volume.status = VolumeStatus.failed
+            log(f"Failed: {exc}")
+        session.add(volume)
+        session.commit()
+
+
+def _extract_zarr_zip_from_path(zip_path: Path, vol_dir: Path) -> Path:
+    """Extracts an OME-Zarr .zip already saved at zip_path into vol_dir and
+    locates its multiscale group root (see _find_ome_zarr_root for why
+    presence of a zarr.json/.zattrs file alone isn't sufficient)."""
     try:
         with zipfile.ZipFile(zip_path) as zf:
             zf.extractall(vol_dir)
     except zipfile.BadZipFile:
-        raise HTTPException(status_code=400, detail="zarr_zip is not a valid zip file")
+        raise ValueError("zarr_zip is not a valid zip file")
     finally:
         zip_path.unlink(missing_ok=True)
 
     zarr_root = _find_ome_zarr_root(vol_dir)
     if zarr_root is None:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "No OME-NGFF multiscales metadata found anywhere in the archive. "
-                "Every zarr.json/.zattrs found lacks a multiscales entry — check "
-                "that the archive contains the multiscale *group* (not just an "
-                "individual resolution-level array), and that it was written "
-                "with OME-NGFF metadata (attributes.multiscales for v2/plain v3, "
-                "or attributes.ome.multiscales for NGFF v0.5)."
-            ),
+        raise ValueError(
+            "No OME-NGFF multiscales metadata found anywhere in the archive. "
+            "Every zarr.json/.zattrs found lacks a multiscales entry — check "
+            "that the archive contains the multiscale group (not just an "
+            "individual resolution-level array), and that it was written "
+            "with OME-NGFF metadata (attributes.multiscales for v2/plain v3, "
+            "or attributes.ome.multiscales for NGFF v0.5)."
         )
     return zarr_root
 
 
-def _convert_tiff_zip(tiff_zip: UploadFile, vol_dir: Path) -> Path:
-    """Extracts an uploaded TIFF-stack .zip into a scratch directory, converts
-    it to OME-Zarr under vol_dir, then deletes the extracted TIFF files —
-    only the converted OME-Zarr store is kept on disk afterward."""
+def _convert_tiff_zip_from_path(zip_path: Path, vol_dir: Path, log) -> Path:
+    """Extracts a TIFF-stack .zip already saved at zip_path into a scratch
+    directory, converts it to OME-Zarr under vol_dir, then deletes the
+    extracted TIFF files — only the converted OME-Zarr store is kept on disk
+    afterward. `log` is called with progress messages as conversion runs."""
+    log("Extracting TIFF archive")
     scratch_dir = vol_dir / "_tiff_import"
-    scratch_dir.mkdir()
-    zip_path = vol_dir / "_upload.zip"
-    with open(zip_path, "wb") as f:
-        shutil.copyfileobj(tiff_zip.file, f)
+    scratch_dir.mkdir(exist_ok=True)
     try:
         with zipfile.ZipFile(zip_path) as zf:
             zf.extractall(scratch_dir)
     except zipfile.BadZipFile:
-        raise HTTPException(status_code=400, detail="tiff_zip is not a valid zip file")
+        raise ValueError("tiff_zip is not a valid zip file")
     finally:
         zip_path.unlink(missing_ok=True)
 
@@ -239,7 +296,12 @@ def _convert_tiff_zip(tiff_zip: UploadFile, vol_dir: Path) -> Path:
     # actually contains the .tif files, same rationale as _find_ome_zarr_root.
     tiff_source_dir = _find_tiff_dir(scratch_dir)
     if tiff_source_dir is None:
-        raise HTTPException(status_code=400, detail="No .tif/.tiff files found in tiff_zip")
+        raise ValueError("No .tif/.tiff files found in tiff_zip")
+
+    n_files = sum(
+        1 for p in tiff_source_dir.iterdir() if p.is_file() and p.suffix.lower() in (".tif", ".tiff")
+    )
+    log(f"Converting {n_files} TIFF slices to OME-Zarr (this can take a while for large stacks)")
 
     zarr_dir = vol_dir / "data.ome.zarr"
     try:
@@ -249,14 +311,12 @@ def _convert_tiff_zip(tiff_zip: UploadFile, vol_dir: Path) -> Path:
         # deleted whether conversion succeeded or failed.
         shutil.rmtree(scratch_dir, ignore_errors=True)
 
+    log("Locating OME-Zarr metadata")
     zarr_root = _find_ome_zarr_root(vol_dir)
     if zarr_root is None:
         # Shouldn't happen — write_image() always emits multiscales metadata —
         # but don't silently accept a store our own viewer couldn't load.
-        raise HTTPException(
-            status_code=500,
-            detail="TIFF conversion completed but produced no readable OME-NGFF metadata",
-        )
+        raise ValueError("TIFF conversion completed but produced no readable OME-NGFF metadata")
     return zarr_root
 
 
@@ -379,6 +439,15 @@ def zarr_access_url(
     volume = session.get(Volume, volume_id)
     if not volume or not _can_see_volume(user, volume, session):
         raise HTTPException(status_code=404, detail="Volume not found")
+    if volume.status != VolumeStatus.ready:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Volume is still processing"
+                if volume.status == VolumeStatus.processing
+                else "Volume processing failed — see its status log"
+            ),
+        )
     token = create_file_token(subject=user.username, volume_id=volume_id, kind="zarr")
     # kiln-render's KilnViewer.create() picks its data provider with a plain
     # `url.includes(".zarr")` check — the path segment below must contain that
