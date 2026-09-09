@@ -4,7 +4,7 @@ sqlmodel==0.0.22
 python-jose[cryptography]==3.3.0
 passlib==1.7.4
 bcrypt==4.0.1
-python-multipart==0.0.9
+python-multipart==0.0.32
 
 # --- TIFF-stack -> OME-Zarr conversion (backend/app/tiff_convert.py) ---
 tifffile==2026.8.23
