@@ -45,7 +45,7 @@ jobs:
 
       - name: Determine image tags
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ${{ vars.DOCKERHUB_IMAGE || format('{0}/volume-gallery', secrets.DOCKERHUB_USERNAME) }}
           tags: |
