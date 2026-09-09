@@ -1,8 +1,8 @@
 import enum
 from datetime import datetime
-from typing import Optional
+from typing import Optional, List
 
-from sqlmodel import SQLModel, Field
+from sqlmodel import SQLModel, Field, Relationship
 
 
 class Role(str, enum.Enum):

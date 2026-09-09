@@ -5,6 +5,46 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Gallery — Volume Gallery</title>
 <link rel="stylesheet" href="/css/style.css" />
+<style>
+  .status-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4em;
+    font-size: 0.75em;
+    font-family: var(--mono);
+    padding: 0.15em 0.55em;
+    border-radius: var(--radius);
+    border: 1px solid var(--line);
+  }
+  .status-badge.processing { color: var(--accent); border-color: var(--accent-dim); }
+  .status-badge.failed { color: var(--danger); border-color: var(--danger); }
+  .status-badge .mini-spinner {
+    width: 9px; height: 9px;
+    border-radius: 50%;
+    border: 1.5px solid rgba(232, 163, 61, 0.3);
+    border-top-color: var(--accent);
+    animation: vg-spin 0.7s linear infinite;
+  }
+  @keyframes vg-spin { to { transform: rotate(360deg); } }
+
+  .volume-row .log-line {
+    font-size: 0.78em;
+    color: var(--text-dim);
+    margin-top: 0.25em;
+    font-family: var(--mono);
+  }
+  .volume-row .log-line.failed { color: var(--danger); }
+  .volume-row .title.disabled { color: var(--text-dim); pointer-events: none; }
+
+  .volume-row.just-uploaded {
+    animation: vg-highlight 2.5s ease-out;
+    border-radius: var(--radius);
+  }
+  @keyframes vg-highlight {
+    0%   { background: rgba(232, 163, 61, 0.18); }
+    100% { background: transparent; }
+  }
+</style>
 </head>
 <body>
   <div class="app-shell" id="shell"></div>
@@ -14,6 +54,13 @@
 
     requireLogin();
     const role = getRole();
+
+    const params = new URLSearchParams(window.location.search);
+    const justUploadedId = params.get("justUploaded");
+    if (justUploadedId) {
+      // Don't leave it in the URL — a refresh shouldn't re-trigger the highlight.
+      window.history.replaceState({}, "", "/index.html");
+    }
 
     document.getElementById("shell").innerHTML = `
       ${renderShell("gallery", role, getUsername())}
@@ -29,42 +76,60 @@
     `;
     wireLogout();
 
-    async function load() {
-      const listEl = document.getElementById("list");
-      let volumes;
-      try {
-        volumes = await api.listVolumes();
-      } catch (err) {
-        listEl.innerHTML = `<div class="error-box">${err.message}</div>`;
-        return;
+    function escapeHtml(s) {
+      const d = document.createElement("div");
+      d.textContent = s;
+      return d.innerHTML;
+    }
+
+    function statusBadge(v) {
+      if (v.status === "processing") {
+        return `<span class="status-badge processing"><span class="mini-spinner"></span>processing</span>`;
       }
-      if (volumes.length === 0) {
-        listEl.innerHTML = `<div class="empty-state">
-          No volumes yet.${role !== "reader" ? " Use \u201cUpload volume\u201d to add one." : " Ask an editor to grant you access."}
-        </div>`;
-        return;
+      if (v.status === "failed") {
+        return `<span class="status-badge failed">failed</span>`;
       }
-      listEl.innerHTML = volumes
-        .map(
-          (v) => `
-        <div class="volume-row">
+      return "";
+    }
+
+    function latestLogLine(v) {
+      if (v.status === "ready" || !v.status_log || v.status_log.length === 0) return "";
+      const last = v.status_log[v.status_log.length - 1];
+      // Log lines are "HH:MM:SS  message" — drop the timestamp for the inline readout.
+      const message = last.replace(/^\d{2}:\d{2}:\d{2}\s+/, "");
+      const cls = v.status === "failed" ? "failed" : "";
+      return `<div class="log-line ${cls}">${escapeHtml(message)}</div>`;
+    }
+
+    function renderRow(v) {
+      const viewable = v.status === "ready";
+      return `
+        <div class="volume-row" data-volume-row="${v.id}">
           <div class="swatch">CT</div>
           <div class="meta">
-            <div class="title"><a href="/viewer.html?id=${v.id}">${escapeHtml(v.title)}</a></div>
+            <div class="title">
+              ${
+                viewable
+                  ? `<a href="/viewer.html?id=${v.id}">${escapeHtml(v.title)}</a>`
+                  : `<span class="disabled">${escapeHtml(v.title)}</span>`
+              }
+              ${statusBadge(v)}
+            </div>
             <div class="slug">${escapeHtml(v.slug)}${v.has_mesh ? " · mesh available" : ""}</div>
+            ${latestLogLine(v)}
           </div>
           <div class="actions">
-            <a href="/viewer.html?id=${v.id}"><button>Open</button></a>
+            ${viewable ? `<a href="/viewer.html?id=${v.id}"><button>Open</button></a>` : ""}
             ${
               role === "admin" || role === "editor"
                 ? `<button data-manage="${v.id}">Manage</button>`
                 : ""
             }
           </div>
-        </div>`
-        )
-        .join("");
+        </div>`;
+    }
 
+    function wireRowActions(listEl) {
       listEl.querySelectorAll("[data-manage]").forEach((btn) => {
         btn.addEventListener("click", () => {
           window.location.href = `/manage.html?id=${btn.dataset.manage}`;
@@ -72,10 +137,41 @@
       });
     }
 
-    function escapeHtml(s) {
-      const d = document.createElement("div");
-      d.textContent = s;
-      return d.innerHTML;
+    let pollTimer = null;
+
+    async function load({ isPoll = false } = {}) {
+      const listEl = document.getElementById("list");
+      let volumes;
+      try {
+        volumes = await api.listVolumes();
+      } catch (err) {
+        if (!isPoll) listEl.innerHTML = `<div class="error-box">${err.message}</div>`;
+        return;
+      }
+
+      if (volumes.length === 0) {
+        listEl.innerHTML = `<div class="empty-state">
+          No volumes yet.${role !== "reader" ? " Use \u201cUpload volume\u201d to add one." : " Ask an editor to grant you access."}
+        </div>`;
+        return;
+      }
+
+      listEl.innerHTML = volumes.map(renderRow).join("");
+      wireRowActions(listEl);
+
+      if (justUploadedId) {
+        const row = listEl.querySelector(`[data-volume-row="${justUploadedId}"]`);
+        if (row) {
+          row.classList.add("just-uploaded");
+          row.scrollIntoView({ behavior: "smooth", block: "center" });
+        }
+      }
+
+      const stillProcessing = volumes.some((v) => v.status === "processing");
+      clearTimeout(pollTimer);
+      if (stillProcessing) {
+        pollTimer = setTimeout(() => load({ isPoll: true }), 1500);
+      }
     }
 
     load();

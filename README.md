@@ -16,11 +16,20 @@ an editor has explicitly granted them.
 ```
 backend/    FastAPI app (SQLite for users/volumes/access, JWT auth)
 frontend/   Static HTML/CSS/JS gallery UI + vendored kiln-render library
+nginx/      Reverse proxy config + self-signed cert generator (see below)
+.github/    GitHub Actions workflow that builds & publishes to Docker Hub
 data/       (created at runtime) SQLite DB + one folder per volume
 ```
 
 - Each volume is a folder on disk containing its OME-Zarr store and an
   optional mesh file. The database only stores metadata and access grants.
+- **Uploads are processed in the background**, not while you wait: the
+  upload request returns as soon as the file is saved, with the volume
+  marked `processing`. Extraction (or TIFF→OME-Zarr conversion, for TIFF
+  stack uploads) then runs server-side; the gallery page polls
+  `GET /api/volumes/{id}/status` and shows live progress on that volume's
+  row until it flips to `ready` (or `failed`, with the reason shown inline —
+  editors can delete a failed upload from its Manage page to retry).
 - **kiln-render runs entirely in the browser** and does many small HTTP
   range-reads directly against the zarr store, so it can't send an
   `Authorization` header the way a normal API client would. Instead, when
@@ -90,13 +99,87 @@ Then open `http://localhost:8000`, sign in as `admin` / `changeme`.
 
 ## Running with Docker Compose
 
+The fast path — one script does the `.env` setup, cert generation, and
+`docker compose up` in one go:
+
+```bash
+./setup.sh <your-host-ip-or-name>          # e.g. ./setup.sh 192.168.1.50
+```
+
+It fills in a generated `VG_SECRET_KEY`, prompts for an admin password (or
+generates and prints one if run non-interactively), generates a self-signed
+cert for the host/IP you gave it, and starts everything. Safe to re-run — it
+never overwrites an existing `.env` or existing certs, only fills in what's
+missing. Pass alternate ports as a second/third argument if you want
+something other than the 8443/8080 default (see "Putting it behind HTTPS"
+below for why those aren't 443/80 by default):
+
+```bash
+./setup.sh 192.168.1.50 8443 8080
+```
+
+Or do the same steps by hand if you'd rather see each one:
+
 ```bash
 cp .env.example .env
 # edit .env: set VG_SECRET_KEY and VG_ADMIN_PASSWORD
+./nginx/generate-self-signed-cert.sh <your-host-ip-or-name>
 docker compose up -d --build
 ```
 
-The app is then at `http://<host>:8000`.
+The app is then at `https://<host>:8443/` (or whatever `VG_HTTPS_PORT` you
+set — nginx redirects plain `http://` to `https://` automatically). See
+"Putting it behind HTTPS" below for what that cert script does and your
+options if you'd rather use a real certificate.
+
+---
+
+## Publishing to Docker Hub
+
+Pulling a prebuilt image instead of building on the NAS itself is the
+easiest way to deploy this on TrueNAS — no waiting for `pip install` inside
+the Docker build on modest NAS hardware, no source tree needed on the box
+beyond `docker-compose.yml` and `nginx/`. Getting an image onto Docker Hub in
+the first place needs a Docker Hub account and either GitHub or a machine
+with Docker installed — set up one of these two ways once, then every
+deployment afterward is just a pull.
+
+**Automatically, on every push (recommended).** This repo includes
+`.github/workflows/docker-publish.yml`, which builds and pushes the image on
+every push to `main` (tagged `:latest` and `:<short-sha>`) and on version
+tags like `v1.2.0` (tagged to match). One-time setup once this is a GitHub
+repo of your own:
+1. Docker Hub → Account Settings → Personal access tokens → generate one
+   (Read & Write is enough).
+2. In the GitHub repo: Settings → Secrets and variables → Actions, add
+   secrets `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` (the token from step 1).
+3. Optionally, in the same place under the **Variables** tab, add
+   `DOCKERHUB_IMAGE` = `yourusername/volume-gallery` if you want a repo name
+   other than `<your-username>/volume-gallery`.
+
+Push to `main` and check the Actions tab — once it's green, the image is on
+Docker Hub.
+
+**Manually, once, from any machine with Docker:**
+```bash
+docker login
+docker build -f backend/Dockerfile -t yourusername/volume-gallery:latest .
+docker push yourusername/volume-gallery:latest
+```
+
+**Either way, point your deployment at it** by setting in `.env`:
+```
+VG_IMAGE=yourusername/volume-gallery:latest
+```
+`docker-compose.yml` uses this if set (`docker compose pull && docker compose
+up -d`) and falls back to building locally from source if it's blank
+(`docker compose up -d --build`) — `setup.sh` checks `.env` for `VG_IMAGE`
+and picks the right one automatically, so on TrueNAS this is just:
+```bash
+./setup.sh <truenas-ip-or-hostname>
+```
+after adding `VG_IMAGE=...` to `.env` (do this before running `setup.sh`, or
+edit `.env` and re-run it — re-running is safe, see below).
 
 ---
 
@@ -119,7 +202,7 @@ Storage → your pool → **Add Dataset**:
 
 Note the resulting path, e.g. `/mnt/tank/apps/volume-gallery`.
 
-### 2. Get the source onto the box
+### 2. Get the source onto the box, and run the setup script
 
 Easiest via the TrueNAS shell (System Settings → Shell, or SSH in):
 
@@ -127,82 +210,105 @@ Easiest via the TrueNAS shell (System Settings → Shell, or SSH in):
 cd /mnt/tank/apps/volume-gallery
 git clone <this-repo-url> src
 cd src
+```
+
+Set `VG_HOST_DATA_DIR` so the app's data lands on the dataset from step 1
+instead of a local `./data` folder next to the source, and — if you've
+published an image per "Publishing to Docker Hub" above — `VG_IMAGE` so
+`setup.sh` pulls it instead of building on the NAS:
+
+```bash
 cp .env.example .env
+sed -i 's#^VG_HOST_DATA_DIR=.*#VG_HOST_DATA_DIR=/mnt/tank/apps/volume-gallery/data#' .env
+sed -i 's#^VG_IMAGE=.*#VG_IMAGE=yourusername/volume-gallery:latest#' .env   # optional — skip to build from source instead
 ```
 
-Edit `.env` (`nano .env` or the file editor of your choice):
-- `VG_SECRET_KEY`: generate one with
-  `python3 -c "import secrets; print(secrets.token_hex(32))"`
-- `VG_ADMIN_PASSWORD`: a real password for the bootstrap admin account
-- `VG_HOST_DATA_DIR`: `/mnt/tank/apps/volume-gallery/data`
-
-### 3. Launch it as a Custom App
-
-TrueNAS SCALE's **Apps → Discover Apps → Custom App** UI can run a
-`docker-compose.yml`-style spec, but the most direct route for a project
-with its own Dockerfile is to build the image once via shell and then
-point a Custom App at it:
+Then hand off to the setup script — it takes care of the rest (secret key,
+admin password, TLS cert, and starting the containers):
 
 ```bash
-cd /mnt/tank/apps/volume-gallery/src
-docker build -f backend/Dockerfile -t volume-gallery:latest .
+./setup.sh <truenas-ip-or-hostname>
 ```
 
-Then in the UI: **Apps → Discover Apps → Custom App**:
-- **Application Name**: `volume-gallery`
-- **Image repository**: `volume-gallery`, **tag**: `latest`
-  (Pull policy: "Never" / "IfNotPresent", since it's a local image)
-- **Container entrypoint / command**: leave default (uses the Dockerfile's `CMD`)
-- **Port Forwarding**: container port `8000` → node port of your choice
-  (e.g. `8000`)
-- **Storage → Host Path Volumes**: mount `/mnt/tank/apps/volume-gallery/data`
-  as the host path, `/data` as the container mount path
-- **Environment Variables**: add `VG_SECRET_KEY`, `VG_ADMIN_USER`,
-  `VG_ADMIN_PASSWORD` with the values from your `.env`
+Watch for `Created bootstrap admin user 'admin'.` in the output, or check
+`docker compose logs volume-gallery` afterward if you missed it.
 
-Save and start the app. Watch its logs (Apps → volume-gallery → Logs) for
-`Created bootstrap admin user 'admin'.`
+### 3. First login and cleanup
 
-Alternatively, if you'd rather manage it with plain `docker compose` instead
-of the Apps UI (SCALE ships Docker, so this works fine from the shell too):
-
-```bash
-docker compose up -d --build
-```
-
-### 4. First login and cleanup
-
-- Visit `http://<truenas-ip>:8000`, sign in with the admin account.
+- Visit the URL `setup.sh` printed (`https://<host>:8443/` by default), sign
+  in with the admin account.
 - Go to **Users** and create real accounts (editors, readers) — you can
   disable or delete the bootstrap admin later once you have another admin.
 - Have an editor upload the first volume and grant readers access.
+
+### 4. If you'd rather not use docker compose
+
+TrueNAS SCALE's **Apps → Discover Apps → Custom App** UI runs a single
+container, which doesn't map cleanly onto this stack (app + nginx +
+mounted config/cert files) — `docker compose` (steps above) is the
+better-supported path here. If you still want the Apps UI specifically —
+e.g. to get this app's status/logs alongside your other Apps in one place —
+you can point a Custom App at just the `volume-gallery` image (built via
+`docker build -f backend/Dockerfile -t volume-gallery:latest .`) with its
+`/data` volume and env vars set as in `.env`, and put your own separately-
+managed reverse proxy in front of its exposed port for HTTPS — you'd be
+reimplementing what `nginx/nginx.conf` already does, so this is only worth
+it if you specifically want everything inside the Apps UI.
 
 ### 5. Putting it behind HTTPS (required for the viewer, not just recommended)
 
 **This isn't optional the way it sounds.** WebGPU — which kiln-render needs to
 render anything — is only exposed by browsers on a *secure context*:
-`https://`, or `http://localhost`. A plain `http://<lan-ip>:8000` origin never
+`https://`, or `http://localhost`. A plain `http://<lan-ip>` origin never
 gets `navigator.gpu` at all, in any browser, on any GPU. If you open the app
-at its bare TrueNAS IP over HTTP, the viewer page will correctly report that
-WebGPU isn't available — that's not a bug, it's the browser enforcing this
-rule. User management and volume upload work fine over plain HTTP; only the
-in-browser volume viewer needs the secure origin.
+over plain HTTP, the viewer page will correctly report that WebGPU isn't
+available — that's not a bug, it's the browser enforcing this rule. User
+management and volume upload work fine over plain HTTP; only the in-browser
+volume viewer needs the secure origin.
 
-Two ways to satisfy it:
+This repo ships an **nginx** reverse proxy (`nginx/nginx.conf`) already wired
+into `docker-compose.yml` for this — it terminates TLS, redirects plain HTTP
+to HTTPS, and forwards `X-Forwarded-Proto: https` so the backend's signed
+data URLs come back as `https://` (the backend's `uvicorn` already runs with
+`--proxy-headers` to trust that). It's also configured with no upload size
+cap and long request timeouts, since OME-Zarr/TIFF archives can be large and
+TIFF conversion runs synchronously within the upload request. The host ports
+it listens on (`VG_HTTP_PORT`/`VG_HTTPS_PORT` in `.env`, default 8080/8443)
+and where it looks for the certificate (`VG_CERT_DIR`, default
+`./nginx/certs`) are both configurable — the defaults avoid 80/443
+specifically because TrueNAS's own web UI commonly already occupies those.
 
-**A. Reverse proxy with TLS (recommended for anything beyond quick testing).**
-Put a reverse proxy in front of the app and terminate TLS there — Caddy is
-the least fuss for a home/lab TrueNAS box because it can mint its own
-certificates automatically. Install it the same way as this app (Custom App
-or `docker compose`), pointed at `volume-gallery:8000`, and give it either:
-- a real domain name with public DNS (Caddy gets you a trusted Let's Encrypt
-  cert automatically), or
-- an internal CA / self-signed cert for a `.local`/internal hostname, which
-  works for WebGPU's secure-context check but will show a browser warning
-  you'll need to click through (or install the CA cert on your devices to
-  avoid that).
+**You still need a certificate** — nginx doesn't mint one for you the way
+Caddy does. Two ways to get one:
 
-Minimal example `Caddyfile` if you go the internal-hostname route:
+**A. Self-signed, for LAN/internal use (the common case for a home/lab NAS).**
+`./setup.sh <host>` (see "Running with Docker Compose" above) does this for
+you as part of setup. To do just this step by hand instead:
+```bash
+./nginx/generate-self-signed-cert.sh 192.168.1.50   # your TrueNAS IP or hostname
+docker compose up -d --build
+```
+This writes `fullchain.pem`/`privkey.pem` into `VG_CERT_DIR` (default
+`nginx/certs/`), which nginx picks up automatically. If your certs already
+live somewhere else — e.g. a dedicated TrueNAS certificate dataset — point
+`VG_CERT_DIR` in `.env` at that directory instead of copying files into this
+repo; `generate-self-signed-cert.sh <host> <dir>` also accepts the directory
+as a second argument if you want to generate straight into it. Browsers will
+show an untrusted-certificate warning for a self-signed cert — that's
+expected; click through it (or import the cert into your OS/browser trust
+store to avoid the warning). Either way this satisfies WebGPU's
+secure-context check: that check is about the protocol (`https://`), not
+certificate trust — those are two separate things browsers verify.
+
+**B. A real certificate** (e.g. from Let's Encrypt, if you have a public
+domain pointed at this box, or one issued some other way). Skip the script
+and just place your own `fullchain.pem`/`privkey.pem` — same two filenames
+nginx is already configured to look for — in `VG_CERT_DIR`.
+
+If you'd rather use Caddy instead (it can mint Let's Encrypt certs
+automatically, which is convenient if you do have a public domain), swap the
+`nginx` service in `docker-compose.yml` for a Caddy one pointed at
+`volume-gallery:8000`, with `tls internal` for the self-signed case:
 ```
 volume-gallery.home.arpa {
     reverse_proxy volume-gallery:8000
@@ -210,23 +316,14 @@ volume-gallery.home.arpa {
 }
 ```
 
-One thing to get right when you add a proxy: the backend builds the absolute
-URLs it hands the browser (for streaming zarr data) from the incoming
-request's scheme, so it needs to know the *original* request was HTTPS even
-though the proxy talks to it over plain HTTP internally. The image's `uvicorn`
-already runs with `--proxy-headers`, which trusts a `X-Forwarded-Proto`
-header from the proxy — Caddy's `reverse_proxy` sets this automatically, no
-extra config needed. If you use a different proxy, make sure it forwards
-`X-Forwarded-Proto: https`. Once a proxy is in front, it's also worth
-removing the direct `8000:8000` port mapping in `docker-compose.yml` so the
-app is only reachable through the proxy.
-
-**B. Quick LAN testing without setting up TLS at all.** Chrome and Edge let
+**C. Quick LAN testing without setting up TLS at all.** Chrome and Edge let
 you manually mark a specific insecure origin as trusted for local
 development: visit `chrome://flags/#unsafely-treat-insecure-origin-as-secure`,
 add `http://<truenas-ip>:8000`, and relaunch the browser. This only affects
-that one browser profile and is meant for testing — use option A for
-anything other users will rely on.
+that one browser profile and is meant for testing — use A or B for anything
+other users will rely on. Note this requires temporarily adding back the
+`volume-gallery` service's direct port mapping in `docker-compose.yml` (it's
+commented out by default now that nginx fronts it).
 
 Beyond WebGPU, HTTPS also matters here because JWTs and the signed file
 tokens are passed as plain bearer tokens / URL query params, and you don't
@@ -241,12 +338,21 @@ no separate backup step is needed inside the app.
 
 ### Updating
 
+If you're pulling a published image (`VG_IMAGE` set in `.env`):
+```bash
+cd /mnt/tank/apps/volume-gallery/src
+docker compose pull
+docker compose up -d
+```
+
+If you're building from source instead:
 ```bash
 cd /mnt/tank/apps/volume-gallery/src
 git pull
-docker build -f backend/Dockerfile -t volume-gallery:latest .
+docker compose up -d --build
 ```
 
-Then restart the app from the Apps UI (or `docker compose up -d --build`
-if you went the compose route). The SQLite schema is additive-only in this
-version, so no migration step is required between minor updates.
+`.env` and `nginx/certs/` are untouched by either path — no need to re-run
+`setup.sh`. The SQLite schema migrates itself automatically on startup (see
+`backend/app/database.py`), so no manual migration step is needed between
+updates.
