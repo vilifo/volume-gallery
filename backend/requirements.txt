@@ -1,15 +1,15 @@
 fastapi==0.141.1
 uvicorn[standard]==0.52.4
-sqlmodel==0.0.22
+sqlmodel==0.0.42
 python-jose[cryptography]==3.3.0
 passlib==1.7.4
 bcrypt==4.0.1
-python-multipart==0.0.9
+python-multipart==0.0.32
 
 # --- TIFF-stack -> OME-Zarr conversion (backend/app/tiff_convert.py) ---
 tifffile==2026.8.23
 numpy==2.5.3
 # ome-zarr-py writes/reads via the zarr-python v2 API; pin below v3 until it
 # adds v3 support, or `write_image()` will fail on import/attribute errors.
-zarr==2.18.7
-ome-zarr==0.11.1
+zarr==3.3.0
+ome-zarr==0.19.1

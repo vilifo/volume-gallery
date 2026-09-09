@@ -14,7 +14,6 @@ import dask
 import dask.array as da
 import tifffile
 import zarr
-from ome_zarr.io import parse_url
 from ome_zarr.writer import write_image
 
 TIFF_EXTENSIONS = (".tif", ".tiff")
@@ -56,8 +55,7 @@ def convert_tiff_stack_to_ome_zarr(tiff_dir: Path, zarr_dir: Path) -> None:
     zarr_dir = Path(zarr_dir)
     zarr_dir.mkdir(parents=True, exist_ok=True)
 
-    store = parse_url(str(zarr_dir), mode="w").store
-    root_group = zarr.group(store=store)
+    root_group = zarr.open_group(zarr_dir, mode="w")
 
     write_image(
         image=image_data,

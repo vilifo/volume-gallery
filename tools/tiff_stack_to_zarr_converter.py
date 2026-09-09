@@ -3,7 +3,6 @@ import tifffile
 import dask
 import dask.array as da
 import zarr
-from ome_zarr.io import parse_url
 from ome_zarr.writer import write_image
 from argparse import ArgumentParser
 
@@ -41,8 +40,7 @@ def tiff_to_ome_zarr(tiff_path, zarr_path):
     os.makedirs(zarr_path, exist_ok=True)
 
     # Create the output Zarr store
-    store = parse_url(zarr_path, mode="w").store
-    root_group = zarr.group(store=store)
+    root_group = zarr.open_group(zarr_path, mode="w")
 
     # write_image will trigger the execution, reading and writing chunk-by-chunk
     print("Writing Zarr pyramid...")
