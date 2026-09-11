@@ -1,6 +1,6 @@
 import enum
 from datetime import datetime
-from typing import Optional, List
+from typing import Optional
 
 from sqlmodel import SQLModel, Field, Relationship
 
@@ -11,7 +11,7 @@ class Role(str, enum.Enum):
     reader = "reader"
 
 
-class VolumeStatus(str, enum.Enum):
+class AssetStatus(str, enum.Enum):
     processing = "processing"
     ready = "ready"
     failed = "failed"
@@ -26,33 +26,37 @@ class User(SQLModel, table=True):
     disabled: bool = Field(default=False)
 
 
-class Volume(SQLModel, table=True):
-    id: Optional[int] = Field(default=None, primary_key=True)
-    slug: str = Field(index=True, unique=True)  # folder name on disk, also used in URLs
+class AssetBase(SQLModel):
+    slug: str = Field(index=True, unique=True)
     title: str
     description: str = Field(default="")
-    # Relative path (inside VOLUMES_DIR/<slug>/) to the OME-Zarr root, e.g. "data.ome.zarr"
-    zarr_path: str = Field(default="data.ome.zarr")
-    has_mesh: bool = Field(default=False)
-    mesh_filename: Optional[str] = Field(default=None)
-    thumbnail_path: Optional[str] = Field(default=None)
+    file_path: str
+    thumbnail_path: Optional[str] = None
     created_by: Optional[int] = Field(default=None, foreign_key="user.id")
     created_at: datetime = Field(default_factory=datetime.utcnow)
-    # Extraction/conversion happens in a background task after the upload
-    # request returns (see routers/volumes.py: _process_upload) — "ready"
-    # for volumes created before this field existed (see database.py's
-    # startup migration for how the column gets backfilled).
-    status: VolumeStatus = Field(default=VolumeStatus.ready)
-    # Newline-joined, timestamp-prefixed progress messages, appended to as
-    # background processing runs. Kept as plain text rather than a separate
-    # table — this app has no need to query into it, only display it whole.
+    status: AssetStatus = Field(default=AssetStatus.ready)
     status_log: str = Field(default="")
 
 
-class VolumeAccess(SQLModel, table=True):
+class Mesh(AssetBase, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    volume_id: Optional[int] = Field(default=None, foreign_key="volume.id")
+    volume: Optional["Volume"] = Relationship(back_populates="mesh")
+
+
+class PointCloud(AssetBase, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+
+
+class Volume(AssetBase, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    mesh: Optional["Mesh"] = Relationship(back_populates="volume")
+
+
+class AssetAccess(SQLModel, table=True):
     """Grants a reader visibility into a volume. Admins and editors bypass this table."""
     id: Optional[int] = Field(default=None, primary_key=True)
     user_id: int = Field(foreign_key="user.id", index=True)
-    volume_id: int = Field(foreign_key="volume.id", index=True)
+    asset_id: int = Field(foreign_key="volume.id", index=True)
     granted_by: Optional[int] = Field(default=None, foreign_key="user.id")
     granted_at: datetime = Field(default_factory=datetime.utcnow)

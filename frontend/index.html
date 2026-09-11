@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Gallery — Volume Gallery</title>
+<title>Gallery — Assets Gallery</title>
 <link rel="stylesheet" href="/css/style.css" />
 <style>
   .status-badge {
@@ -27,16 +27,16 @@
   }
   @keyframes vg-spin { to { transform: rotate(360deg); } }
 
-  .volume-row .log-line {
+  .asset-row .log-line {
     font-size: 0.78em;
     color: var(--text-dim);
     margin-top: 0.25em;
     font-family: var(--mono);
   }
-  .volume-row .log-line.failed { color: var(--danger); }
-  .volume-row .title.disabled { color: var(--text-dim); pointer-events: none; }
+  .asset-row .log-line.failed { color: var(--danger); }
+  .asset-row .title.disabled { color: var(--text-dim); pointer-events: none; }
 
-  .volume-row.just-uploaded {
+  .asset-row.just-uploaded {
     animation: vg-highlight 2.5s ease-out;
     border-radius: var(--radius);
   }
@@ -68,7 +68,7 @@
         <div class="toolbar">
           <div>
             <h1>Gallery</h1>
-            <p class="subtitle">Volumes you can view.</p>
+            <p class="subtitle">Assets you can view.</p>
           </div>
         </div>
         <div id="list"></div>
@@ -104,7 +104,7 @@
     function renderRow(v) {
       const viewable = v.status === "ready";
       return `
-        <div class="volume-row" data-volume-row="${v.id}">
+        <div class="asset-row" data-asset-row="${v.id}">
           <div class="swatch">CT</div>
           <div class="meta">
             <div class="title">
@@ -141,33 +141,33 @@
 
     async function load({ isPoll = false } = {}) {
       const listEl = document.getElementById("list");
-      let volumes;
+      let assets;
       try {
-        volumes = await api.listVolumes();
+        assets = await api.listAssets();
       } catch (err) {
         if (!isPoll) listEl.innerHTML = `<div class="error-box">${err.message}</div>`;
         return;
       }
 
-      if (volumes.length === 0) {
+      if (assets.length === 0) {
         listEl.innerHTML = `<div class="empty-state">
-          No volumes yet.${role !== "reader" ? " Use \u201cUpload volume\u201d to add one." : " Ask an editor to grant you access."}
+          No assets yet.${role !== "reader" ? " Use \u201cUpload asset\u201d to add one." : " Ask an editor to grant you access."}
         </div>`;
         return;
       }
 
-      listEl.innerHTML = volumes.map(renderRow).join("");
+      listEl.innerHTML = assets.map(renderRow).join("");
       wireRowActions(listEl);
 
       if (justUploadedId) {
-        const row = listEl.querySelector(`[data-volume-row="${justUploadedId}"]`);
+        const row = listEl.querySelector(`[data-asset-row="${justUploadedId}"]`);
         if (row) {
           row.classList.add("just-uploaded");
           row.scrollIntoView({ behavior: "smooth", block: "center" });
         }
       }
 
-      const stillProcessing = volumes.some((v) => v.status === "processing");
+      const stillProcessing = assets.some((v) => v.status === "processing");
       clearTimeout(pollTimer);
       if (stillProcessing) {
         pollTimer = setTimeout(() => load({ isPoll: true }), 1500);

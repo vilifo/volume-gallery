@@ -12,7 +12,7 @@ class Settings:
 
     # --- Storage ---
     DATA_DIR: Path = Path(os.environ.get("VG_DATA_DIR", "/data"))
-    VOLUMES_DIR: Path = DATA_DIR / "volumes"
+    ASSETS_DIR: Path = DATA_DIR / "assets"
     DB_PATH: Path = DATA_DIR / "gallery.db"
 
     # --- Bootstrap admin (only used on first run, if no users exist) ---
@@ -28,4 +28,4 @@ class Settings:
     FRONTEND_DIR: str = os.environ.get("VG_FRONTEND_DIR", _default_frontend)
 
 settings = Settings()
-settings.VOLUMES_DIR.mkdir(parents=True, exist_ok=True)
+settings.ASSETS_DIR.mkdir(parents=True, exist_ok=True)

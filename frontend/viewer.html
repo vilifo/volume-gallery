@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Viewer — Volume Gallery</title>
+<title>Viewer — Assets Gallery</title>
 <link rel="stylesheet" href="/css/style.css" />
 <style>
   /* This page trades the app's normal padded/max-width main column for an
@@ -316,7 +316,7 @@
     requireLogin();
     const role = getRole();
     const params = new URLSearchParams(window.location.search);
-    const volumeId = params.get("id");
+    const assetId = params.get("id");
 
     const EXPAND_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M21 16v3a2 2 0 0 1-2 2h-3M3 16v3a2 2 0 0 0 2 2h3"/></svg>`;
     const COLLAPSE_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3v3a2 2 0 0 1-2 2H4M15 3v3a2 2 0 0 0 2 2h3M4 16h3a2 2 0 0 1 2 2v3M20 16h-3a2 2 0 0 0-2 2v3"/></svg>`;
@@ -366,13 +366,13 @@
     }
 
     async function init() {
-      if (!volumeId) {
-        content.innerHTML = `<div class="error-box" style="margin:1.4em">No volume specified.</div>`;
+      if (!assetId) {
+        content.innerHTML = `<div class="error-box" style="margin:1.4em">No asset specified.</div>`;
         return;
       }
-      let volume;
+      let asset;
       try {
-        volume = await api.getVolume(volumeId);
+        asset = await api.getAsset(assetId);
       } catch (err) {
         content.innerHTML = `<div class="error-box" style="margin:1.4em">${err.message}</div>`;
         return;
@@ -381,12 +381,12 @@
       content.innerHTML = `
         <div class="viewer-topbar">
           <div class="viewer-titles">
-            <h1>${escapeHtml(volume.title)}</h1>
-            ${volume.description ? `<div class="viewer-desc">${escapeHtml(volume.description)}</div>` : ""}
+            <h1>${escapeHtml(asset.title)}</h1>
+            ${asset.description ? `<div class="viewer-desc">${escapeHtml(asset.description)}</div>` : ""}
           </div>
           <div class="viewer-topbar-actions">
             ${
-              volume.has_mesh
+              asset.has_mesh
                 ? `<button id="download-mesh" class="icon-btn">${DOWNLOAD_ICON}<span class="icon-btn-label">Download mesh</span></button>`
                 : ""
             }
@@ -424,14 +424,14 @@
       }
 
       try {
-        const access = await api.zarrAccessUrl(volumeId);
+        const access = await api.zarrAccessUrl(assetId);
         const canvas = document.getElementById("canvas");
         const viewer = await KilnViewer.create(canvas, access.url);
         statusEl.style.display = "none";
         buildControlPanel(viewer, canvasWrap);
         startStatsLoop(viewer, canvasWrap);
       } catch (err) {
-        statusEl.textContent = `Could not load volume: ${err.message}`;
+        statusEl.textContent = `Could not load asset: ${err.message}`;
         statusEl.style.display = "flex";
       }
 
@@ -439,7 +439,7 @@
       if (downloadBtn) {
         downloadBtn.addEventListener("click", async () => {
           try {
-            const access = await api.meshAccessUrl(volumeId);
+            const access = await api.meshAccessUrl(assetId);
             window.location.href = access.url;
           } catch (err) {
             alert(err.message);

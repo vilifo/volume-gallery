@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Upload volume — Volume Gallery</title>
+<title>Upload asset — Assets Gallery</title>
 <link rel="stylesheet" href="/css/style.css" />
 <style>
   .source-toggle { display: flex; gap: 0.5em; margin-bottom: 1.4em; }
@@ -102,13 +102,13 @@
     // pattern="..." attribute here — browsers increasingly compile <input
     // pattern> with the "v" flag, whose character-class grammar is stricter
     // (and inconsistent across engines) than a plain RegExp literal like
-    // this one. Keep this in sync with SLUG_RE in backend/app/routers/volumes.py.
+    // this one. Keep this in sync with SLUG_RE in backend/app/routers/assets.py.
     const SLUG_RE = /^[a-z0-9][a-z0-9_-]{1,62}$/;
 
     document.getElementById("shell").innerHTML = `
       ${renderShell("upload", role, getUsername())}
       <main>
-        <h1>Upload volume</h1>
+        <h1>Upload asset</h1>
         <p class="subtitle">
           Provide either an OME-Zarr archive or a TIFF stack — a TIFF stack is
           converted to OME-Zarr on the server, then the original TIFF files
@@ -120,6 +120,8 @@
         <div class="source-toggle">
           <button type="button" id="src-zarr" class="active">OME-Zarr (.zip)</button>
           <button type="button" id="src-tiff">TIFF stack (.zip of .tif files)</button>
+          <button type="button" id="src-mesh">Mesh file (.stl, .obj, .ply, \u2026)</button>
+          <button type="button" id="src-point-cloud">Point cloud file (.pcd, .ply, \u2026)</button>
         </div>
 
         <form id="form">
@@ -154,10 +156,21 @@
             </div>
           </div>
 
-          <div class="field">
-            <label for="mesh_file">Mesh file (optional — .stl, .obj, .ply, \u2026)</label>
-            <input id="mesh_file" type="file" />
+          <div class="field" id="mesh-field-optional">
+            <label for="mesh_file_optional">Mesh file (optional — .stl, .obj, .ply, \u2026)</label>
+            <input id="mesh_file_optional" type="file" />
           </div>
+
+          <div class="field" id="mesh-field" style="display:none">
+            <label for="mesh_file">Mesh file (.stl, .obj, .ply, \u2026)</label>
+            <input id="mesh_file" type="file" accept=".stl,.3mf,.ply,.obj,.glb" />
+          </div>
+
+          <div class="field" id="point-cloud-field" style="display:none">
+            <label for="point_cloud_file">Point cloud file (.laz, .obj, .ply, \u2026)</label>
+            <input id="point_cloud_file" type="file" accept=".laz,.obj,.ply" />
+          </div>
+
           <button type="submit" class="primary">Upload</button>
         </form>
 
@@ -179,18 +192,31 @@
     let source = "zarr";
     const srcZarrBtn = document.getElementById("src-zarr");
     const srcTiffBtn = document.getElementById("src-tiff");
+    const srcMeshBtn = document.getElementById("src-mesh");
+    const srcPointCloudBtn = document.getElementById("src-point-cloud");
+    const meshFieldOptional = document.getElementById("mesh-field-optional");
     const zarrField = document.getElementById("zarr-field");
     const tiffField = document.getElementById("tiff-field");
+    const meshField = document.getElementById("mesh-field");
+    const pointCloudField = document.getElementById("point-cloud-field");
 
     function setSource(next) {
       source = next;
       srcZarrBtn.classList.toggle("active", source === "zarr");
       srcTiffBtn.classList.toggle("active", source === "tiff");
+      srcMeshBtn.classList.toggle("active", source === "mesh");
+      srcPointCloudBtn.classList.toggle("active", source === "point-cloud");
+
       zarrField.style.display = source === "zarr" ? "" : "none";
       tiffField.style.display = source === "tiff" ? "" : "none";
+      meshField.style.display = source === "mesh" ? "" : "none";
+      pointCloudField.style.display = source === "point-cloud" ? "" : "none";
+      meshFieldOptional.style.display = source === "zarr" || source === "tiff" ? "" : "none";
     }
     srcZarrBtn.addEventListener("click", () => setSource("zarr"));
     srcTiffBtn.addEventListener("click", () => setSource("tiff"));
+    srcMeshBtn.addEventListener("click", () => setSource("mesh"));
+    srcPointCloudBtn.addEventListener("click", () => setSource("point-cloud"));
 
     const form = document.getElementById("form");
     const errorBox = document.getElementById("error");
@@ -229,13 +255,29 @@
         return;
       }
 
-      const sourceFile =
-        source === "zarr"
-          ? document.getElementById("zarr_zip").files[0]
-          : document.getElementById("tiff_zip").files[0];
+      let sourceFile;
+      let errorMessage;
+      switch (source){
+        case "zarr":
+          sourceFile = document.getElementById("zarr_zip").files[0];
+          errorMessage = "Choose an OME-Zarr .zip file.";
+          break;
+        case "tiff":
+          sourceFile = document.getElementById("tiff_zip").files[0];
+          errorMessage = "Choose a TIFF stack .zip file.";
+          break;
+        case "mesh":
+          sourceFile = document.getElementById("mesh_file").files[0];
+          errorMessage = "Choose a mesh file (.stl, .obj, .ply, etc.).";
+          break;
+        case "point-cloud":
+          sourceFile = document.getElementById("point_cloud_file").files[0];
+          errorMessage = "Choose a point cloud file (.laz, .obj, .ply, etc.).";
+          break;
+      }
+
       if (!sourceFile) {
-        errorBox.textContent =
-          source === "zarr" ? "Choose an OME-Zarr .zip file." : "Choose a TIFF stack .zip file.";
+        errorBox.textContent = errorMessage;
         errorBox.style.display = "block";
         return;
       }
@@ -244,13 +286,22 @@
       fd.append("slug", slug);
       fd.append("title", document.getElementById("title").value.trim());
       fd.append("description", document.getElementById("description").value.trim());
-      if (source === "zarr") {
-        fd.append("zarr_zip", sourceFile);
-      } else {
-        fd.append("tiff_zip", sourceFile);
+      switch (source) {
+        case "zarr":
+          fd.append("zarr_zip", sourceFile);
+          break;
+        case "tiff":
+          fd.append("tiff_zip", sourceFile);
+          break;
+        case "mesh":
+          fd.append("mesh_file", sourceFile);
+          break;
+        case "point-cloud":
+          fd.append("point_cloud_file", sourceFile);
+          break;
       }
-      const meshFile = document.getElementById("mesh_file").files[0];
-      if (meshFile) fd.append("mesh_file", meshFile);
+      const meshFile = document.getElementById("mesh_file_optional").files[0];
+      if (meshFile) fd.append("mesh_file_optional", meshFile);
 
       form.style.display = "none";
       progressBox.style.display = "block";
@@ -259,7 +310,7 @@
       setProgress(0);
 
       try {
-        const volume = await api.createVolumeWithProgress(fd, setProgress);
+        const asset = await api.createAssetWithProgress(fd, setProgress);
         progressSpinner.style.display = "none";
         progressCheck.style.display = "block";
         progressTrack.classList.remove("indeterminate");
@@ -267,11 +318,11 @@
         progressPercent.textContent = "";
         progressLabel.textContent = "Uploaded \u2014 processing in the background";
         // The heavy lifting (extraction / TIFF conversion) now happens
-        // server-side after this response, tracked by volume.status; the
+        // server-side after this response, tracked by asset.status;
         // gallery polls that and shows it live, so hand off there rather
         // than making the user sit on this page waiting for it.
         setTimeout(() => {
-          window.location.href = `/index.html?justUploaded=${volume.id}`;
+          window.location.href = `/index.html?justUploaded=${asset.id}`;
         }, 500);
       } catch (err) {
         form.style.display = "";

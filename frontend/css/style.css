@@ -6,7 +6,7 @@
     coordinates, since this is a scientific-imaging tool and those really are data,
     not decoration.
   Layout — a fixed left rail (role + nav) and a content column, left-aligned,
-    max content width ~1100px. No card-grid-with-shadows kit; volumes are listed as
+    max content width ~1100px. No card-grid-with-shadows kit; assets are listed as
     dense rows with a thumbnail swatch, closer to a lab instrument's sample list than
     a marketing grid.
 */
@@ -123,15 +123,15 @@ h2 { font-size: 1.1em; margin: 0 0 0.8em; }
 .mono { font-family: var(--mono); }
 .dim { color: var(--text-dim); }
 
-/* --- volume list (gallery) --- */
-.volume-row {
+/* --- asset list (gallery) --- */
+.asset-row {
   display: flex;
   align-items: center;
   gap: 1em;
   padding: 0.9em 0;
   border-bottom: 1px solid var(--line);
 }
-.volume-row:hover { background: rgba(255,255,255,0.02); }
+.asset-row:hover { background: rgba(255,255,255,0.02); }
 .swatch {
   width: 48px; height: 48px;
   border-radius: var(--radius);
@@ -142,10 +142,10 @@ h2 { font-size: 1.1em; margin: 0 0 0.8em; }
   color: var(--text-dim);
   font-size: 0.7em;
 }
-.volume-row .meta { flex: 1; min-width: 0; }
-.volume-row .title { font-weight: 600; }
-.volume-row .slug { font-family: var(--mono); font-size: 0.82em; color: var(--text-dim); }
-.volume-row .actions { display: flex; gap: 0.5em; flex-shrink: 0; }
+.asset-row .meta { flex: 1; min-width: 0; }
+.asset-row .title { font-weight: 600; }
+.asset-row .slug { font-family: var(--mono); font-size: 0.82em; color: var(--text-dim); }
+.asset-row .actions { display: flex; gap: 0.5em; flex-shrink: 0; }
 
 .empty-state {
   border: 1px dashed var(--line);

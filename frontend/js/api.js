@@ -61,10 +61,10 @@ export const api = {
   me() { return request("/api/users/me"); },
 
   // volumes
-  listVolumes() { return request("/api/volumes"); },
-  getVolume(id) { return request(`/api/volumes/${id}`); },
-  createVolume(formData) {
-    return request("/api/volumes", { method: "POST", body: formData });
+  listAssets() { return request("/api/assets"); },
+  getAsset(id) { return request(`/api/assets/${id}`); },
+  createAsset(formData) {
+    return request("/api/assets", { method: "POST", body: formData });
   },
   // XHR-based (not fetch) specifically to get real upload-progress events —
   // fetch has no stable cross-browser API for tracking request-body upload
@@ -72,10 +72,11 @@ export const api = {
   // fires as bytes actually leave the browser; it does NOT track server-side
   // processing (that's what /status polling is for, since processing now
   // happens in a background task after this request already returned).
-  createVolumeWithProgress(formData, onProgress) {
+  createAssetWithProgress(formData, onProgress) {
     return new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest();
-      xhr.open("POST", "/api/volumes");
+      xhr.open("POST", "/api/assets");
+      xhr.open("POST", "/api/assets");
       const token = getToken();
       if (token) xhr.setRequestHeader("Authorization", `Bearer ${token}`);
       xhr.upload.addEventListener("progress", (evt) => {
@@ -101,23 +102,23 @@ export const api = {
       xhr.send(formData);
     });
   },
-  getVolumeStatus(id) { return request(`/api/volumes/${id}/status`); },
-  deleteVolume(id) { return request(`/api/volumes/${id}`, { method: "DELETE" }); },
+  getAssetStatus(id) { return request(`/api/assets/${id}/status`); },
+  deleteAsset(id) { return request(`/api/assets/${id}`, { method: "DELETE" }); },
   uploadMesh(id, formData) {
-    return request(`/api/volumes/${id}/mesh`, { method: "POST", body: formData });
+    return request(`/api/assets/${id}/mesh`, { method: "POST", body: formData });
   },
-  zarrAccessUrl(id) { return request(`/api/volumes/${id}/zarr-access-url`); },
-  meshAccessUrl(id) { return request(`/api/volumes/${id}/mesh-access-url`); },
-  listAccess(id) { return request(`/api/volumes/${id}/access`); },
+  zarrAccessUrl(id) { return request(`/api/assets/${id}/zarr-access-url`); },
+  meshAccessUrl(id) { return request(`/api/assets/${id}/mesh-access-url`); },
+  listAccess(id) { return request(`/api/assets/${id}/access`); },
   grantAccess(id, userId) {
-    return request(`/api/volumes/${id}/access`, {
+    return request(`/api/assets/${id}/access`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ user_id: userId }),
     });
   },
   revokeAccess(id, userId) {
-    return request(`/api/volumes/${id}/access/${userId}`, { method: "DELETE" });
+    return request(`/api/assets/${id}/access/${userId}`, { method: "DELETE" });
   },
 
   // users (admin)
@@ -142,7 +143,7 @@ export const api = {
 export function renderShell(activePage, role, username) {
   const navItems = [{ href: "/index.html", label: "Gallery", key: "gallery" }];
   if (role === "editor" || role === "admin") {
-    navItems.push({ href: "/upload.html", label: "Upload volume", key: "upload" });
+    navItems.push({ href: "/upload.html", label: "Upload asset", key: "upload" });
   }
   if (role === "admin") {
     navItems.push({ href: "/admin.html", label: "Users", key: "admin" });
@@ -155,7 +156,7 @@ export function renderShell(activePage, role, username) {
     .join("");
   return `
     <div class="rail">
-      <div class="brand">Volume Gallery</div>
+      <div class="brand">Asset Gallery</div>
       <div class="role-tag">${role}</div>
       <nav>${nav}</nav>
       <div class="spacer"></div>

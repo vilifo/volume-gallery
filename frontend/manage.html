@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Manage volume — Volume Gallery</title>
+<title>Manage asset — Assets Gallery</title>
 <link rel="stylesheet" href="/css/style.css" />
 </head>
 <body>
@@ -17,7 +17,7 @@
     if (role !== "editor" && role !== "admin") window.location.href = "/index.html";
 
     const params = new URLSearchParams(window.location.search);
-    const volumeId = params.get("id");
+    const assetId = params.get("id");
 
     document.getElementById("shell").innerHTML = `
       ${renderShell("gallery", role, getUsername())}
@@ -28,9 +28,9 @@
     const content = document.getElementById("content");
 
     async function load() {
-      const [volume, granted, allUsers] = await Promise.all([
-        api.getVolume(volumeId),
-        api.listAccess(volumeId),
+      const [asset, granted, allUsers] = await Promise.all([
+        api.getAsset(assetId),
+        api.listAccess(assetId),
         api.listUsers().catch(() => []), // editors may not have list-users; fall back gracefully
       ]);
 
@@ -38,14 +38,14 @@
       const readerCandidates = allUsers.filter((u) => u.role === "reader" && !grantedIds.has(u.id));
 
       content.innerHTML = `
-        <h1>${escapeHtml(volume.title)}</h1>
-        <p class="subtitle mono">${escapeHtml(volume.slug)}</p>
+        <h1>${escapeHtml(asset.title)}</h1>
+        <p class="subtitle mono">${escapeHtml(asset.slug)}</p>
         ${
-          volume.status !== "ready"
-            ? `<div class="${volume.status === "failed" ? "error-box" : "dim"}" style="margin-bottom:1.2em">
-                <strong>${volume.status === "failed" ? "Processing failed" : "Still processing"}</strong>
-                ${volume.status_log && volume.status_log.length
-                  ? `<div class="mono" style="margin-top:0.4em;font-size:0.85em;white-space:pre-wrap">${escapeHtml(volume.status_log.join("\n"))}</div>`
+          asset.status !== "ready"
+            ? `<div class="${asset.status === "failed" ? "error-box" : "dim"}" style="margin-bottom:1.2em">
+                <strong>${asset.status === "failed" ? "Processing failed" : "Still processing"}</strong>
+                ${asset.status_log && asset.status_log.length
+                  ? `<div class="mono" style="margin-top:0.4em;font-size:0.85em;white-space:pre-wrap">${escapeHtml(asset.status_log.join("\n"))}</div>`
                   : ""}
               </div>`
             : ""
@@ -81,17 +81,17 @@
         }
 
         <h2 style="margin-top:2em">Mesh</h2>
-        <p class="dim" style="font-size:0.9em">${volume.has_mesh ? escapeHtml(volume.mesh_filename) : "No mesh uploaded."}</p>
+        <p class="dim" style="font-size:0.9em">${asset.has_mesh ? escapeHtml(asset.mesh_filename) : "No mesh uploaded."}</p>
         <input type="file" id="mesh-file" style="max-width:320px" />
         <button id="mesh-upload-btn" style="margin-top:0.6em">Upload / replace mesh</button>
 
         <h2 style="margin-top:2em">Danger zone</h2>
-        <button class="danger" id="delete-btn">Delete this volume</button>
+        <button class="danger" id="delete-btn">Delete this asset</button>
       `;
 
       content.querySelectorAll("[data-revoke]").forEach((btn) => {
         btn.addEventListener("click", async () => {
-          await api.revokeAccess(volumeId, btn.dataset.revoke);
+          await api.revokeAccess(assetId, btn.dataset.revoke);
           load();
         });
       });
@@ -100,7 +100,7 @@
       if (grantBtn) {
         grantBtn.addEventListener("click", async () => {
           const userId = document.getElementById("grant-select").value;
-          await api.grantAccess(volumeId, userId);
+          await api.grantAccess(assetId, userId);
           load();
         });
       }
@@ -110,13 +110,13 @@
         if (!file) return;
         const fd = new FormData();
         fd.append("mesh_file", file);
-        await api.uploadMesh(volumeId, fd);
+        await api.uploadMesh(assetId, fd);
         load();
       });
 
       document.getElementById("delete-btn").addEventListener("click", async () => {
-        if (!confirm(`Delete "${volume.title}"? This removes its files permanently.`)) return;
-        await api.deleteVolume(volumeId);
+        if (!confirm(`Delete "${asset.title}"? This removes its files permanently.`)) return;
+        await api.deleteAsset(assetId);
         window.location.href = "/index.html";
       });
     }
