@@ -12,4 +12,4 @@ numpy==2.5.3
 # ome-zarr-py writes/reads via the zarr-python v2 API; pin below v3 until it
 # adds v3 support, or `write_image()` will fail on import/attribute errors.
 zarr==3.3.0
-ome-zarr==0.19.1
+ome-zarr==0.19.2
