@@ -7,7 +7,7 @@ bcrypt==4.0.1
 python-multipart==0.0.32
 
 # --- TIFF-stack -> OME-Zarr conversion (backend/app/tiff_convert.py) ---
-tifffile==2026.8.23
+tifffile==2026.9.9
 numpy==2.5.3
 # ome-zarr-py writes/reads via the zarr-python v2 API; pin below v3 until it
 # adds v3 support, or `write_image()` will fail on import/attribute errors.
