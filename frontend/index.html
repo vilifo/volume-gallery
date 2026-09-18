@@ -50,7 +50,7 @@
   <div class="app-shell" id="shell"></div>
 
   <script type="module">
-    import { api, requireLogin, getRole, getUsername, renderShell, wireLogout } from "/js/api.js";
+    import { api, requireLogin, getRole, getUsername, renderShell, wireLogout} from "/js/api.js";
 
     requireLogin();
     const role = getRole();
@@ -110,16 +110,16 @@
             <div class="title">
               ${
                 viewable
-                  ? `<a href="/viewer.html?id=${v.id}">${escapeHtml(v.title)}</a>`
+                  ? `<a href="/viewers/${v.asset_type}.html?id=${v.id}">${escapeHtml(v.title)}</a>`
                   : `<span class="disabled">${escapeHtml(v.title)}</span>`
               }
               ${statusBadge(v)}
             </div>
-            <div class="slug">${escapeHtml(v.slug)}${v.has_mesh ? " · mesh available" : ""}</div>
+            <div class="slug">${escapeHtml(v.slug)}${v.mesh ? " · mesh available" : ""}</div>
             ${latestLogLine(v)}
           </div>
           <div class="actions">
-            ${viewable ? `<a href="/viewer.html?id=${v.id}"><button>Open</button></a>` : ""}
+            ${viewable ? `<a href="/viewers/${v.asset_type}.html?id=${v.id}"><button>Open</button></a>` : ""}
             ${
               role === "admin" || role === "editor"
                 ? `<button data-manage="${v.id}">Manage</button>`

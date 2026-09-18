@@ -1,0 +1,498 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Viewer — Mesh Gallery</title>
+<link rel="stylesheet" href="/css/style.css" />
+<style>
+  /* This page trades the app's normal padded/max-width main column for an
+     edge-to-edge canvas — the render is the point of the page, everything
+     else (nav rail aside) should get out of its way. */
+  body.viewer-page { overflow: hidden; }
+  body.viewer-page .app-shell { height: 100vh; }
+  body.viewer-page main {
+    padding: 0;
+    max-width: none;
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    overflow: hidden;
+  }
+
+  .viewer-topbar {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 1.5em;
+    padding: 0.9em 1.4em;
+    border-bottom: 1px solid var(--line);
+    flex-shrink: 0;
+    background: var(--panel);
+  }
+  .viewer-topbar .viewer-titles { min-width: 0; }
+  .viewer-topbar h1 {
+    font-size: 1.1em;
+    margin: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .viewer-topbar .viewer-desc {
+    font-size: 0.83em;
+    color: var(--text-dim);
+    margin-top: 0.2em;
+    max-width: 60ch;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .viewer-topbar-actions { display: flex; gap: 0.6em; flex-shrink: 0; }
+
+  .icon-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5em;
+    padding: 0.5em 0.9em;
+    white-space: nowrap;
+  }
+  .icon-btn svg { width: 14px; height: 14px; flex-shrink: 0; }
+
+  .viewer-canvas-wrap {
+    flex: 1;
+    min-height: 0;
+    background: #000;
+    position: relative;
+    overflow: hidden;
+  }
+  .viewer-canvas-wrap canvas { width: 100%; height: 100%; display: block; outline: none; }
+
+  .viewer-canvas-wrap:fullscreen { width: 100vw; height: 100vh; }
+
+  .viewer-status {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--text-dim);
+    font-family: var(--mono);
+    font-size: 0.85em;
+    background: rgba(0, 0, 0, 0.6);
+    padding: 1.5em;
+    text-align: left;
+    line-height: 1.5;
+  }
+
+  /* --- Custom control panel --- */
+  .ctl-panel {
+    position: absolute;
+    top: 12px;
+    right: 12px;
+    width: 260px;
+    max-height: calc(100% - 24px);
+    display: flex;
+    flex-direction: column;
+    background: rgba(26, 29, 35, 0.92);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    border-radius: 10px;
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.05);
+    color: var(--text);
+    font-size: 12px;
+    overflow: hidden;
+  }
+  .ctl-panel-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+    background: rgba(20, 23, 28, 0.95);
+    border: none;
+    color: var(--accent);
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    font-size: 12px;
+    padding: 0.7em 0.9em;
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+  .ctl-panel-arrow { transition: transform 0.15s ease; flex-shrink: 0; }
+  .ctl-panel[data-collapsed="true"] .ctl-panel-arrow { transform: rotate(-90deg); }
+  .ctl-panel[data-collapsed="true"] .ctl-panel-body { display: none; }
+  .ctl-panel-body { padding: 0.85em; overflow-y: auto; }
+  .ctl-panel-body::-webkit-scrollbar { width: 6px; }
+  .ctl-panel-body::-webkit-scrollbar-track { background: transparent; }
+  .ctl-panel-body::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.15); border-radius: 3px; }
+
+  .ctl-segmented {
+    display: flex;
+    background: rgba(255, 255, 255, 0.05);
+    border-radius: 6px;
+    padding: 2px;
+    margin-bottom: 0.9em;
+  }
+  .ctl-segment {
+    flex: 1;
+    background: transparent;
+    border: none;
+    color: var(--text-dim);
+    padding: 0.45em 0;
+    border-radius: 5px;
+    font-size: 11px;
+    cursor: pointer;
+  }
+  .ctl-segment.active { background: var(--accent); color: #1a1400; font-weight: 600; }
+  .ctl-segment:not(.active):hover { color: var(--text); background: rgba(255, 255, 255, 0.06); }
+
+  .ctl-slider-row { display: flex; align-items: center; gap: 0.6em; margin-bottom: 0.7em; }
+  .ctl-slider-label { width: 62px; flex-shrink: 0; color: var(--text-dim); font-size: 11px; }
+  .ctl-slider-track { position: relative; flex: 1; height: 4px; background: rgba(255, 255, 255, 0.1); border-radius: 2px; }
+  .ctl-slider-fill { position: absolute; top: 0; left: 0; height: 100%; background: var(--accent); border-radius: 2px; pointer-events: none; }
+  .ctl-slider-input {
+    position: absolute;
+    top: -6px;
+    left: 0;
+    width: 100%;
+    height: 16px;
+    margin: 0;
+    -webkit-appearance: none;
+    appearance: none;
+    background: transparent;
+    cursor: pointer;
+  }
+  .ctl-slider-input::-webkit-slider-thumb,
+  .ctl-slider-input::-moz-range-thumb {
+    -webkit-appearance: none;
+    width: 12px; height: 12px;
+    border-radius: 50%;
+    background: var(--accent);
+    border: 2px solid #14171c;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
+  }
+  .ctl-slider-input::-moz-range-track { background: transparent; }
+  .ctl-row-value { width: 42px; flex-shrink: 0; text-align: right; color: var(--text-dim); font-size: 10.5px; }
+  .ctl-mono { font-family: var(--mono); }
+
+  .ctl-toggle-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.7em; cursor: pointer; }
+  .ctl-toggle-label { font-size: 11px; color: var(--text-dim); }
+  .ctl-toggle-input { position: absolute; opacity: 0; width: 0; height: 0; }
+  .ctl-toggle-track {
+    position: relative;
+    width: 30px; height: 16px;
+    background: rgba(255, 255, 255, 0.12);
+    border-radius: 8px;
+    transition: background 0.15s ease;
+    flex-shrink: 0;
+  }
+  .ctl-toggle-track::after {
+    content: "";
+    position: absolute;
+    top: 2px; left: 2px;
+    width: 12px; height: 12px;
+    border-radius: 50%;
+    background: var(--text-dim);
+    transition: transform 0.15s ease, background 0.15s ease;
+  }
+  .ctl-toggle-input:checked + .ctl-toggle-track { background: rgba(232, 163, 61, 0.35); }
+  .ctl-toggle-input:checked + .ctl-toggle-track::after { transform: translateX(14px); background: var(--accent); }
+
+  .viewer-stats-hud {
+    position: absolute;
+    left: 12px;
+    bottom: 12px;
+    background: rgba(26, 29, 35, 0.85);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    border-radius: 10px;
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.4), 0 0 0 1px rgba(255, 255, 255, 0.05);
+    padding: 0.8em 1em;
+    font-family: var(--mono);
+    font-size: 0.72em;
+    color: var(--text-dim);
+    line-height: 1.65;
+    white-space: pre-wrap;
+    pointer-events: none;
+  }
+
+  @media (max-width: 700px) {
+    .viewer-topbar { flex-wrap: wrap; }
+    .icon-btn .icon-btn-label { display: none; }
+    .viewer-stats-hud { font-size: 0.65em; }
+  }
+</style>
+
+<!-- 3DHOP Core Dependencies -->
+<script src="/vendor/3dhop/spidergl.js"></script>
+<script src="/vendor/3dhop/presenter.js"></script>
+<script src="/vendor/3dhop/nexus.js"></script>
+<script src="/vendor/3dhop/ply.js"></script>
+<script src="/vendor/3dhop/trackball_turntable.js"></script>
+<script src="/vendor/3dhop/trackball_sphere.js"></script>
+</head>
+<body class="viewer-page">
+  <div class="app-shell" id="shell"></div>
+
+  <script type="module">
+    import { api, requireLogin, getRole, getUsername, renderShell, wireLogout } from "/js/api.js";
+
+    requireLogin();
+    const role = getRole();
+    const params = new URLSearchParams(window.location.search);
+    const assetId = params.get("id");
+
+    const EXPAND_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M21 16v3a2 2 0 0 1-2 2h-3M3 16v3a2 2 0 0 0 2 2h3"/></svg>`;
+    const COLLAPSE_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3v3a2 2 0 0 1-2 2H4M15 3v3a2 2 0 0 0 2 2h3M4 16h3a2 2 0 0 1 2 2v3M20 16h-3a2 2 0 0 0-2 2v3"/></svg>`;
+
+    document.getElementById("shell").innerHTML = `
+      ${renderShell("gallery", role, getUsername())}
+      <main>
+        <div id="content" style="display:flex; flex-direction:column; height:100%;"></div>
+      </main>
+    `;
+    wireLogout();
+
+    const content = document.getElementById("content");
+    let presenter = null;
+
+    function escapeHtml(s) {
+      const d = document.createElement("div");
+      d.textContent = s;
+      return d.innerHTML;
+    }
+
+    async function init() {
+      if (!assetId) {
+        content.innerHTML = `<div class="error-box" style="margin:1.4em">No asset specified.</div>`;
+        return;
+      }
+
+      let assetMetadata;
+      try {
+        assetMetadata = await api.getAsset(assetId);
+      } catch (err) {
+        content.innerHTML = `<div class="error-box" style="margin:1.4em">${err.message}</div>`;
+        return;
+      }
+
+      content.innerHTML = `
+        <div class="viewer-topbar">
+          <div class="viewer-titles">
+            <h1>${escapeHtml(assetMetadata.title)}</h1>
+            ${assetMetadata.description ? `<div class="viewer-desc">${escapeHtml(assetMetadata.description)}</div>` : ""}
+          </div>
+          <div class="viewer-topbar-actions">
+            <button id="fullscreen-btn" class="icon-btn primary">${EXPAND_ICON}<span class="icon-btn-label">Fullscreen</span></button>
+          </div>
+        </div>
+        <div class="viewer-canvas-wrap" id="canvas-wrap">
+          <canvas id="viewer-canvas"></canvas>
+          <div class="viewer-status" id="status">Initializing 3D Engine\u2026</div>
+        </div>
+      `;
+
+      const statusEl = document.getElementById("status");
+      const canvasWrap = document.getElementById("canvas-wrap");
+      const fullscreenBtn = document.getElementById("fullscreen-btn");
+
+      // Fullscreen handling
+      fullscreenBtn.addEventListener("click", () => {
+        if (document.fullscreenElement) {
+          document.exitFullscreen();
+        } else {
+          canvasWrap.requestFullscreen().catch((err) => alert(`Couldn't enter fullscreen: ${err.message}`));
+        }
+      });
+      document.addEventListener("fullscreenchange", () => {
+        const isFull = document.fullscreenElement === canvasWrap;
+        fullscreenBtn.innerHTML = isFull
+          ? `${COLLAPSE_ICON}<span class="icon-btn-label">Exit fullscreen</span>`
+          : `${EXPAND_ICON}<span class="icon-btn-label">Fullscreen</span>`;
+        if (presenter) presenter._onWindowResize();
+      });
+
+      // Resize observer to ensure 3DHOP canvas scales properly within the flex container
+      const resizeObserver = new ResizeObserver(() => {
+        if (presenter) presenter._onWindowResize();
+      });
+      resizeObserver.observe(canvasWrap);
+
+      try {
+        // Assume API returns a multiresolution Nexus file (.nxz) or PLY
+        const access = await api.meshAccessUrl(assetId);
+        loadMesh(access.url);
+      } catch (err) {
+        statusEl.textContent = `Could not load mesh: ${err.message}`;
+        statusEl.style.display = "flex";
+      }
+
+      function loadMesh(url) {
+        statusEl.textContent = "Streaming multiresolution geometry\u2026";
+
+        presenter = new Presenter("viewer-canvas");
+
+        presenter.setScene({
+          meshes: {
+            "MainMesh": { url: url }
+          },
+          modelInstances: {
+            "Model1": {
+              mesh: "MainMesh",
+              color: [0.8, 0.8, 0.8]
+            }
+          },
+          trackball: {
+            type: Presenter.TB_TURNTABLE
+          }
+        });
+
+        // 3DHOP draws automatically, remove loader once engine starts pumping frames
+        setTimeout(() => {
+            statusEl.style.display = "none";
+            buildControlPanel(canvasWrap);
+            startStatsLoop(canvasWrap);
+        }, 800);
+      }
+    }
+
+    // 3DHOP-specific control panel (Navigation Mode, Background, Lighting)
+    function buildControlPanel(container) {
+      const state = {
+        navMode: "turntable",
+        lighting: true,
+        points: false,
+        bgLevel: 0
+      };
+
+      const arrowSvg = `<svg class="ctl-panel-arrow" viewBox="0 0 8 8" width="8" height="8"><path d="M2 0l4 4-4 4z" fill="currentColor"/></svg>`;
+
+      const panel = document.createElement("div");
+      panel.className = "ctl-panel";
+      panel.innerHTML = `
+        <button type="button" class="ctl-panel-header" aria-expanded="true">
+          <span>Mesh Controls</span>${arrowSvg}
+        </button>
+        <div class="ctl-panel-body">
+          <div class="ctl-segmented" data-role="nav-segmented">
+             <button type="button" class="ctl-segment active" data-mode="turntable">Turntable</button>
+             <button type="button" class="ctl-segment" data-mode="trackball">Trackball</button>
+          </div>
+
+          <div class="ctl-slider-row">
+            <span class="ctl-row-label ctl-slider-label">Background</span>
+            <div class="ctl-slider-track">
+              <div class="ctl-slider-fill" data-role="fill-bg"></div>
+              <input type="range" class="ctl-slider-input" data-role="slider-bg" min="0" max="1" step="0.05" value="0">
+            </div>
+            <span class="ctl-row-value ctl-mono" data-role="value-bg">0.00</span>
+          </div>
+
+          <label class="ctl-toggle-row" title="Toggle shading and shadows">
+            <span class="ctl-row-label ctl-toggle-label">Scene Lighting</span>
+            <input type="checkbox" class="ctl-toggle-input" data-role="lighting" checked>
+            <span class="ctl-toggle-track"></span>
+          </label>
+
+          <label class="ctl-toggle-row" title="Render geometry as points instead of solid faces">
+            <span class="ctl-row-label ctl-toggle-label">Point Cloud Mode</span>
+            <input type="checkbox" class="ctl-toggle-input" data-role="points">
+            <span class="ctl-toggle-track"></span>
+          </label>
+        </div>
+      `;
+      container.appendChild(panel);
+
+      // Panel collapse
+      const panelHeader = panel.querySelector(".ctl-panel-header");
+      panelHeader.addEventListener("click", () => {
+        const collapsed = panel.getAttribute("data-collapsed") === "true";
+        panel.setAttribute("data-collapsed", collapsed ? "false" : "true");
+        panelHeader.setAttribute("aria-expanded", collapsed ? "true" : "false");
+      });
+
+      // Navigation segment
+      panel.querySelectorAll('[data-role="nav-segmented"] .ctl-segment').forEach((btn) => {
+        btn.addEventListener("click", () => {
+          state.navMode = btn.dataset.mode;
+          panel.querySelectorAll('[data-role="nav-segmented"] .ctl-segment').forEach((b) =>
+            b.classList.toggle("active", b === btn)
+          );
+          if (state.navMode === "turntable") {
+              presenter.setSpace(Presenter.SPACE_TURNTABLE);
+          } else {
+              presenter.setSpace(Presenter.SPACE_TRACKBALL);
+          }
+        });
+      });
+
+      // Helper for sliders
+      function wireSlider(root, role, apply, format) {
+        const input = root.querySelector(`[data-role="slider-${role}"]`);
+        const fill = root.querySelector(`[data-role="fill-${role}"]`);
+        const value = root.querySelector(`[data-role="value-${role}"]`);
+        const update = () => {
+          const v = parseFloat(input.value);
+          const pct = ((v - parseFloat(input.min)) / (parseFloat(input.max) - parseFloat(input.min))) * 100;
+          fill.style.width = `calc(${pct}% - ${pct / 100 * 12}px)`;
+          value.textContent = format(v);
+          apply(v);
+        };
+        input.addEventListener("input", update);
+        update();
+      }
+
+      // Background color slider
+      wireSlider(panel, "bg", (v) => {
+        state.bgLevel = v;
+        const colorHex = Math.floor(v * 255).toString(16).padStart(2, '0');
+        container.style.background = `#${colorHex}${colorHex}${colorHex}`;
+      }, (v) => v.toFixed(2));
+
+      // View Toggles
+      panel.querySelector('[data-role="lighting"]').addEventListener("change", (evt) => {
+        state.lighting = evt.target.checked;
+        presenter.enableSceneLighting(state.lighting);
+      });
+
+      panel.querySelector('[data-role="points"]').addEventListener("change", (evt) => {
+        state.points = evt.target.checked;
+        presenter.setInstanceVisibility("Model1", !state.points, state.points);
+      });
+    }
+
+    function startStatsLoop(container) {
+      const statsEl = document.createElement("div");
+      statsEl.className = "viewer-stats-hud";
+      statsEl.textContent = "\u2014";
+      container.appendChild(statsEl);
+
+      function render() {
+        if (presenter) {
+            const fps = presenter.getFPS();
+            // 3DHOP maintains a scene graph; we extract basic face/vert data dynamically
+            let totalTris = 0;
+            let totalVerts = 0;
+            const meshes = presenter.scene.meshes;
+
+            for (let m in meshes) {
+               if (meshes[m].isReady) {
+                   totalTris += meshes[m].renderedTriangles || 0;
+                   totalVerts += meshes[m].renderedVertices || 0;
+               }
+            }
+
+            statsEl.textContent =
+              `engine       SpiderGL / 3DHOP\n` +
+              `fps          ${fps.toFixed(0)}\n` +
+              `drawn tris   ${totalTris.toLocaleString()}\n` +
+              `drawn verts  ${totalVerts.toLocaleString()}\n`;
+        }
+        setTimeout(render, 500); // Update twice a second to prevent layout thrashing
+      }
+      render();
+    }
+
+    init();
+  </script>
+</body>
+</html>

@@ -1,7 +1,6 @@
-from datetime import datetime
 from typing import Optional, List
-from pydantic import BaseModel, Field
-from .models import Role, AssetStatus
+from pydantic import BaseModel, ConfigDict
+from .models import Role, AssetStatus, AssetType
 
 
 class Token(BaseModel):
@@ -31,25 +30,20 @@ class UserUpdate(BaseModel):
 
 
 class AssetRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id: int
     slug: str
     title: str
     description: str
-    created_at: datetime
+    created_at: str
     status: AssetStatus
-    status_log: List[str] = Field(default_factory=list)
+    asset_type: AssetType
+    status_log: List[str]
+    mesh: Optional["AssetRead"] = None
 
 
-class MeshRead(AssetRead):
-    pass
-
-
-class VolumeRead(AssetRead):
-    mesh: Optional[MeshRead] = None
-
-
-class PointCloudRead(AssetRead):
-    pass
+AssetRead.model_rebuild()
 
 
 class AssetStatusRead(BaseModel):

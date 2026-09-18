@@ -1,16 +1,16 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Manage asset — Assets Gallery</title>
-<link rel="stylesheet" href="/css/style.css" />
+    <meta charset="UTF-8"/>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+    <title>Manage asset — Assets Gallery</title>
+    <link rel="stylesheet" href="/css/style.css"/>
 </head>
 <body>
-  <div class="app-shell" id="shell"></div>
+<div class="app-shell" id="shell"></div>
 
-  <script type="module">
-    import { api, requireLogin, getRole, getUsername, renderShell, wireLogout } from "/js/api.js";
+<script type="module">
+    import {api, requireLogin, getRole, getUsername, renderShell, wireLogout} from "/js/api.js";
 
     requireLogin();
     const role = getRole();
@@ -28,106 +28,130 @@
     const content = document.getElementById("content");
 
     async function load() {
-      const [asset, granted, allUsers] = await Promise.all([
-        api.getAsset(assetId),
-        api.listAccess(assetId),
-        api.listUsers().catch(() => []), // editors may not have list-users; fall back gracefully
-      ]);
+        const [asset, granted, allUsers] = await Promise.all([
+            api.getAsset(assetId),
+            api.listAccess(assetId),
+            api.listUsers().catch(() => []), // editors may not have list-users; fall back gracefully
+        ]);
 
-      const grantedIds = new Set(granted.map((u) => u.id));
-      const readerCandidates = allUsers.filter((u) => u.role === "reader" && !grantedIds.has(u.id));
+        const grantedIds = new Set(granted.map((u) => u.id));
+        const readerCandidates = allUsers.filter((u) => u.role === "reader" && !grantedIds.has(u.id));
 
-      content.innerHTML = `
-        <h1>${escapeHtml(asset.title)}</h1>
-        <p class="subtitle mono">${escapeHtml(asset.slug)}</p>
-        ${
-          asset.status !== "ready"
-            ? `<div class="${asset.status === "failed" ? "error-box" : "dim"}" style="margin-bottom:1.2em">
-                <strong>${asset.status === "failed" ? "Processing failed" : "Still processing"}</strong>
-                ${asset.status_log && asset.status_log.length
-                  ? `<div class="mono" style="margin-top:0.4em;font-size:0.85em;white-space:pre-wrap">${escapeHtml(asset.status_log.join("\n"))}</div>`
-                  : ""}
-              </div>`
-            : ""
+        // Determine if this asset type should allow mesh uploads
+        // Note: Check your API response. If it uses 'asset.type' instead of 'asset.asset_type', update the variable below.
+        const allowMeshUpload = asset.asset_type === "volume";
+
+        content.innerHTML = `
+    <h1>${escapeHtml(asset.title)}</h1>
+    <p class="subtitle mono">${escapeHtml(asset.slug)}</p>
+    ${
+            asset.status !== "ready"
+                ? `<div class="${asset.status === "failed" ? "error-box" : "dim"}" style="margin-bottom:1.2em">
+            <strong>${asset.status === "failed" ? "Processing failed" : "Still processing"}</strong>
+            ${
+                    asset.status_log && asset.status_log.length
+                        ? `<div class="mono" style="margin-top:0.4em;font-size:0.85em;white-space:pre-wrap">${escapeHtml(asset.status_log.join("\n"))}</div>`
+                        : ""
+                }
+          </div>`
+                : ""
         }
 
-        <h2>Reader access</h2>
-        <table>
-          <thead><tr><th>User</th><th></th></tr></thead>
-          <tbody id="granted-body">
-            ${granted
-              .map(
-                (u) => `<tr>
-                  <td>${escapeHtml(u.username)}</td>
-                  <td><button class="danger" data-revoke="${u.id}">Revoke</button></td>
-                </tr>`
-              )
-              .join("") || `<tr><td colspan="2" class="dim">No readers granted yet.</td></tr>`}
-          </tbody>
-        </table>
-
+    <h2>Reader access</h2>
+    <table>
+      <thead><tr><th>User</th><th></th></tr></thead>
+      <tbody id="granted-body">
         ${
-          readerCandidates.length
-            ? `<div class="field" style="margin-top:1em;max-width:320px">
-                <label for="grant-select">Grant access to</label>
-                <div style="display:flex;gap:0.5em">
-                  <select id="grant-select">
-                    ${readerCandidates.map((u) => `<option value="${u.id}">${escapeHtml(u.username)}</option>`).join("")}
-                  </select>
-                  <button id="grant-btn" class="primary">Grant</button>
-                </div>
-              </div>`
-            : `<p class="dim" style="margin-top:1em">${allUsers.length ? "All readers already have access." : "Sign in as admin to see the full user list here."}</p>`
+            granted
+                .map(
+                    (u) => `<tr>
+              <td>${escapeHtml(u.username)}</td>
+              <td><button class="danger" data-revoke="${u.id}">Revoke</button></td>
+            </tr>`
+                )
+                .join("") || `<tr><td colspan="2" class="dim">No readers granted yet.</td></tr>`
+        }
+      </tbody>
+    </table>
+
+    ${
+            readerCandidates.length
+                ? `<div class="field" style="margin-top:1em;max-width:320px">
+            <label for="grant-select">Grant access to</label>
+            <div style="display:flex;gap:0.5em">
+              <select id="grant-select">
+                ${readerCandidates.map((u) => `<option value="${u.id}">${escapeHtml(u.username)}</option>`).join("")}
+              </select>
+              <button id="grant-btn" class="primary">Grant</button>
+            </div>
+          </div>`
+                : `<p class="dim" style="margin-top:1em">${
+                    allUsers.length ? "All readers already have access." : "Sign in as admin to see the full user list here."
+                }</p>`
         }
 
-        <h2 style="margin-top:2em">Mesh</h2>
-        <p class="dim" style="font-size:0.9em">${asset.has_mesh ? escapeHtml(asset.mesh_filename) : "No mesh uploaded."}</p>
-        <input type="file" id="mesh-file" style="max-width:320px" />
-        <button id="mesh-upload-btn" style="margin-top:0.6em">Upload / replace mesh</button>
+    ${
+            allowMeshUpload
+                ? `<h2 style="margin-top:2em">Mesh</h2>
+            <p class="dim" style="font-size:0.9em">${asset.has_mesh ? escapeHtml(asset.mesh_filename) : "No mesh uploaded."}</p>
+            <input type="file" id="mesh-file" style="max-width:320px" />
+            <button id="mesh-upload-btn" style="margin-top:0.6em">Upload / replace mesh</button>`
+                : ``
+        }
 
-        <h2 style="margin-top:2em">Danger zone</h2>
-        <button class="danger" id="delete-btn">Delete this asset</button>
-      `;
+    <h2 style="margin-top:2em">Danger zone</h2>
+    <button class="danger" id="delete-btn">Delete this asset</button>
+  `;
 
-      content.querySelectorAll("[data-revoke]").forEach((btn) => {
-        btn.addEventListener("click", async () => {
-          await api.revokeAccess(assetId, btn.dataset.revoke);
-          load();
+        // 1. Revoke Access Listeners
+        content.querySelectorAll("[data-revoke]").forEach((btn) => {
+            btn.addEventListener("click", async () => {
+                await api.revokeAccess(assetId, btn.dataset.revoke);
+                load();
+            });
         });
-      });
 
-      const grantBtn = document.getElementById("grant-btn");
-      if (grantBtn) {
-        grantBtn.addEventListener("click", async () => {
-          const userId = document.getElementById("grant-select").value;
-          await api.grantAccess(assetId, userId);
-          load();
-        });
-      }
+        // 2. Grant Access Listener
+        const grantBtn = document.getElementById("grant-btn");
+        if (grantBtn) {
+            grantBtn.addEventListener("click", async () => {
+                const userId = document.getElementById("grant-select").value;
+                await api.grantAccess(assetId, userId);
+                load();
+            });
+        }
 
-      document.getElementById("mesh-upload-btn").addEventListener("click", async () => {
-        const file = document.getElementById("mesh-file").files[0];
-        if (!file) return;
-        const fd = new FormData();
-        fd.append("mesh_file", file);
-        await api.uploadMesh(assetId, fd);
-        load();
-      });
+        // 3. Mesh Upload Listener (Safe check prevents crashes on Point Cloud assets)
+        const meshUploadBtn = document.getElementById("mesh-upload-btn");
+        if (meshUploadBtn) {
+            meshUploadBtn.addEventListener("click", async () => {
+                const file = document.getElementById("mesh-file").files[0];
+                if (!file) return;
+                const fd = new FormData();
+                fd.append("mesh_file", file);
+                await api.uploadMesh(assetId, fd);
+                load();
+            });
+        }
 
-      document.getElementById("delete-btn").addEventListener("click", async () => {
-        if (!confirm(`Delete "${asset.title}"? This removes its files permanently.`)) return;
-        await api.deleteAsset(assetId);
-        window.location.href = "/index.html";
-      });
+        // 4. Delete Asset Listener
+        const deleteBtn = document.getElementById("delete-btn");
+        if (deleteBtn) {
+            deleteBtn.addEventListener("click", async () => {
+                if (!confirm(`Delete "${asset.title}"? This removes its files permanently.`)) return;
+                await api.deleteAsset(assetId);
+                window.location.href = "/index.html";
+            });
+        }
     }
 
     function escapeHtml(s) {
-      const d = document.createElement("div");
-      d.textContent = s;
-      return d.innerHTML;
+        const d = document.createElement("div");
+        d.textContent = s;
+        return d.innerHTML;
     }
 
     load();
-  </script>
+</script>
 </body>
 </html>

@@ -13,7 +13,6 @@ OUTPUT_FILE = "mesh.nxz"
 def convert_mesh_to_nxz(mesh_dir: Path, log) -> Path:
     files = os.listdir(mesh_dir)
     mesh_files = [file for file in files if file[-3:].upper() in MESH_EXTENSIONS]
-    print(files[0][-3:].upper())
     if not mesh_files:
         raise ValueError("mesh_dir must contain at least one valid mesh file")
 

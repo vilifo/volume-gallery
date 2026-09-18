@@ -66,6 +66,17 @@ def convert_tiff_stack_to_ome_zarr(tiff_dir: Path, zarr_dir: Path) -> None:
         axes="tczyx",
         scale_factors=[2, 4, 8, 16],
         method="nearest",
+        # Match kiln-render's own brick size (64³ — see LOGICAL_BRICK_SIZE in
+        # its vendored core/config.d.ts) so each brick the renderer requests
+        # lines up with whole zarr chunks rather than straddling multiple of
+        # them or over-fetching part of an oversized one. Without this,
+        # ome-zarr-py's default chunking heuristic produces inconsistent,
+        # non-brick-aligned shapes per level (observed: 128×64×64 at one
+        # level, 128×32×32 at another) — harmless correctness-wise, but each
+        # brick then costs more requests/bytes than necessary. Levels smaller
+        # than 64 voxels on an axis are unaffected: zarr clamps the chunk
+        # size down to the array's own shape automatically.
+        storage_options={"chunks": (1, 1, 64, 64, 64)},
     )
 
 
@@ -218,3 +229,67 @@ def find_tiff_dir(scratch_dir: Path) -> Optional[Path]:
             return current
         queue.extend(sorted(p for p in entries if p.is_dir()))
     return None
+
+
+def _get_multiscales(attrs: dict) -> Optional[list]:
+    """Returns the `multiscales` array from a Zarr group's attributes,
+    handling both shapes OME-NGFF metadata can take: a flat `multiscales`
+    key (v2, and plain v3/v0.4), or one namespaced under `ome` (v0.5's
+    convention for zarr-v3 group attributes). None if neither is present."""
+    if not isinstance(attrs, dict):
+        return None
+    if "multiscales" in attrs:
+        return attrs["multiscales"]
+    ome = attrs.get("ome")
+    if isinstance(ome, dict) and "multiscales" in ome:
+        return ome["multiscales"]
+    return None
+
+
+def count_multiscale_levels(zarr_root: Path) -> Optional[int]:
+    """Number of resolution levels (index 0 = finest) in the multiscale
+    pyramid at zarr_root, or None if it can't be determined. Used to compute
+    the "max detail level" UI control's default (half of this)."""
+    attrs = _read_group_attrs(zarr_root)
+    if attrs is None:
+        return None
+    multiscales = _get_multiscales(attrs)
+    if not multiscales or not isinstance(multiscales, list):
+        return None
+    datasets = multiscales[0].get("datasets") if isinstance(multiscales[0], dict) else None
+    if not isinstance(datasets, list) or not datasets:
+        return None
+    return len(datasets)
+
+
+def truncate_multiscales_json(raw: bytes, min_lod: int) -> Optional[bytes]:
+    """Drops multiscale dataset entries finer than min_lod (i.e. keeps
+    datasets[min_lod:]) from a root metadata file's content, in whichever of
+    the two OME-NGFF attribute shapes it uses. The chunk data those dropped
+    entries pointed at is simply never requested by the client afterward —
+    nothing on disk is touched. Returns None (meaning: serve the original
+    file unchanged) if the content isn't parseable or has no multiscales."""
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+
+    # v2 (.zattrs): multiscales sits at the top level of the file itself.
+    # v3 (zarr.json): it's nested under "attributes" (and possibly "ome").
+    is_v3 = "attributes" in data and isinstance(data.get("attributes"), dict)
+    attrs = data["attributes"] if is_v3 else data
+    multiscales = _get_multiscales(attrs)
+    if not multiscales or not isinstance(multiscales, list):
+        return None
+
+    changed = False
+    for entry in multiscales:
+        if not isinstance(entry, dict):
+            continue
+        datasets = entry.get("datasets")
+        if isinstance(datasets, list) and 0 < min_lod < len(datasets):
+            entry["datasets"] = datasets[min_lod:]
+            changed = True
+    if not changed:
+        return None
+    return json.dumps(data).encode("utf-8")

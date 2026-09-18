@@ -60,7 +60,7 @@ export const api = {
 
   me() { return request("/api/users/me"); },
 
-  // volumes
+  // assets
   listAssets() { return request("/api/assets"); },
   getAsset(id) { return request(`/api/assets/${id}`); },
   createAsset(formData) {
@@ -75,7 +75,6 @@ export const api = {
   createAssetWithProgress(formData, onProgress) {
     return new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest();
-      xhr.open("POST", "/api/assets");
       xhr.open("POST", "/api/assets");
       const token = getToken();
       if (token) xhr.setRequestHeader("Authorization", `Bearer ${token}`);
@@ -107,8 +106,12 @@ export const api = {
   uploadMesh(id, formData) {
     return request(`/api/assets/${id}/mesh`, { method: "POST", body: formData });
   },
-  zarrAccessUrl(id) { return request(`/api/assets/${id}/zarr-access-url`); },
-  meshAccessUrl(id) { return request(`/api/assets/${id}/mesh-access-url`); },
+  zarrAccessUrl(id, minLevel) {
+    const qs = minLevel != null ? `?min_level=${encodeURIComponent(minLevel)}` : "";
+    return request(`/api/assets/${id}/zarr-access-url${qs}`);
+  },
+  meshAccessUrl(id) { return request(`/api/access/${id}/mesh-access-url`); },
+  pointCloudAccessUrl(id) { return request(`/api/access/${id}/point-cloud-access-url`); },
   listAccess(id) { return request(`/api/assets/${id}/access`); },
   grantAccess(id, userId) {
     return request(`/api/assets/${id}/access`, {

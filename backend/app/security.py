@@ -25,16 +25,21 @@ def create_access_token(subject: str, role: str, expires_minutes: Optional[int] 
     return jwt.encode(payload, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
 
 
-def create_file_token(subject: str, volume_id: int, kind: str) -> str:
-    """kind is 'zarr' or 'mesh' — scopes the token to a specific resource on a specific volume."""
+def create_file_token(subject: str, asset_id: int, kind: str, min_lod: Optional[int] = None) -> str:
+    """kind is 'zarr' or 'mesh' or 'point_cloud' — scopes the token to a specific resource on a
+    specific volume.
+    - min_lod (zarr tokens only) caps which OME-NGFF
+    multiscale levels get served — see routers/volumes.py's serve_zarr_file."""
     expire = datetime.utcnow() + timedelta(minutes=settings.FILE_TOKEN_EXPIRE_MINUTES)
     payload = {
         "sub": subject,
-        "vol": volume_id,
+        "vol": asset_id,
         "kind": kind,
         "exp": expire,
         "type": "file",
     }
+    if min_lod is not None:
+        payload["min_lod"] = min_lod
     return jwt.encode(payload, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
 
 

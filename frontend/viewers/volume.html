@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Viewer — Assets Gallery</title>
+<title>Viewer — Volume Gallery</title>
 <link rel="stylesheet" href="/css/style.css" />
 <style>
   /* This page trades the app's normal padded/max-width main column for an
@@ -316,7 +316,7 @@
     requireLogin();
     const role = getRole();
     const params = new URLSearchParams(window.location.search);
-    const assetId = params.get("id");
+    const volumeId = params.get("id");
 
     const EXPAND_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M21 16v3a2 2 0 0 1-2 2h-3M3 16v3a2 2 0 0 0 2 2h3"/></svg>`;
     const COLLAPSE_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3v3a2 2 0 0 1-2 2H4M15 3v3a2 2 0 0 0 2 2h3M4 16h3a2 2 0 0 1 2 2v3M20 16h-3a2 2 0 0 0-2 2v3"/></svg>`;
@@ -365,14 +365,16 @@
       return { ok: true };
     }
 
+    let currentViewer = null;
+
     async function init() {
-      if (!assetId) {
-        content.innerHTML = `<div class="error-box" style="margin:1.4em">No asset specified.</div>`;
+      if (!volumeId) {
+        content.innerHTML = `<div class="error-box" style="margin:1.4em">No volume specified.</div>`;
         return;
       }
-      let asset;
+      let volume;
       try {
-        asset = await api.getAsset(assetId);
+        volume = await api.getAsset(volumeId);
       } catch (err) {
         content.innerHTML = `<div class="error-box" style="margin:1.4em">${err.message}</div>`;
         return;
@@ -381,12 +383,12 @@
       content.innerHTML = `
         <div class="viewer-topbar">
           <div class="viewer-titles">
-            <h1>${escapeHtml(asset.title)}</h1>
-            ${asset.description ? `<div class="viewer-desc">${escapeHtml(asset.description)}</div>` : ""}
+            <h1>${escapeHtml(volume.title)}</h1>
+            ${volume.description ? `<div class="viewer-desc">${escapeHtml(volume.description)}</div>` : ""}
           </div>
           <div class="viewer-topbar-actions">
             ${
-              asset.has_mesh
+              volume.mesh
                 ? `<button id="download-mesh" class="icon-btn">${DOWNLOAD_ICON}<span class="icon-btn-label">Download mesh</span></button>`
                 : ""
             }
@@ -423,23 +425,50 @@
         return;
       }
 
-      try {
-        const access = await api.zarrAccessUrl(assetId);
-        const canvas = document.getElementById("canvas");
-        const viewer = await KilnViewer.create(canvas, access.url);
-        statusEl.style.display = "none";
-        buildControlPanel(viewer, canvasWrap);
-        startStatsLoop(viewer, canvasWrap);
-      } catch (err) {
-        statusEl.textContent = `Could not load asset: ${err.message}`;
+      // Levels are OME-NGFF multiscale indices: 0 = full resolution, higher
+      // = coarser. Defaulting to the middle of the pyramid means the finest
+      // (most memory/bandwidth-hungry) half is never streamed unless the
+      // user explicitly asks for it — see loadVolume()'s "Max detail level"
+      // control for why this is adjustable rather than fixed.
+      const defaultMinLevel =
+        volume.num_lod_levels && volume.num_lod_levels > 1 ? Math.floor(volume.num_lod_levels / 2) : null;
+
+      async function loadVolume(minLevel) {
         statusEl.style.display = "flex";
+        statusEl.textContent =
+          currentViewer ? "Reloading with new detail limit\u2026" : "Requesting WebGPU device\u2026";
+        if (currentViewer) {
+          currentViewer.dispose();
+          currentViewer = null;
+        }
+        canvasWrap.querySelector(".ctl-panel")?.remove();
+        canvasWrap.querySelector(".viewer-stats-hud")?.remove();
+
+        try {
+          const access = await api.zarrAccessUrl(volumeId, minLevel);
+          const canvas = document.getElementById("canvas");
+          const viewer = await KilnViewer.create(canvas, access.url);
+          currentViewer = viewer;
+          statusEl.style.display = "none";
+          buildControlPanel(viewer, canvasWrap, {
+            numLodLevels: volume.num_lod_levels,
+            minLevel,
+            onMinLevelChange: (newMinLevel) => loadVolume(newMinLevel),
+          });
+          startStatsLoop(viewer, canvasWrap);
+        } catch (err) {
+          statusEl.textContent = `Could not load volume: ${err.message}`;
+          statusEl.style.display = "flex";
+        }
       }
+
+      loadVolume(defaultMinLevel);
 
       const downloadBtn = document.getElementById("download-mesh");
       if (downloadBtn) {
         downloadBtn.addEventListener("click", async () => {
           try {
-            const access = await api.meshAccessUrl(assetId);
+            const access = await api.meshAccessUrl(volumeId);
             window.location.href = access.url;
           } catch (err) {
             alert(err.message);
@@ -454,8 +483,10 @@
     // windowing + iso value for ISO), a collapsible Scene section (up axis,
     // wireframe/axis overlays, per-axis clip range in voxel coordinates),
     // and a collapsible Advanced section (render scale, LOD/jitter/TAA/
-    // indirection toggles).
-    function buildControlPanel(viewer, container) {
+    // indirection toggles, and — if this volume has more than one level —
+    // the max detail level to load).
+    function buildControlPanel(viewer, container, lodOptions) {
+
       const renderer = viewer.renderer;
       const camera = viewer.camera;
       const tf = viewer.transferFunction;
@@ -553,6 +584,23 @@
                 </div>
                 <span class="ctl-row-value ctl-mono" data-role="value-renderScale">${viewer.renderScale.toFixed(2)}</span>
               </div>
+              ${
+                lodOptions.numLodLevels && lodOptions.numLodLevels > 1
+                  ? `
+              <label class="ctl-select-row" title="Level 0 = full resolution; higher levels are coarser downsamples. Levels finer than this are never streamed, regardless of how close the camera gets.">
+                <span class="ctl-row-label ctl-select-label">Max detail level</span>
+                <select class="ctl-select-input" data-role="min-level">
+                  ${Array.from({ length: lodOptions.numLodLevels }, (_, i) => i)
+                    .map((i) => {
+                      const label = i === 0 ? "0 (full res)" : i === lodOptions.numLodLevels - 1 ? `${i} (coarsest)` : String(i);
+                      const selected = i === (lodOptions.minLevel ?? 0) ? " selected" : "";
+                      return `<option value="${i}"${selected}>${label}</option>`;
+                    })
+                    .join("")}
+                </select>
+              </label>`
+                  : ""
+              }
               <label class="ctl-toggle-row${state.mode !== "dvr" && state.mode !== "slice" ? " disabled" : ""}" title="Only available for DVR and Slice modes">
                 <span class="ctl-row-label ctl-toggle-label">LOD Levels</span>
                 <input type="checkbox" class="ctl-toggle-input" data-role="lod" ${state.lod ? "checked" : ""} ${state.mode !== "dvr" && state.mode !== "slice" ? "disabled" : ""}>
@@ -842,6 +890,15 @@
 
       // --- Advanced section ---
       wireSlider(panel, "renderScale", (v) => { viewer.renderScale = v; }, (v) => v.toFixed(2));
+      const minLevelSelect = panel.querySelector('[data-role="min-level"]');
+      if (minLevelSelect) {
+        minLevelSelect.addEventListener("change", (evt) => {
+          // Changing this needs a full reload — which levels exist at all
+          // is baked into the signed URL kiln-render fetches from, not
+          // something adjustable on a live viewer — see loadVolume().
+          lodOptions.onMinLevelChange(parseInt(evt.target.value, 10));
+        });
+      }
       panel.querySelector('[data-role="lod"]').addEventListener("change", (evt) => {
         state.lod = evt.target.checked;
         applyMode();

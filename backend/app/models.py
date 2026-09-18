@@ -17,6 +17,12 @@ class AssetStatus(str, enum.Enum):
     failed = "failed"
 
 
+class AssetType(str, enum.Enum):
+    volume = "volume"
+    mesh = "mesh"
+    point_cloud = "point_cloud"
+
+
 class User(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     username: str = Field(index=True, unique=True)
@@ -26,7 +32,9 @@ class User(SQLModel, table=True):
     disabled: bool = Field(default=False)
 
 
-class AssetBase(SQLModel):
+class Asset(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    asset_type: AssetType = Field(index=True, default=AssetType.volume)
     slug: str = Field(index=True, unique=True)
     title: str
     description: str = Field(default="")
@@ -36,27 +44,22 @@ class AssetBase(SQLModel):
     created_at: datetime = Field(default_factory=datetime.utcnow)
     status: AssetStatus = Field(default=AssetStatus.ready)
     status_log: str = Field(default="")
+    # Mesh specific fields
+    volume_id: Optional[int] = Field(default=None, foreign_key="asset.id")
+    # Volume specific fields
+    num_lod_levels: int = -1
+    mesh: Optional["Asset"] = Relationship(
+        sa_relationship_kwargs={"remote_side": "Asset.id"}
+    )
 
 
-class Mesh(AssetBase, table=True):
-    id: Optional[int] = Field(default=None, primary_key=True)
-    volume_id: Optional[int] = Field(default=None, foreign_key="volume.id")
-    volume: Optional["Volume"] = Relationship(back_populates="mesh")
-
-
-class PointCloud(AssetBase, table=True):
-    id: Optional[int] = Field(default=None, primary_key=True)
-
-
-class Volume(AssetBase, table=True):
-    id: Optional[int] = Field(default=None, primary_key=True)
-    mesh: Optional["Mesh"] = Relationship(back_populates="volume")
+Asset.model_rebuild()
 
 
 class AssetAccess(SQLModel, table=True):
     """Grants a reader visibility into a volume. Admins and editors bypass this table."""
     id: Optional[int] = Field(default=None, primary_key=True)
     user_id: int = Field(foreign_key="user.id", index=True)
-    asset_id: int = Field(foreign_key="volume.id", index=True)
+    asset_id: int = Field(foreign_key="asset.id", index=True)
     granted_by: Optional[int] = Field(default=None, foreign_key="user.id")
     granted_at: datetime = Field(default_factory=datetime.utcnow)
