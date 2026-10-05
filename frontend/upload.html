@@ -82,7 +82,7 @@
             top: 0;
             left: 0;
             height: 100%;
-            width: 0%;
+            width: 0;
             background: var(--accent);
             border-radius: 5px;
             transition: width 0.15s ease;
@@ -148,7 +148,7 @@
           <button type="button" id="src-zarr" class="active">OME-Zarr (.zip)</button>
           <button type="button" id="src-tiff">TIFF stack (.zip of .tif files)</button>
           <button type="button" id="src-mesh">Mesh file (.stl, .obj, .ply, \u2026)</button>
-          <button type="button" id="src-point-cloud">Point cloud file (.pcd, .ply, \u2026)</button>
+          <button type="button" id="src-pointcloud">Point cloud file (.pcd, .ply, \u2026)</button>
         </div>
 
         <form id="form">
@@ -183,14 +183,14 @@
             </div>
           </div>
 
-          <div class="field" id="mesh-field" style="display:none">
+          <div class="field" id="mesh-field">
             <label for="mesh_file">Mesh file (.stl, .obj, .ply, \u2026)</label>
             <input id="mesh_file" type="file" accept=".stl,.3mf,.ply,.obj,.glb" />
           </div>
 
-          <div class="field" id="point-cloud-field" style="display:none">
-            <label for="point_cloud_file">Point cloud file (.laz, .obj, .ply, \u2026)</label>
-            <input id="point_cloud_file" type="file" accept=".laz,.obj,.ply" />
+          <div class="field" id="pointcloud-field" style="display:none">
+            <label for="pointcloud_file">Point cloud file (.laz, .obj, .ply, \u2026)</label>
+            <input id="pointcloud_file" type="file" accept=".laz,.obj,.ply" />
           </div>
 
           <button type="submit" class="primary">Upload</button>
@@ -215,29 +215,29 @@
     const srcZarrBtn = document.getElementById("src-zarr");
     const srcTiffBtn = document.getElementById("src-tiff");
     const srcMeshBtn = document.getElementById("src-mesh");
-    const srcPointCloudBtn = document.getElementById("src-point-cloud");
+    const srcPointCloudBtn = document.getElementById("src-pointcloud");
     const zarrField = document.getElementById("zarr-field");
     const tiffField = document.getElementById("tiff-field");
     const meshField = document.getElementById("mesh-field");
-    const pointCloudField = document.getElementById("point-cloud-field");
+    const pointCloudField = document.getElementById("pointcloud-field");
 
     function setSource(next) {
         source = next;
         srcZarrBtn.classList.toggle("active", source === "zarr");
         srcTiffBtn.classList.toggle("active", source === "tiff");
         srcMeshBtn.classList.toggle("active", source === "mesh");
-        srcPointCloudBtn.classList.toggle("active", source === "point-cloud");
+        srcPointCloudBtn.classList.toggle("active", source === "pointcloud");
 
         zarrField.style.display = source === "zarr" ? "" : "none";
         tiffField.style.display = source === "tiff" ? "" : "none";
         meshField.style.display = source === "mesh" || source === "zarr" || source === "tiff" ? "" : "none";
-        pointCloudField.style.display = source === "point-cloud" ? "" : "none";
+        pointCloudField.style.display = source === "pointcloud" ? "" : "none";
     }
 
     srcZarrBtn.addEventListener("click", () => setSource("zarr"));
     srcTiffBtn.addEventListener("click", () => setSource("tiff"));
     srcMeshBtn.addEventListener("click", () => setSource("mesh"));
-    srcPointCloudBtn.addEventListener("click", () => setSource("point-cloud"));
+    srcPointCloudBtn.addEventListener("click", () => setSource("pointcloud"));
 
     const form = document.getElementById("form");
     const errorBox = document.getElementById("error");
@@ -292,8 +292,8 @@
                 sourceFile = document.getElementById("mesh_file").files[0];
                 errorMessage = "Choose a mesh file (.stl, .obj, .ply, etc.).";
                 break;
-            case "point-cloud":
-                sourceFile = document.getElementById("point_cloud_file").files[0];
+            case "pointcloud":
+                sourceFile = document.getElementById("pointcloud_file").files[0];
                 errorMessage = "Choose a point cloud file (.laz, .obj, .ply, etc.).";
                 break;
         }
@@ -318,8 +318,8 @@
             case "mesh":
                 fd.append("mesh_file", sourceFile);
                 break;
-            case "point-cloud":
-                fd.append("point_cloud_file", sourceFile);
+            case "pointcloud":
+                fd.append("pointcloud_file", sourceFile);
                 break;
         }
         const meshFile = document.getElementById("mesh_file").files[0];
@@ -332,7 +332,14 @@
         setProgress(0);
 
         try {
-            const asset = await api.createAssetWithProgress(fd, setProgress);
+            let asset;
+            if (source === "zarr" || source === "tiff") {
+                asset = await api.createVolumeWithProgress(fd, setProgress);
+            } else if (source === "mesh") {
+                asset = await api.createMeshWithProgress(fd, setProgress);
+            } else if (source === "pointcloud") {
+                asset = await api.createPointCloudWithProgress(fd, setProgress);
+            }
             progressSpinner.style.display = "none";
             progressCheck.style.display = "block";
             progressTrack.classList.remove("indeterminate");
@@ -343,6 +350,8 @@
             // server-side after this response, tracked by asset.status;
             // gallery polls that and shows it live, so hand off there rather
             // than making the user sit on this page waiting for it.
+            console.log(asset);
+            console.log(asset.id);
             setTimeout(() => {
                 window.location.href = `/index.html?justUploaded=${asset.id}`;
             }, 500);

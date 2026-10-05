@@ -3,6 +3,8 @@ import os
 import trimesh
 from pathlib import Path
 
+from ..config import settings
+
 
 MESH_EXTENSIONS = ["GLB", "GLTF", "STL", "PLY", "OBJ", "OFF", "3MF"] # Subset from https://trimesh.org/formats.html
 TEMP_MESH_FILE = "temp.ply"
@@ -12,11 +14,14 @@ OUTPUT_FILE = "mesh.nxz"
 
 def convert_mesh_to_nxz(mesh_dir: Path, log) -> Path:
     files = os.listdir(mesh_dir)
-    mesh_files = [file for file in files if file[-3:].upper() in MESH_EXTENSIONS]
-    if not mesh_files:
-        raise ValueError("mesh_dir must contain at least one valid mesh file")
-
-    input_file = mesh_dir / mesh_files[0]
+    file = None
+    for f in files:
+        if Path(f).stem == "_upload":
+            file = f
+            break
+    if file is None:
+        raise ValueError(f"The _upload file not found in {mesh_dir}.")
+    input_file = mesh_dir / file
     temp_mesh_file = mesh_dir / TEMP_MESH_FILE
     temp_nexus_file = mesh_dir / TEMP_NEXUS_FILE
     output_file = mesh_dir / OUTPUT_FILE
@@ -28,7 +33,7 @@ def convert_mesh_to_nxz(mesh_dir: Path, log) -> Path:
 
     log(f"Generating multi-resolution Nexus file...")
     # nxsbuild handles the spatial indexing and compression for 3DHOP
-    cmd = ['nxsbuild', temp_mesh_file, '-o', temp_nexus_file]
+    cmd = [settings.NXSBUILD_BIN, str(temp_mesh_file), '-o', str(temp_nexus_file)]
 
     try:
         subprocess.run(cmd, check=True)
@@ -39,11 +44,9 @@ def convert_mesh_to_nxz(mesh_dir: Path, log) -> Path:
         # Cleanup temp files to prevent container bloat
         if os.path.exists(temp_mesh_file):
             os.remove(temp_mesh_file)
-        if os.path.exists(input_file):
-            os.remove(input_file)
 
     log(f"Compressing Nexus file to {output_file}...")
-    cmd = ['nxscompress', temp_nexus_file, '-o', output_file]
+    cmd = [settings.NXSCOMPRESS_BIN, str(temp_nexus_file), '-o', str(output_file)]
     try:
         subprocess.run(cmd, check=True)
         log(f"Successfully compressed Nexus file: {output_file}")

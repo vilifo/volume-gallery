@@ -3,206 +3,82 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Viewer — Point Cloud Gallery</title>
+<title>Point Cloud Viewer — Volume Gallery</title>
 <link rel="stylesheet" href="/css/style.css" />
 <link rel="stylesheet" href="/vendor/potree/potree.css" />
 <style>
-  /* Edge-to-edge viewer layout identical to the Volume and Mesh pages */
   body.viewer-page { overflow: hidden; }
   body.viewer-page .app-shell { height: 100vh; }
   body.viewer-page main {
-    padding: 0;
-    max-width: none;
-    display: flex;
-    flex-direction: column;
-    height: 100vh;
-    overflow: hidden;
+    padding: 0; max-width: none; display: flex; flex-direction: column; height: 100vh; overflow: hidden;
   }
-
   .viewer-topbar {
-    display: flex;
-    justify-content: space-between;
-    align-items: flex-start;
-    gap: 1.5em;
-    padding: 0.9em 1.4em;
-    border-bottom: 1px solid var(--line);
-    flex-shrink: 0;
-    background: var(--panel);
+    display: flex; justify-content: space-between; align-items: flex-start; gap: 1.5em;
+    padding: 0.9em 1.4em; border-bottom: 1px solid var(--line); flex-shrink: 0; background: var(--panel);
   }
   .viewer-topbar .viewer-titles { min-width: 0; }
-  .viewer-topbar h1 {
-    font-size: 1.1em;
-    margin: 0;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-  .viewer-topbar .viewer-desc {
-    font-size: 0.83em;
-    color: var(--text-dim);
-    margin-top: 0.2em;
-    max-width: 60ch;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
+  .viewer-topbar h1 { font-size: 1.1em; margin: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .viewer-topbar .viewer-desc { font-size: 0.83em; color: var(--text-dim); margin-top: 0.2em; max-width: 60ch; }
   .viewer-topbar-actions { display: flex; gap: 0.6em; flex-shrink: 0; }
-
-  .icon-btn {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.5em;
-    padding: 0.5em 0.9em;
-    white-space: nowrap;
-  }
+  .icon-btn { display: inline-flex; align-items: center; gap: 0.5em; padding: 0.5em 0.9em; white-space: nowrap; }
   .icon-btn svg { width: 14px; height: 14px; flex-shrink: 0; }
 
-  .viewer-canvas-wrap {
-    flex: 1;
-    min-height: 0;
-    background: #000;
-    position: relative;
-    overflow: hidden;
+  .pc-render-area { flex: 1; min-height: 0; position: relative; background: #000; }
+  #potree_render_area { width: 100%; height: 100%; }
+  /* Potree's own sidebar/menu chrome is never loaded (no loadGUI() call —
+     see the script below), but a couple of its panels default to visible
+     regardless; keep them out of the way rather than fighting each one. */
+  #potree_sidebar_container, .potree_menu_toggle { display: none !important; }
+
+  .pc-panel {
+    position: absolute; top: 12px; right: 12px; z-index: 5;
+    width: 220px;
+    background: rgba(26, 29, 35, 0.92);
+    backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+    border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 10px;
+    padding: 0.8em;
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
+    color: var(--text); font-size: 12px;
   }
-
-  /* Potree generates its own canvas inside our target div */
-  #potree_render_area { width: 100%; height: 100%; position: absolute; inset: 0; }
-
-  .viewer-canvas-wrap:fullscreen { width: 100vw; height: 100vh; }
+  .pc-panel .row { display: flex; align-items: center; justify-content: space-between; gap: 0.6em; margin-bottom: 0.6em; }
+  .pc-panel .row:last-child { margin-bottom: 0; }
+  .pc-panel label { color: var(--text-dim); font-size: 11px; }
+  .pc-panel input[type="range"] { flex: 1; margin-left: 0.6em; }
+  .pc-panel .value { font-family: var(--mono); font-size: 10.5px; color: var(--text-dim); width: 3.5em; text-align: right; }
 
   .viewer-status {
-    position: absolute;
-    inset: 0;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    color: var(--text-dim);
-    font-family: var(--mono);
-    font-size: 0.85em;
-    background: rgba(0, 0, 0, 0.6);
-    padding: 1.5em;
-    text-align: left;
-    line-height: 1.5;
-    z-index: 10;
-  }
-
-  /* --- Custom control panel --- */
-  .ctl-panel {
-    position: absolute;
-    top: 12px;
-    right: 12px;
-    width: 260px;
-    max-height: calc(100% - 24px);
-    display: flex;
-    flex-direction: column;
-    background: rgba(26, 29, 35, 0.92);
-    backdrop-filter: blur(8px);
-    -webkit-backdrop-filter: blur(8px);
-    border-radius: 10px;
-    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.05);
-    color: var(--text);
-    font-size: 12px;
-    overflow: hidden;
-    z-index: 20; /* Keep above Potree's absolute elements */
-  }
-  .ctl-panel-header {
-    display: flex; align-items: center; justify-content: space-between;
-    width: 100%; background: rgba(20, 23, 28, 0.95); border: none;
-    color: var(--accent); font-weight: 600; letter-spacing: 0.02em;
-    font-size: 12px; padding: 0.7em 0.9em; cursor: pointer; flex-shrink: 0;
-  }
-  .ctl-panel-arrow { transition: transform 0.15s ease; flex-shrink: 0; }
-  .ctl-panel[data-collapsed="true"] .ctl-panel-arrow { transform: rotate(-90deg); }
-  .ctl-panel[data-collapsed="true"] .ctl-panel-body { display: none; }
-  .ctl-panel-body { padding: 0.85em; overflow-y: auto; }
-  .ctl-panel-body::-webkit-scrollbar { width: 6px; }
-  .ctl-panel-body::-webkit-scrollbar-track { background: transparent; }
-  .ctl-panel-body::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.15); border-radius: 3px; }
-
-  .ctl-select-row { display: flex; align-items: center; justify-content: space-between; gap: 0.6em; margin-bottom: 0.7em; }
-  .ctl-row-label { color: var(--text-dim); font-size: 11px; flex-shrink: 0; }
-  .ctl-select-input {
-    background: rgba(255, 255, 255, 0.06); border: 1px solid rgba(255, 255, 255, 0.08);
-    border-radius: 4px; color: var(--text); font-size: 11px; padding: 0.3em 0.4em;
-    flex: 1; min-width: 0;
-  }
-
-  .ctl-slider-row { display: flex; align-items: center; gap: 0.6em; margin-bottom: 0.7em; }
-  .ctl-slider-label { width: 70px; flex-shrink: 0; color: var(--text-dim); font-size: 11px; }
-  .ctl-slider-track { position: relative; flex: 1; height: 4px; background: rgba(255, 255, 255, 0.1); border-radius: 2px; }
-  .ctl-slider-fill { position: absolute; top: 0; left: 0; height: 100%; background: var(--accent); border-radius: 2px; pointer-events: none; }
-  .ctl-slider-input {
-    position: absolute; top: -6px; left: 0; width: 100%; height: 16px; margin: 0;
-    -webkit-appearance: none; appearance: none; background: transparent; cursor: pointer;
-  }
-  .ctl-slider-input::-webkit-slider-thumb,
-  .ctl-slider-input::-moz-range-thumb {
-    -webkit-appearance: none; width: 12px; height: 12px; border-radius: 50%;
-    background: var(--accent); border: 2px solid #14171c; box-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
-  }
-  .ctl-slider-input::-moz-range-track { background: transparent; }
-  .ctl-row-value { width: 48px; flex-shrink: 0; text-align: right; color: var(--text-dim); font-size: 10.5px; }
-  .ctl-mono { font-family: var(--mono); }
-
-  .ctl-toggle-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.7em; cursor: pointer; }
-  .ctl-toggle-label { font-size: 11px; color: var(--text-dim); }
-  .ctl-toggle-input { position: absolute; opacity: 0; width: 0; height: 0; }
-  .ctl-toggle-track {
-    position: relative; width: 30px; height: 16px; background: rgba(255, 255, 255, 0.12);
-    border-radius: 8px; transition: background 0.15s ease; flex-shrink: 0;
-  }
-  .ctl-toggle-track::after {
-    content: ""; position: absolute; top: 2px; left: 2px; width: 12px; height: 12px;
-    border-radius: 50%; background: var(--text-dim); transition: transform 0.15s ease, background 0.15s ease;
-  }
-  .ctl-toggle-input:checked + .ctl-toggle-track { background: rgba(232, 163, 61, 0.35); }
-  .ctl-toggle-input:checked + .ctl-toggle-track::after { transform: translateX(14px); background: var(--accent); }
-
-  .viewer-stats-hud {
-    position: absolute; left: 12px; bottom: 12px;
-    background: rgba(26, 29, 35, 0.85); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
-    border-radius: 10px; box-shadow: 0 12px 32px rgba(0, 0, 0, 0.4), 0 0 0 1px rgba(255, 255, 255, 0.05);
-    padding: 0.8em 1em; font-family: var(--mono); font-size: 0.72em;
-    color: var(--text-dim); line-height: 1.65; white-space: pre-wrap;
-    pointer-events: none; z-index: 20;
-  }
-
-  @media (max-width: 700px) {
-    .viewer-topbar { flex-wrap: wrap; }
-    .icon-btn .icon-btn-label { display: none; }
-    .viewer-stats-hud { font-size: 0.65em; }
+    position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+    color: var(--text-dim); font-family: var(--mono); font-size: 0.85em;
+    background: rgba(0, 0, 0, 0.6); padding: 1.5em; text-align: left; line-height: 1.5;
   }
 </style>
-
-<!-- Potree Core Dependencies (Requires jQuery, ThreeJS, and Potree libs) -->
-<script src="/vendor/jquery/jquery-3.6.0.min.js"></script>
-<script src="/vendor/three/three.min.js"></script>
-<script src="/vendor/potree/potree.js"></script>
 </head>
 <body class="viewer-page">
   <div class="app-shell" id="shell"></div>
 
+  <script src="/vendor/potree/jquery.js"></script>
+  <script src="/vendor/potree/BinaryHeap.js"></script>
+  <script src="/vendor/potree/tween.min.js"></script>
+  <script src="/vendor/potree/potree.js"></script>
+
   <script type="module">
-    import { api, requireLogin, getRole, getUsername, renderShell, wireLogout } from "/js/api.js";
+    import { api, requireLogin, getRole, getUsername, renderShell, wireLogout } from "/frontend/js/api.js";
 
     requireLogin();
     const role = getRole();
     const params = new URLSearchParams(window.location.search);
-    const assetId = params.get("id");
+    const pcId = params.get("id");
 
+    const DOWNLOAD_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0-4-4m4 4 4-4M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>`;
     const EXPAND_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M21 16v3a2 2 0 0 1-2 2h-3M3 16v3a2 2 0 0 0 2 2h3"/></svg>`;
-    const COLLAPSE_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3v3a2 2 0 0 1-2 2H4M15 3v3a2 2 0 0 0 2 2h3M4 16h3a2 2 0 0 1 2 2v3M20 16h-3a2 2 0 0 0-2 2v3"/></svg>`;
 
     document.getElementById("shell").innerHTML = `
       ${renderShell("gallery", role, getUsername())}
-      <main>
-        <div id="content" style="display:flex; flex-direction:column; height:100%;"></div>
-      </main>
+      <main><div id="content" style="display:flex; flex-direction:column; height:100%;"></div></main>
     `;
     wireLogout();
 
     const content = document.getElementById("content");
-    let viewer = null;
 
     function escapeHtml(s) {
       const d = document.createElement("div");
@@ -211,14 +87,13 @@
     }
 
     async function init() {
-      if (!assetId) {
-        content.innerHTML = `<div class="error-box" style="margin:1.4em">No asset specified.</div>`;
+      if (!pcId) {
+        content.innerHTML = `<div class="error-box" style="margin:1.4em">No point cloud specified.</div>`;
         return;
       }
-
-      let assetMetadata;
+      let pc;
       try {
-        assetMetadata = await api.getAsset(assetId);
+        pc = await api.getPointCloud(pcId);
       } catch (err) {
         content.innerHTML = `<div class="error-box" style="margin:1.4em">${err.message}</div>`;
         return;
@@ -227,205 +102,109 @@
       content.innerHTML = `
         <div class="viewer-topbar">
           <div class="viewer-titles">
-            <h1>${escapeHtml(assetMetadata.title)}</h1>
-            ${assetMetadata.description ? `<div class="viewer-desc">${escapeHtml(assetMetadata.description)}</div>` : ""}
+            <h1>${escapeHtml(pc.title)}</h1>
+            ${pc.description ? `<div class="viewer-desc">${escapeHtml(pc.description)}</div>` : ""}
           </div>
           <div class="viewer-topbar-actions">
-            <button id="fullscreen-btn" class="icon-btn primary">${EXPAND_ICON}<span class="icon-btn-label">Fullscreen</span></button>
+            ${pc.can_download ? `<button id="download-btn" class="icon-btn">${DOWNLOAD_ICON}<span>Download</span></button>` : ""}
+            <button id="fullscreen-btn" class="icon-btn primary">${EXPAND_ICON}<span>Fullscreen</span></button>
           </div>
         </div>
-        <div class="viewer-canvas-wrap" id="canvas-wrap">
+        <div class="pc-render-area" id="render-area">
           <div id="potree_render_area"></div>
-          <div class="viewer-status" id="status">Initializing Potree\u2026</div>
+          <div id="potree_sidebar_container"></div>
+          <div class="pc-panel">
+            <div class="row">
+              <label for="pb-slider">Point budget</label>
+              <input type="range" id="pb-slider" min="100000" max="4000000" step="100000" value="1000000">
+              <span class="value" id="pb-value">1.0M</span>
+            </div>
+            <div class="row">
+              <label for="ps-slider">Point size</label>
+              <input type="range" id="ps-slider" min="0.5" max="4" step="0.1" value="1">
+              <span class="value" id="ps-value">1.0</span>
+            </div>
+            <div class="row">
+              <label for="edl-toggle">Eye-dome lighting</label>
+              <input type="checkbox" id="edl-toggle" checked>
+            </div>
+          </div>
+          <div class="viewer-status" id="status">Loading point cloud viewer\u2026</div>
         </div>
       `;
 
       const statusEl = document.getElementById("status");
-      const canvasWrap = document.getElementById("canvas-wrap");
-      const fullscreenBtn = document.getElementById("fullscreen-btn");
+      const renderArea = document.getElementById("render-area");
 
-      fullscreenBtn.addEventListener("click", () => {
-        if (document.fullscreenElement) {
-          document.exitFullscreen();
-        } else {
-          canvasWrap.requestFullscreen().catch((err) => alert(`Couldn't enter fullscreen: ${err.message}`));
-        }
-      });
-      document.addEventListener("fullscreenchange", () => {
-        const isFull = document.fullscreenElement === canvasWrap;
-        fullscreenBtn.innerHTML = isFull
-          ? `${COLLAPSE_ICON}<span class="icon-btn-label">Exit fullscreen</span>`
-          : `${EXPAND_ICON}<span class="icon-btn-label">Fullscreen</span>`;
+      document.getElementById("fullscreen-btn").addEventListener("click", () => {
+        if (document.fullscreenElement) document.exitFullscreen();
+        else renderArea.requestFullscreen().catch((err) => alert(`Couldn't enter fullscreen: ${err.message}`));
       });
 
-      try {
-        // Assume API returns the path to the root metadata.json or cloud.js of the Potree octree
-        const access = await api.pointcloudAccessUrl(assetId);
-        loadPointCloud(access.url);
-      } catch (err) {
-        statusEl.textContent = `Could not load point cloud: ${err.message}`;
-        statusEl.style.display = "flex";
+      const downloadBtn = document.getElementById("download-btn");
+      if (downloadBtn) {
+        downloadBtn.addEventListener("click", async () => {
+          try {
+            const access = await api.pointCloudDownloadAccessUrl(pcId);
+            window.location.href = access.url;
+          } catch (err) {
+            alert(err.message);
+          }
+        });
       }
 
-      function loadPointCloud(url) {
-        statusEl.textContent = "Streaming octree hierarchy\u2026";
+      if (!window.WebGLRenderingContext) {
+        statusEl.textContent = "This browser doesn't support WebGL, which the point cloud viewer needs.";
+        return;
+      }
 
-        // Initialize Potree Viewer
-        const viewerEl = document.getElementById("potree_render_area");
-        viewer = new Potree.Viewer(viewerEl);
+      try {
+        const access = await api.pointCloudOctreeAccessUrl(pcId);
+        Potree.resourcePath = "/vendor/potree/resources";
 
+        const viewer = new Potree.Viewer(document.getElementById("potree_render_area"));
         viewer.setEDLEnabled(true);
         viewer.setFOV(60);
         viewer.setPointBudget(1_000_000);
         viewer.setBackground("black");
 
-        Potree.loadPointCloud(url, "Dataset", function(e) {
-            let pointcloud = e.pointcloud;
-            let material = pointcloud.material;
+        Potree.loadPointCloud(`${access.url}metadata.json`, "cloud", (e) => {
+          if (!e || !e.pointcloud) {
+            statusEl.textContent = "Could not load point cloud: the converted octree didn't load correctly.";
+            statusEl.style.display = "flex";
+            return;
+          }
+          const pointcloud = e.pointcloud;
+          viewer.scene.addPointCloud(pointcloud);
+          pointcloud.material.size = 1;
+          pointcloud.material.pointSizeType = Potree.PointSizeType.ADAPTIVE;
+          viewer.fitToScreen();
+          statusEl.style.display = "none";
 
-            // Default appearance settings
-            material.size = 1;
-            material.pointSizeType = Potree.PointSizeType.ADAPTIVE;
-            material.shape = Potree.PointShape.SQUARE;
-            material.activeAttributeName = "color";
+          const pbSlider = document.getElementById("pb-slider");
+          const pbValue = document.getElementById("pb-value");
+          pbSlider.addEventListener("input", () => {
+            const n = parseInt(pbSlider.value, 10);
+            viewer.setPointBudget(n);
+            pbValue.textContent = `${(n / 1_000_000).toFixed(1)}M`;
+          });
 
-            viewer.scene.addPointCloud(pointcloud);
-            viewer.fitToScreen();
+          const psSlider = document.getElementById("ps-slider");
+          const psValue = document.getElementById("ps-value");
+          psSlider.addEventListener("input", () => {
+            const v = parseFloat(psSlider.value);
+            pointcloud.material.size = v;
+            psValue.textContent = v.toFixed(1);
+          });
 
-            statusEl.style.display = "none";
-            buildControlPanel(canvasWrap, pointcloud);
-            startStatsLoop(canvasWrap, pointcloud);
+          document.getElementById("edl-toggle").addEventListener("change", (evt) => {
+            viewer.setEDLEnabled(evt.target.checked);
+          });
         });
+      } catch (err) {
+        statusEl.textContent = `Could not load point cloud: ${err.message}`;
+        statusEl.style.display = "flex";
       }
-    }
-
-    // Potree Control Panel (Budget, Sizing, Materials, Post-Processing)
-    function buildControlPanel(container, pointcloud) {
-      const material = pointcloud.material;
-      const state = {
-        budget: viewer.getPointBudget(),
-        size: material.size,
-        attribute: material.activeAttributeName,
-        edl: viewer.getEDLEnabled()
-      };
-
-      const arrowSvg = `<svg class="ctl-panel-arrow" viewBox="0 0 8 8" width="8" height="8"><path d="M2 0l4 4-4 4z" fill="currentColor"/></svg>`;
-
-      const panel = document.createElement("div");
-      panel.className = "ctl-panel";
-      panel.innerHTML = `
-        <button type="button" class="ctl-panel-header" aria-expanded="true">
-          <span>Point Cloud Controls</span>${arrowSvg}
-        </button>
-        <div class="ctl-panel-body">
-          <label class="ctl-select-row">
-            <span class="ctl-row-label ctl-select-label">Color Format</span>
-            <select class="ctl-select-input" data-role="attribute">
-              <option value="color" selected>RGB Color</option>
-              <option value="elevation">Elevation</option>
-              <option value="intensity">Intensity</option>
-              <option value="classification">Classification</option>
-            </select>
-          </label>
-
-          <div class="ctl-slider-row">
-            <span class="ctl-row-label ctl-slider-label">Point Budget</span>
-            <div class="ctl-slider-track">
-              <div class="ctl-slider-fill" data-role="fill-budget"></div>
-              <input type="range" class="ctl-slider-input" data-role="slider-budget" min="100000" max="5000000" step="100000" value="${state.budget}">
-            </div>
-            <span class="ctl-row-value ctl-mono" data-role="value-budget">${(state.budget / 1000000).toFixed(1)}M</span>
-          </div>
-
-          <div class="ctl-slider-row">
-            <span class="ctl-row-label ctl-slider-label">Point Size</span>
-            <div class="ctl-slider-track">
-              <div class="ctl-slider-fill" data-role="fill-size"></div>
-              <input type="range" class="ctl-slider-input" data-role="slider-size" min="0.1" max="5" step="0.1" value="${state.size}">
-            </div>
-            <span class="ctl-row-value ctl-mono" data-role="value-size">${state.size.toFixed(1)}</span>
-          </div>
-
-          <label class="ctl-toggle-row" title="Eye Dome Lighting enhances structural depth">
-            <span class="ctl-row-label ctl-toggle-label">Eye Dome Lighting</span>
-            <input type="checkbox" class="ctl-toggle-input" data-role="edl" ${state.edl ? "checked" : ""}>
-            <span class="ctl-toggle-track"></span>
-          </label>
-        </div>
-      `;
-      container.appendChild(panel);
-
-      // Panel collapse
-      const panelHeader = panel.querySelector(".ctl-panel-header");
-      panelHeader.addEventListener("click", () => {
-        const collapsed = panel.getAttribute("data-collapsed") === "true";
-        panel.setAttribute("data-collapsed", collapsed ? "false" : "true");
-        panelHeader.setAttribute("aria-expanded", collapsed ? "true" : "false");
-      });
-
-      // Helper for sliders
-      function wireSlider(root, role, apply, format) {
-        const input = root.querySelector(`[data-role="slider-${role}"]`);
-        const fill = root.querySelector(`[data-role="fill-${role}"]`);
-        const value = root.querySelector(`[data-role="value-${role}"]`);
-        const update = () => {
-          const v = parseFloat(input.value);
-          const pct = ((v - parseFloat(input.min)) / (parseFloat(input.max) - parseFloat(input.min))) * 100;
-          fill.style.width = `calc(${pct}% - ${pct / 100 * 12}px)`;
-          value.textContent = format(v);
-          apply(v);
-        };
-        input.addEventListener("input", update);
-        update();
-      }
-
-      // Sliders
-      wireSlider(panel, "budget", (v) => { viewer.setPointBudget(v); }, (v) => `${(v / 1000000).toFixed(1)}M`);
-      wireSlider(panel, "size", (v) => { material.size = v; }, (v) => v.toFixed(1));
-
-      // Color attribute select
-      panel.querySelector('[data-role="attribute"]').addEventListener("change", (evt) => {
-        material.activeAttributeName = evt.target.value;
-      });
-
-      // EDL Toggle
-      panel.querySelector('[data-role="edl"]').addEventListener("change", (evt) => {
-        viewer.setEDLEnabled(evt.target.checked);
-      });
-    }
-
-    function startStatsLoop(container, pointcloud) {
-      const statsEl = document.createElement("div");
-      statsEl.className = "viewer-stats-hud";
-      statsEl.textContent = "\u2014";
-      container.appendChild(statsEl);
-
-      let frames = 0;
-      let lastFpsTime = performance.now();
-      let fps = 0;
-
-      function render() {
-        frames++;
-        const now = performance.now();
-        if (now - lastFpsTime >= 500) {
-          fps = (frames * 1000) / (now - lastFpsTime);
-          frames = 0;
-          lastFpsTime = now;
-        }
-
-        const visibleNodes = pointcloud.visibleNodes ? pointcloud.visibleNodes.length : 0;
-        const visiblePoints = pointcloud.numVisiblePoints || 0;
-        const budget = viewer.getPointBudget();
-
-        statsEl.textContent =
-          `engine         Potree / Three.js\n` +
-          `fps            ${fps.toFixed(0)}\n` +
-          `visible points ${visiblePoints.toLocaleString()} / ${budget.toLocaleString()}\n` +
-          `visible nodes  ${visibleNodes}\n`;
-
-        requestAnimationFrame(render);
-      }
-      render();
     }
 
     init();

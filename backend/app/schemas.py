@@ -1,6 +1,6 @@
 from typing import Optional, List
-from pydantic import BaseModel, ConfigDict
-from .models import Role, AssetStatus, AssetType
+from pydantic import BaseModel
+from .models import Role, AssetStatus
 
 
 class Token(BaseModel):
@@ -30,20 +30,20 @@ class UserUpdate(BaseModel):
 
 
 class AssetRead(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-
     id: int
     slug: str
     title: str
     description: str
     created_at: str
     status: AssetStatus
-    asset_type: AssetType
-    status_log: List[str]
-    mesh: Optional["AssetRead"] = None
+    status_log: List[str] = []
+    can_download: bool = False
 
 
-AssetRead.model_rebuild()
+class VolumeRead(AssetRead):
+    has_mesh: bool
+    mesh_filename: Optional[str] = None
+    num_lod_levels: Optional[int] = None
 
 
 class AssetStatusRead(BaseModel):
@@ -52,8 +52,23 @@ class AssetStatusRead(BaseModel):
     status_log: List[str] = []
 
 
-class AssetAccessGrant(BaseModel):
+class MeshRead(AssetRead):
+    pass
+
+
+class PointCloudRead(AssetRead):
+    pass
+
+
+class AccessGrant(BaseModel):
     user_id: int
+    can_download: bool = False
+
+
+class GrantedUserRead(BaseModel):
+    id: int
+    username: str
+    can_download: bool
 
 
 class FileAccessUrl(BaseModel):

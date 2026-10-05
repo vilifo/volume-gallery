@@ -26,7 +26,7 @@ def create_access_token(subject: str, role: str, expires_minutes: Optional[int] 
 
 
 def create_file_token(subject: str, asset_id: int, kind: str, min_lod: Optional[int] = None) -> str:
-    """kind is 'zarr' or 'mesh' or 'point_cloud' — scopes the token to a specific resource on a
+    """kind is 'zarr' or 'mesh' or 'pointcloud' — scopes the token to a specific resource on a
     specific volume.
     - min_lod (zarr tokens only) caps which OME-NGFF
     multiscale levels get served — see routers/volumes.py's serve_zarr_file."""

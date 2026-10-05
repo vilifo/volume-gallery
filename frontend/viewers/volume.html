@@ -170,7 +170,21 @@
     overflow: hidden;
     border: 1px solid rgba(255, 255, 255, 0.08);
   }
-  .ctl-tf-canvas { display: block; width: 100%; height: 80px; cursor: crosshair; background: #000; }
+  /* The stage is padded so handles at x/y = 0 or 1 sit fully inside the
+     hit area instead of being clipped by the canvas edge; the overlay
+     canvas covers the whole stage and owns all pointer events. */
+  .ctl-tf-stage { position: relative; padding: 8px; background: #000; }
+  .ctl-tf-canvas { display: block; width: 100%; height: 80px; background: #000; }
+  .ctl-tf-overlay {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    cursor: crosshair;
+    touch-action: none;
+    user-select: none;
+    -webkit-user-select: none;
+  }
   .ctl-tf-help { font-size: 9.5px; color: var(--text-dim); text-align: center; padding: 0.3em 0; background: rgba(0, 0, 0, 0.3); }
 
   .ctl-slider-row { display: flex; align-items: center; gap: 0.6em; margin-bottom: 0.7em; }
@@ -374,7 +388,7 @@
       }
       let volume;
       try {
-        volume = await api.getAsset(volumeId);
+        volume = await api.getVolume(volumeId);
       } catch (err) {
         content.innerHTML = `<div class="error-box" style="margin:1.4em">${err.message}</div>`;
         return;
@@ -433,21 +447,52 @@
       const defaultMinLevel =
         volume.num_lod_levels && volume.num_lod_levels > 1 ? Math.floor(volume.num_lod_levels / 2) : null;
 
+      // A canvas whose WebGPU context was configured for a disposed viewer
+      // can't reliably be handed to a new one (the new viewer's fetches run
+      // but nothing ever shows up), so every (re)load gets a brand-new canvas
+      // element. loadToken discards the result of any load that was
+      // superseded by a newer one while it was still in flight.
+      let loadToken = 0;
+      let stopStats = null;
+
+      function replaceCanvas() {
+        const canvas = document.createElement("canvas");
+        canvas.id = "canvas";
+        document.getElementById("canvas").replaceWith(canvas);
+        return canvas;
+      }
+
       async function loadVolume(minLevel) {
+        const token = ++loadToken;
         statusEl.style.display = "flex";
         statusEl.textContent =
           currentViewer ? "Reloading with new detail limit\u2026" : "Requesting WebGPU device\u2026";
+        if (stopStats) {
+          stopStats();
+          stopStats = null;
+        }
         if (currentViewer) {
-          currentViewer.dispose();
+          const old = currentViewer;
           currentViewer = null;
+          try {
+            await old.dispose();
+          } catch (err) {
+            console.warn("Viewer dispose failed:", err);
+          }
         }
         canvasWrap.querySelector(".ctl-panel")?.remove();
         canvasWrap.querySelector(".viewer-stats-hud")?.remove();
+        if (token !== loadToken) return;
 
         try {
           const access = await api.zarrAccessUrl(volumeId, minLevel);
-          const canvas = document.getElementById("canvas");
+          if (token !== loadToken) return;
+          const canvas = replaceCanvas();
           const viewer = await KilnViewer.create(canvas, access.url);
+          if (token !== loadToken) {
+            await viewer.dispose();
+            return;
+          }
           currentViewer = viewer;
           statusEl.style.display = "none";
           buildControlPanel(viewer, canvasWrap, {
@@ -455,8 +500,10 @@
             minLevel,
             onMinLevelChange: (newMinLevel) => loadVolume(newMinLevel),
           });
-          startStatsLoop(viewer, canvasWrap);
+          stopStats = startStatsLoop(viewer, canvasWrap);
         } catch (err) {
+          if (token !== loadToken) return;
+          console.error(err);
           statusEl.textContent = `Could not load volume: ${err.message}`;
           statusEl.style.display = "flex";
         }
@@ -677,31 +724,55 @@
         update();
       }
 
-      // --- transfer function canvas: draws the gradient/opacity curve via
-      // kiln-render's own renderPreview(), then lets the user click to add
-      // a point, drag to move one, or double-click to remove one. ---
+      // --- transfer function canvas: the gradient/opacity curve is drawn by
+      // kiln-render's renderPreview() on the bottom canvas; the control points
+      // are drawn on a transparent overlay canvas that also receives all
+      // pointer input. Pointer capture keeps a drag alive even when the cursor
+      // leaves the canvas (or the panel), and values are clamped to 0..1, so
+      // the top/bottom/left/right extremes are always reachable.
+      // Press empty space to add a point (and drag it right away), drag a
+      // point to move it, double-click a point to remove it. ---
       function wireTfCanvas(root) {
         const canvas = root.querySelector(".ctl-tf-canvas");
+        const overlay = root.querySelector(".ctl-tf-overlay");
         canvas.width = 256;
         canvas.height = 80;
         let dragIndex = null;
-        let didDrag = false;
 
         function redraw() {
           tf.renderPreview(canvas, viewer.windowCenter, viewer.windowWidth);
-          const ctx = canvas.getContext("2d");
-          ctx.fillStyle = "#e8a33d";
-          ctx.strokeStyle = "rgba(20,23,28,0.9)";
-          for (const p of tf.getOpacityPoints()) {
-            const px = p.x * canvas.width;
-            const py = canvas.height - p.y * canvas.height;
+
+          const stageRect = overlay.getBoundingClientRect();
+          if (stageRect.width === 0 || stageRect.height === 0) return; // panel collapsed
+          const dpr = window.devicePixelRatio || 1;
+          const w = Math.round(stageRect.width * dpr);
+          const h = Math.round(stageRect.height * dpr);
+          if (overlay.width !== w || overlay.height !== h) {
+            overlay.width = w;
+            overlay.height = h;
+          }
+          const ctx = overlay.getContext("2d");
+          ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+          ctx.clearRect(0, 0, stageRect.width, stageRect.height);
+
+          const c = canvas.getBoundingClientRect();
+          const ox = c.left - stageRect.left;
+          const oy = c.top - stageRect.top;
+          ctx.lineWidth = 2;
+          tf.getOpacityPoints().forEach((p, i) => {
+            const px = ox + p.x * c.width;
+            const py = oy + (1 - p.y) * c.height;
             ctx.beginPath();
-            ctx.arc(px, py, 4, 0, Math.PI * 2);
+            ctx.arc(px, py, i === dragIndex ? 6 : 5, 0, Math.PI * 2);
+            ctx.fillStyle = "#e8a33d";
+            ctx.strokeStyle = "rgba(20,23,28,0.9)";
             ctx.fill();
             ctx.stroke();
-          }
+          });
         }
 
+        // Normalised (0..1) position relative to the preview canvas. Clamped,
+        // so a pointer that has left the canvas still maps to its nearest edge.
         function pointFromEvent(evt) {
           const rect = canvas.getBoundingClientRect();
           const x = Math.min(1, Math.max(0, (evt.clientX - rect.left) / rect.width));
@@ -709,7 +780,7 @@
           return { x, y };
         }
 
-        function nearestPointIndex(pt, thresholdPx = 8) {
+        function nearestPointIndex(pt, thresholdPx = 10) {
           const points = tf.getOpacityPoints();
           const rect = canvas.getBoundingClientRect();
           let best = -1, bestDist = Infinity;
@@ -729,39 +800,45 @@
           redraw();
         }
 
-        canvas.addEventListener("mousedown", (evt) => {
-          const pt = pointFromEvent(evt);
-          dragIndex = nearestPointIndex(pt);
-          didDrag = false;
-        });
-        canvas.addEventListener("mousemove", (evt) => {
+        function endDrag() {
           if (dragIndex === null) return;
-          didDrag = true;
+          dragIndex = null;
+          redraw();
+        }
+
+        overlay.addEventListener("pointerdown", (evt) => {
+          if (evt.button !== 0) return;
+          evt.preventDefault();
           const pt = pointFromEvent(evt);
-          const points = tf.getOpacityPoints();
-          if (dragIndex >= 0 && dragIndex < points.length) {
-            points[dragIndex] = pt;
+          let idx = nearestPointIndex(pt);
+          if (idx < 0) {
+            const points = tf.getOpacityPoints();
+            points.push(pt);
+            points.sort((a, b) => a.x - b.x);
+            idx = points.indexOf(pt);
             applyPoints(points);
           }
+          dragIndex = idx;
+          overlay.setPointerCapture(evt.pointerId);
+          redraw();
         });
-        window.addEventListener("mouseup", () => {
-          if (dragIndex !== null && !didDrag) {
-            // treated as a click below via the click handler; nothing to do here
-          }
-          dragIndex = null;
-        });
-        canvas.addEventListener("click", (evt) => {
-          if (didDrag) return; // this click terminated a drag, not a fresh click
+        overlay.addEventListener("pointermove", (evt) => {
+          if (dragIndex === null) return;
           const pt = pointFromEvent(evt);
-          if (nearestPointIndex(pt) >= 0) return; // clicking an existing point is handled by drag
           const points = tf.getOpacityPoints();
-          points.push(pt);
-          points.sort((a, b) => a.x - b.x);
+          if (dragIndex >= points.length) return;
+          // Keep the point between its neighbours so the list stays sorted
+          // and dragIndex keeps referring to the same point.
+          const lo = dragIndex > 0 ? points[dragIndex - 1].x : 0;
+          const hi = dragIndex < points.length - 1 ? points[dragIndex + 1].x : 1;
+          points[dragIndex] = { ...points[dragIndex], x: Math.min(hi, Math.max(lo, pt.x)), y: pt.y };
           applyPoints(points);
         });
-        canvas.addEventListener("dblclick", (evt) => {
-          const pt = pointFromEvent(evt);
-          const idx = nearestPointIndex(pt);
+        overlay.addEventListener("pointerup", endDrag);
+        overlay.addEventListener("pointercancel", endDrag);
+        overlay.addEventListener("lostpointercapture", endDrag);
+        overlay.addEventListener("dblclick", (evt) => {
+          const idx = nearestPointIndex(pointFromEvent(evt));
           if (idx < 0) return;
           const points = tf.getOpacityPoints();
           points.splice(idx, 1);
@@ -794,7 +871,10 @@
             </select>
           </label>
           <div class="ctl-tf-canvas-container">
-            <canvas class="ctl-tf-canvas"></canvas>
+            <div class="ctl-tf-stage">
+              <canvas class="ctl-tf-canvas"></canvas>
+              <canvas class="ctl-tf-overlay"></canvas>
+            </div>
             <div class="ctl-tf-help">Click to add, drag to move, dbl-click to remove</div>
           </div>
           <div class="ctl-slider-row">
@@ -942,7 +1022,9 @@
         }
       };
 
+      let running = true;
       function render() {
+        if (!running) return;
         const s = viewer.streamingManager.getStats();
         const [dx, dy, dz] = meta.dimensions;
         const mb = (s.totalBytesDownloaded / (1024 * 1024)).toFixed(1);
@@ -959,6 +1041,7 @@
         requestAnimationFrame(render);
       }
       render();
+      return () => { running = false; };
     }
 
     init();

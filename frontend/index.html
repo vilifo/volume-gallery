@@ -50,7 +50,7 @@
   <div class="app-shell" id="shell"></div>
 
   <script type="module">
-    import { api, requireLogin, getRole, getUsername, renderShell, wireLogout} from "/js/api.js";
+    import { api, requireLogin, getRole, getUsername, renderShell, wireLogout } from "/js/api.js";
 
     requireLogin();
     const role = getRole();
@@ -101,11 +101,21 @@
       return `<div class="log-line ${cls}">${escapeHtml(message)}</div>`;
     }
 
+    function getSwatchText(assetType) {
+      if (assetType === "mesh") return "MSH";
+      if (assetType === "pointcloud") return "PTS";
+      return "CT"; // default/volume
+    }
+
     function renderRow(v) {
       const viewable = v.status === "ready";
+      const swatch = getSwatchText(v.asset_type);
+
+      const extraMeta = (v.asset_type === "volume" && v.mesh) ? " · mesh available" : "";
+
       return `
         <div class="asset-row" data-asset-row="${v.id}">
-          <div class="swatch">CT</div>
+          <div class="swatch">${swatch}</div>
           <div class="meta">
             <div class="title">
               ${
@@ -115,14 +125,14 @@
               }
               ${statusBadge(v)}
             </div>
-            <div class="slug">${escapeHtml(v.slug)}${v.mesh ? " · mesh available" : ""}</div>
+            <div class="slug">${escapeHtml(v.slug)}${extraMeta}</div>
             ${latestLogLine(v)}
           </div>
           <div class="actions">
             ${viewable ? `<a href="/viewers/${v.asset_type}.html?id=${v.id}"><button>Open</button></a>` : ""}
             ${
               role === "admin" || role === "editor"
-                ? `<button data-manage="${v.id}">Manage</button>`
+                ? `<button data-manage="${v.id}" data-kind="${v.asset_type}">Manage</button>`
                 : ""
             }
           </div>
@@ -132,7 +142,7 @@
     function wireRowActions(listEl) {
       listEl.querySelectorAll("[data-manage]").forEach((btn) => {
         btn.addEventListener("click", () => {
-          window.location.href = `/manage.html?id=${btn.dataset.manage}`;
+          window.location.href = `/manage.html?id=${btn.dataset.manage}&kind=${btn.dataset.kind}`;
         });
       });
     }
@@ -141,9 +151,21 @@
 
     async function load({ isPoll = false } = {}) {
       const listEl = document.getElementById("list");
-      let assets;
+      let assets = [];
       try {
-        assets = await api.listAssets();
+        // Fetch all three asset types concurrently
+        const [volumes, meshes, pointclouds] = await Promise.all([
+          api.listVolumes(),
+          api.listMeshes(),
+          api.listPointClouds()
+        ]);
+
+        // Inject the asset_type so the renderer and manage button know what they are
+        volumes.forEach(v => v.asset_type = "volume");
+        meshes.forEach(m => m.asset_type = "mesh");
+        pointclouds.forEach(p => p.asset_type = "pointcloud");
+
+        assets = [...volumes, ...meshes, ...pointclouds];
       } catch (err) {
         if (!isPoll) listEl.innerHTML = `<div class="error-box">${err.message}</div>`;
         return;

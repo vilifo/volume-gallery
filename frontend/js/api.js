@@ -46,6 +46,43 @@ async function request(path, options = {}) {
   return ct.includes("application/json") ? res.json() : res;
 }
 
+// XHR-based (not fetch) specifically to get real upload-progress events —
+// fetch has no stable cross-browser API for tracking request-body upload
+// progress, only response-download progress. onProgress(fraction 0..1)
+// fires as bytes actually leave the browser; it does NOT track server-side
+// processing (that's what /status polling is for, since processing happens
+// in a background task after this request already returned). Shared by
+// volumes/meshes/point clouds — same upload shape for all three.
+function _uploadWithProgress(path, formData, onProgress) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", path);
+    const token = getToken();
+    if (token) xhr.setRequestHeader("Authorization", `Bearer ${token}`);
+    xhr.upload.addEventListener("progress", (evt) => {
+      if (evt.lengthComputable && onProgress) onProgress(evt.loaded / evt.total);
+    });
+    xhr.addEventListener("load", () => {
+      if (xhr.status === 401) {
+        clearSession();
+        window.location.href = "/login.html";
+        reject(new Error("Not authenticated"));
+        return;
+      }
+      let data = null;
+      try { data = JSON.parse(xhr.responseText); } catch (_) {}
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve(data);
+      } else {
+        reject(new Error((data && data.detail) || xhr.statusText || "Upload failed"));
+      }
+    });
+    xhr.addEventListener("error", () => reject(new Error("Network error during upload")));
+    xhr.addEventListener("abort", () => reject(new Error("Upload cancelled")));
+    xhr.send(formData);
+  });
+}
+
 export const api = {
   async login(username, password) {
     const body = new URLSearchParams({ username, password });
@@ -60,68 +97,82 @@ export const api = {
 
   me() { return request("/api/users/me"); },
 
-  // assets
-  listAssets() { return request("/api/assets"); },
-  getAsset(id) { return request(`/api/assets/${id}`); },
-  createAsset(formData) {
-    return request("/api/assets", { method: "POST", body: formData });
+  // volumes
+  listVolumes() { return request("/api/volumes"); },
+  getVolume(id) { return request(`/api/volumes/${id}`); },
+  createVolume(formData) {
+    return request("/api/volumes", { method: "POST", body: formData });
   },
   // XHR-based (not fetch) specifically to get real upload-progress events —
-  // fetch has no stable cross-browser API for tracking request-body upload
-  // progress, only response-download progress. onProgress(fraction 0..1)
-  // fires as bytes actually leave the browser; it does NOT track server-side
-  // processing (that's what /status polling is for, since processing now
-  // happens in a background task after this request already returned).
-  createAssetWithProgress(formData, onProgress) {
-    return new Promise((resolve, reject) => {
-      const xhr = new XMLHttpRequest();
-      xhr.open("POST", "/api/assets");
-      const token = getToken();
-      if (token) xhr.setRequestHeader("Authorization", `Bearer ${token}`);
-      xhr.upload.addEventListener("progress", (evt) => {
-        if (evt.lengthComputable && onProgress) onProgress(evt.loaded / evt.total);
-      });
-      xhr.addEventListener("load", () => {
-        if (xhr.status === 401) {
-          clearSession();
-          window.location.href = "/login.html";
-          reject(new Error("Not authenticated"));
-          return;
-        }
-        let data = null;
-        try { data = JSON.parse(xhr.responseText); } catch (_) {}
-        if (xhr.status >= 200 && xhr.status < 300) {
-          resolve(data);
-        } else {
-          reject(new Error((data && data.detail) || xhr.statusText || "Upload failed"));
-        }
-      });
-      xhr.addEventListener("error", () => reject(new Error("Network error during upload")));
-      xhr.addEventListener("abort", () => reject(new Error("Upload cancelled")));
-      xhr.send(formData);
-    });
+  // see _uploadWithProgress above for why.
+  createVolumeWithProgress(formData, onProgress) {
+    return _uploadWithProgress("/api/volumes", formData, onProgress);
   },
-  getAssetStatus(id) { return request(`/api/assets/${id}/status`); },
-  deleteAsset(id) { return request(`/api/assets/${id}`, { method: "DELETE" }); },
+  getVolumeStatus(id) { return request(`/api/volumes/${id}/status`); },
+  deleteVolume(id) { return request(`/api/volumes/${id}`, { method: "DELETE" }); },
   uploadMesh(id, formData) {
-    return request(`/api/assets/${id}/mesh`, { method: "POST", body: formData });
+    return request(`/api/volumes/${id}/mesh`, { method: "POST", body: formData });
   },
   zarrAccessUrl(id, minLevel) {
     const qs = minLevel != null ? `?min_level=${encodeURIComponent(minLevel)}` : "";
-    return request(`/api/assets/${id}/zarr-access-url${qs}`);
+    return request(`/api/volumes/${id}/zarr-access-url${qs}`);
   },
-  meshAccessUrl(id) { return request(`/api/access/${id}/mesh-access-url`); },
-  pointCloudAccessUrl(id) { return request(`/api/access/${id}/point-cloud-access-url`); },
-  listAccess(id) { return request(`/api/assets/${id}/access`); },
-  grantAccess(id, userId) {
-    return request(`/api/assets/${id}/access`, {
+  meshAccessUrl(id) { return request(`/api/volumes/${id}/mesh-access-url`); },
+  listAccess(id) { return request(`/api/volumes/${id}/access`); },
+  grantAccess(id, userId, canDownload) {
+    return request(`/api/volumes/${id}/access`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ user_id: userId }),
+      body: JSON.stringify({ user_id: userId, can_download: !!canDownload }),
     });
   },
   revokeAccess(id, userId) {
-    return request(`/api/assets/${id}/access/${userId}`, { method: "DELETE" });
+    return request(`/api/volumes/${id}/access/${userId}`, { method: "DELETE" });
+  },
+  volumeDownloadAccessUrl(id) { return request(`/api/volumes/${id}/download-access-url`); },
+
+  // meshes
+  listMeshes() { return request("/api/meshes"); },
+  getMesh(id) { return request(`/api/meshes/${id}`); },
+  getMeshStatus(id) { return request(`/api/meshes/${id}/status`); },
+  createMeshWithProgress(formData, onProgress) {
+    return _uploadWithProgress("/api/meshes", formData, onProgress);
+  },
+  deleteMesh(id) { return request(`/api/meshes/${id}`, { method: "DELETE" }); },
+  meshNxzAccessUrl(id) { return request(`/api/meshes/${id}/mesh-access-url`); },
+  meshDownloadAccessUrl(id) { return request(`/api/meshes/${id}/download-access-url`); },
+  listMeshAccess(id) { return request(`/api/meshes/${id}/access`); },
+  grantMeshAccess(id, userId, canDownload) {
+    return request(`/api/meshes/${id}/access`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ user_id: userId, can_download: !!canDownload }),
+    });
+  },
+  revokeMeshAccess(id, userId) {
+    return request(`/api/meshes/${id}/access/${userId}`, { method: "DELETE" });
+  },
+
+  // point clouds
+  listPointClouds() { return request("/api/pointclouds"); },
+  getPointCloud(id) { return request(`/api/pointclouds/${id}`); },
+  getPointCloudStatus(id) { return request(`/api/pointclouds/${id}/status`); },
+  createPointCloudWithProgress(formData, onProgress) {
+    return _uploadWithProgress("/api/pointclouds", formData, onProgress);
+  },
+  deletePointCloud(id) { return request(`/api/pointclouds/${id}`, { method: "DELETE" }); },
+  pointCloudOctreeAccessUrl(id) { return request(`/api/pointclouds/${id}/octree-access-url`); },
+  pointCloudDownloadAccessUrl(id) { return request(`/api/pointclouds/${id}/download-access-url`); },
+  listPointCloudAccess(id) { return request(`/api/pointclouds/${id}/access`); },
+  grantPointCloudAccess(id, userId, canDownload) {
+    return request(`/api/pointclouds/${id}/access`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ user_id: userId, can_download: !!canDownload }),
+    });
+  },
+  revokePointCloudAccess(id, userId) {
+    return request(`/api/pointclouds/${id}/access/${userId}`, { method: "DELETE" });
   },
 
   // users (admin)
@@ -146,7 +197,7 @@ export const api = {
 export function renderShell(activePage, role, username) {
   const navItems = [{ href: "/index.html", label: "Gallery", key: "gallery" }];
   if (role === "editor" || role === "admin") {
-    navItems.push({ href: "/upload.html", label: "Upload asset", key: "upload" });
+    navItems.push({ href: "/upload.html", label: "Upload", key: "upload" });
   }
   if (role === "admin") {
     navItems.push({ href: "/admin.html", label: "Users", key: "admin" });
@@ -159,7 +210,7 @@ export function renderShell(activePage, role, username) {
     .join("");
   return `
     <div class="rail">
-      <div class="brand">Asset Gallery</div>
+      <div class="brand">Volume Gallery</div>
       <div class="role-tag">${role}</div>
       <nav>${nav}</nav>
       <div class="spacer"></div>
