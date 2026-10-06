@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Point Cloud Viewer — Volume Gallery</title>
+<link rel="stylesheet" href="/css/style.css" />
+<link rel="stylesheet" href="/vendor/potree/potree.css" />
+<style>
+  body.viewer-page { overflow: hidden; }
+  body.viewer-page .app-shell { height: 100vh; }
+  body.viewer-page main {
+    padding: 0; max-width: none; display: flex; flex-direction: column; height: 100vh; overflow: hidden;
+  }
+  .viewer-topbar {
+    display: flex; justify-content: space-between; align-items: flex-start; gap: 1.5em;
+    padding: 0.9em 1.4em; border-bottom: 1px solid var(--line); flex-shrink: 0; background: var(--panel);
+  }
+  .viewer-topbar .viewer-titles { min-width: 0; }
+  .viewer-topbar h1 { font-size: 1.1em; margin: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .viewer-topbar .viewer-desc { font-size: 0.83em; color: var(--text-dim); margin-top: 0.2em; max-width: 60ch; }
+  .viewer-topbar-actions { display: flex; gap: 0.6em; flex-shrink: 0; }
+  .icon-btn { display: inline-flex; align-items: center; gap: 0.5em; padding: 0.5em 0.9em; white-space: nowrap; }
+  .icon-btn svg { width: 14px; height: 14px; flex-shrink: 0; }
+
+  .pc-render-area { flex: 1; min-height: 0; position: relative; background: #000; }
+  #potree_render_area { width: 100%; height: 100%; }
+  /* Potree's own sidebar/menu chrome is never loaded (no loadGUI() call —
+     see the script below), but a couple of its panels default to visible
+     regardless; keep them out of the way rather than fighting each one. */
+  #potree_sidebar_container, .potree_menu_toggle { display: none !important; }
+
+  .pc-panel {
+    position: absolute; top: 12px; right: 12px; z-index: 5;
+    width: 220px;
+    background: rgba(26, 29, 35, 0.92);
+    backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+    border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 10px;
+    padding: 0.8em;
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
+    color: var(--text); font-size: 12px;
+  }
+  .pc-panel .row { display: flex; align-items: center; justify-content: space-between; gap: 0.6em; margin-bottom: 0.6em; }
+  .pc-panel .row:last-child { margin-bottom: 0; }
+  .pc-panel label { color: var(--text-dim); font-size: 11px; }
+  .pc-panel input[type="range"] { flex: 1; margin-left: 0.6em; }
+  .pc-panel .value { font-family: var(--mono); font-size: 10.5px; color: var(--text-dim); width: 3.5em; text-align: right; }
+
+  .viewer-status {
+    position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+    color: var(--text-dim); font-family: var(--mono); font-size: 0.85em;
+    background: rgba(0, 0, 0, 0.6); padding: 1.5em; text-align: left; line-height: 1.5;
+  }
+</style>
+</head>
+<body class="viewer-page">
+  <div class="app-shell" id="shell"></div>
+
+  <script src="/vendor/potree/jquery.js"></script>
+  <script src="/vendor/potree/BinaryHeap.js"></script>
+  <script src="/vendor/potree/tween.min.js"></script>
+  <script src="/vendor/potree/potree.js"></script>
+
+  <script type="module">
+    import { api, requireLogin, getRole, getUsername, renderShell, wireLogout } from "/frontend/js/api.js";
+
+    requireLogin();
+    const role = getRole();
+    const params = new URLSearchParams(window.location.search);
+    const pcId = params.get("id");
+
+    const DOWNLOAD_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0-4-4m4 4 4-4M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>`;
+    const EXPAND_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M21 16v3a2 2 0 0 1-2 2h-3M3 16v3a2 2 0 0 0 2 2h3"/></svg>`;
+
+    document.getElementById("shell").innerHTML = `
+      ${renderShell("gallery", role, getUsername())}
+      <main><div id="content" style="display:flex; flex-direction:column; height:100%;"></div></main>
+    `;
+    wireLogout();
+
+    const content = document.getElementById("content");
+
+    function escapeHtml(s) {
+      const d = document.createElement("div");
+      d.textContent = s;
+      return d.innerHTML;
+    }
+
+    async function init() {
+      if (!pcId) {
+        content.innerHTML = `<div class="error-box" style="margin:1.4em">No point cloud specified.</div>`;
+        return;
+      }
+      let pc;
+      try {
+        pc = await api.getPointCloud(pcId);
+      } catch (err) {
+        content.innerHTML = `<div class="error-box" style="margin:1.4em">${err.message}</div>`;
+        return;
+      }
+
+      content.innerHTML = `
+        <div class="viewer-topbar">
+          <div class="viewer-titles">
+            <h1>${escapeHtml(pc.title)}</h1>
+            ${pc.description ? `<div class="viewer-desc">${escapeHtml(pc.description)}</div>` : ""}
+          </div>
+          <div class="viewer-topbar-actions">
+            ${pc.can_download ? `<button id="download-btn" class="icon-btn">${DOWNLOAD_ICON}<span>Download</span></button>` : ""}
+            <button id="fullscreen-btn" class="icon-btn primary">${EXPAND_ICON}<span>Fullscreen</span></button>
+          </div>
+        </div>
+        <div class="pc-render-area" id="render-area">
+          <div id="potree_render_area"></div>
+          <div id="potree_sidebar_container"></div>
+          <div class="pc-panel">
+            <div class="row">
+              <label for="pb-slider">Point budget</label>
+              <input type="range" id="pb-slider" min="100000" max="4000000" step="100000" value="1000000">
+              <span class="value" id="pb-value">1.0M</span>
+            </div>
+            <div class="row">
+              <label for="ps-slider">Point size</label>
+              <input type="range" id="ps-slider" min="0.5" max="4" step="0.1" value="1">
+              <span class="value" id="ps-value">1.0</span>
+            </div>
+            <div class="row">
+              <label for="edl-toggle">Eye-dome lighting</label>
+              <input type="checkbox" id="edl-toggle" checked>
+            </div>
+          </div>
+          <div class="viewer-status" id="status">Loading point cloud viewer\u2026</div>
+        </div>
+      `;
+
+      const statusEl = document.getElementById("status");
+      const renderArea = document.getElementById("render-area");
+
+      document.getElementById("fullscreen-btn").addEventListener("click", () => {
+        if (document.fullscreenElement) document.exitFullscreen();
+        else renderArea.requestFullscreen().catch((err) => alert(`Couldn't enter fullscreen: ${err.message}`));
+      });
+
+      const downloadBtn = document.getElementById("download-btn");
+      if (downloadBtn) {
+        downloadBtn.addEventListener("click", async () => {
+          try {
+            const access = await api.pointCloudDownloadAccessUrl(pcId);
+            window.location.href = access.url;
+          } catch (err) {
+            alert(err.message);
+          }
+        });
+      }
+
+      if (!window.WebGLRenderingContext) {
+        statusEl.textContent = "This browser doesn't support WebGL, which the point cloud viewer needs.";
+        return;
+      }
+
+      try {
+        const access = await api.pointCloudOctreeAccessUrl(pcId);
+        Potree.resourcePath = "/vendor/potree/resources";
+
+        const viewer = new Potree.Viewer(document.getElementById("potree_render_area"));
+        viewer.setEDLEnabled(true);
+        viewer.setFOV(60);
+        viewer.setPointBudget(1_000_000);
+        viewer.setBackground("black");
+
+        Potree.loadPointCloud(`${access.url}metadata.json`, "cloud", (e) => {
+          if (!e || !e.pointcloud) {
+            statusEl.textContent = "Could not load point cloud: the converted octree didn't load correctly.";
+            statusEl.style.display = "flex";
+            return;
+          }
+          const pointcloud = e.pointcloud;
+          viewer.scene.addPointCloud(pointcloud);
+          pointcloud.material.size = 1;
+          pointcloud.material.pointSizeType = Potree.PointSizeType.ADAPTIVE;
+          viewer.fitToScreen();
+          statusEl.style.display = "none";
+
+          const pbSlider = document.getElementById("pb-slider");
+          const pbValue = document.getElementById("pb-value");
+          pbSlider.addEventListener("input", () => {
+            const n = parseInt(pbSlider.value, 10);
+            viewer.setPointBudget(n);
+            pbValue.textContent = `${(n / 1_000_000).toFixed(1)}M`;
+          });
+
+          const psSlider = document.getElementById("ps-slider");
+          const psValue = document.getElementById("ps-value");
+          psSlider.addEventListener("input", () => {
+            const v = parseFloat(psSlider.value);
+            pointcloud.material.size = v;
+            psValue.textContent = v.toFixed(1);
+          });
+
+          document.getElementById("edl-toggle").addEventListener("change", (evt) => {
+            viewer.setEDLEnabled(evt.target.checked);
+          });
+        });
+      } catch (err) {
+        statusEl.textContent = `Could not load point cloud: ${err.message}`;
+        statusEl.style.display = "flex";
+      }
+    }
+
+    init();
+  </script>
+</body>
+</html>

@@ -5,3 +5,4 @@ __pycache__/
 nginx/certs
 *.pyc
 .env
+/frontend/vendor/

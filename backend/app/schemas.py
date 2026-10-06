@@ -1,6 +1,6 @@
 from typing import Optional, List
 from pydantic import BaseModel
-from .models import Role, VolumeStatus
+from .models import Role, AssetStatus
 
 
 class Token(BaseModel):
@@ -29,32 +29,50 @@ class UserUpdate(BaseModel):
     password: Optional[str] = None
 
 
-class VolumeCreate(BaseModel):
-    slug: str
-    title: str
-    description: str = ""
-
-
-class VolumeRead(BaseModel):
+class AssetRead(BaseModel):
     id: int
     slug: str
     title: str
     description: str
+    created_at: str
+    status: AssetStatus
+    status_log: List[str] = []
+    can_download: bool = False
+
+
+class VolumeRead(AssetRead):
     has_mesh: bool
     mesh_filename: Optional[str] = None
-    created_at: str
-    status: VolumeStatus
-    status_log: List[str] = []
+    # Processing state of the attached mesh (it goes through the regular mesh
+    # pipeline); None when the volume has no mesh or only a legacy raw file.
+    mesh_status: Optional[AssetStatus] = None
+    mesh_status_log: List[str] = []
+    num_lod_levels: Optional[int] = None
 
 
-class VolumeStatusRead(BaseModel):
+class AssetStatusRead(BaseModel):
     id: int
-    status: VolumeStatus
+    status: AssetStatus
     status_log: List[str] = []
 
 
-class VolumeAccessGrant(BaseModel):
+class MeshRead(AssetRead):
+    pass
+
+
+class PointCloudRead(AssetRead):
+    pass
+
+
+class AccessGrant(BaseModel):
     user_id: int
+    can_download: bool = False
+
+
+class GrantedUserRead(BaseModel):
+    id: int
+    username: str
+    can_download: bool
 
 
 class FileAccessUrl(BaseModel):
