@@ -7,7 +7,7 @@ bcrypt==5.0.0
 python-multipart==0.0.32
 
 # --- TIFF-stack -> OME-Zarr conversion (backend/app/helpers/volume.py) ---
-tifffile==2026.8.23
+tifffile==2026.9.20
 numpy==2.5.3
 dask==2026.8.0
 # ome-zarr-py writes/reads via the zarr-python v2 API; pin below v3 until it
