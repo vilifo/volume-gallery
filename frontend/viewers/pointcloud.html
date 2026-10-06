@@ -56,20 +56,20 @@
 <body class="viewer-page">
   <div class="app-shell" id="shell"></div>
 
-  <script src="/vendor/potree/jquery.js"></script>
-  <script src="/vendor/potree/BinaryHeap.js"></script>
-  <script src="/vendor/potree/tween.min.js"></script>
+  <script src="/vendor/libs/jquery/jquery-3.1.1.js"></script>
+  <script src="/vendor/libs/other/BinaryHeap.js"></script>
+  <script src="/vendor/libs/tween/tween.min.js"></script>
+  <script src="/vendor/libs/proj4/proj4.js"></script>
   <script src="/vendor/potree/potree.js"></script>
 
   <script type="module">
-    import { api, requireLogin, getRole, getUsername, renderShell, wireLogout } from "/frontend/js/api.js";
+    import { api, requireLogin, getRole, getUsername, renderShell, wireLogout } from "/js/api.js";
 
     requireLogin();
     const role = getRole();
     const params = new URLSearchParams(window.location.search);
     const pcId = params.get("id");
 
-    const DOWNLOAD_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0-4-4m4 4 4-4M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>`;
     const EXPAND_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M21 16v3a2 2 0 0 1-2 2h-3M3 16v3a2 2 0 0 0 2 2h3"/></svg>`;
 
     document.getElementById("shell").innerHTML = `
@@ -106,7 +106,6 @@
             ${pc.description ? `<div class="viewer-desc">${escapeHtml(pc.description)}</div>` : ""}
           </div>
           <div class="viewer-topbar-actions">
-            ${pc.can_download ? `<button id="download-btn" class="icon-btn">${DOWNLOAD_ICON}<span>Download</span></button>` : ""}
             <button id="fullscreen-btn" class="icon-btn primary">${EXPAND_ICON}<span>Fullscreen</span></button>
           </div>
         </div>
@@ -160,7 +159,8 @@
 
       try {
         const access = await api.pointCloudOctreeAccessUrl(pcId);
-        Potree.resourcePath = "/vendor/potree/resources";
+        Potree.workerPath = window.location.origin + "/vendor/potree/workers";
+        Potree.resourcePath = window.location.origin + "/vendor/potree/resources";
 
         const viewer = new Potree.Viewer(document.getElementById("potree_render_area"));
         viewer.setEDLEnabled(true);

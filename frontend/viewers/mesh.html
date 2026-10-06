@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Mesh Viewer — Volume Gallery</title>
 <link rel="stylesheet" href="/css/style.css" />
-<link rel="stylesheet" href="/vendor/3dhop/3dhop.css" />
+<link rel="stylesheet" href="/vendor/3dhop/stylesheet/3dhop.css" />
 <style>
   body.viewer-page { overflow: hidden; }
   body.viewer-page .app-shell { height: 100vh; }
@@ -56,11 +56,11 @@
   <div class="app-shell" id="shell"></div>
 
   <!-- 3DHOP's own scripts — order matters (spidergl -> jquery -> presenter -> nexus -> trackball). -->
-  <script src="/vendor/3dhop/spidergl.js"></script>
-  <script src="/vendor/3dhop/jquery.js"></script>
-  <script src="/vendor/3dhop/presenter.js"></script>
-  <script src="/vendor/3dhop/nexus.js"></script>
-  <script src="/vendor/3dhop/trackball_turntable.js"></script>
+  <script src="/vendor/3dhop/js/spidergl.js"></script>
+  <script src="/vendor/3dhop/js/jquery.js"></script>
+  <script src="/vendor/3dhop/js/presenter.js"></script>
+  <script src="/vendor/3dhop/js/nexus.js"></script>
+  <script src="/vendor/3dhop/js/trackball_turntable.js"></script>
 
   <script type="module">
     import { api, requireLogin, getRole, getUsername, renderShell, wireLogout } from "/js/api.js";

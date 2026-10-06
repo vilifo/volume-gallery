@@ -85,6 +85,9 @@
       if (v.status === "processing") {
         return `<span class="status-badge processing"><span class="mini-spinner"></span>processing</span>`;
       }
+      if (v.status === "uploaded") {
+        return `<span class="status-badge" title="The upload was not completed">incomplete upload</span>`;
+      }
       if (v.status === "failed") {
         return `<span class="status-badge failed">failed</span>`;
       }

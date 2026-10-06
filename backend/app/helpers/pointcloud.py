@@ -24,10 +24,7 @@ def convert_pointcloud(source_path: Path, output_dir: Path, log=None) -> None:
             log(msg)
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    _log("Building Potree octree (PotreeConverter)")
-    _log(f"PotreeConverter binary: {settings.POTREE_CONVERTER_BIN}")
-    print(os.path.exists(settings.POTREE_CONVERTER_BIN))
-    subprocess.run([settings.POTREE_CONVERTER_BIN, "-h"], check=True)
+    _log("Building Potree octree from point cloud...")
     cmd = settings.POTREE_CONVERTER_BIN, str(source_path.resolve()), "-o", str(output_dir.resolve())
     try:
         subprocess.run(cmd, check=True)
