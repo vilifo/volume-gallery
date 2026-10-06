@@ -1,9 +1,7 @@
 import json
-import re
 import shutil
 import zipfile
 from collections import deque
-from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
 
@@ -12,17 +10,16 @@ from fastapi.responses import FileResponse, Response
 from sqlmodel import Session, select
 
 from ..database import get_session, engine
-from ..models import User, Role, Volume, VolumeAccess, AssetStatus
+from ..models import User, Role, Volume, VolumeAccess, Mesh, AssetStatus
 from ..schemas import VolumeRead, AssetStatusRead, AccessGrant, FileAccessUrl, UserRead
 from ..deps import get_current_user, require_editor
 from ..security import create_file_token, decode_token
 from ..config import settings
 from ..helpers.volume import convert_tiff_stack_to_ome_zarr
+from ..utils import SLUG_RE, _now  # noqa: F401 - re-exported for the other asset routers
+from .meshes import attach_mesh_to_volume, delete_volume_mesh, get_volume_mesh, volume_mesh_source, volume_mesh_file
 
 router = APIRouter(prefix="/api/volumes", tags=["volumes"])
-
-SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{1,62}$")
-
 
 def _volume_dir(slug: str) -> Path:
     return settings.VOLUMES_DIR / slug
@@ -114,8 +111,9 @@ def _can_see_volume(user: User, volume: Volume, session: Session) -> bool:
     return grant is not None
 
 
-def _volume_read(v: Volume) -> VolumeRead:
+def _volume_read(v: Volume, mesh: Optional[Mesh] = None) -> VolumeRead:
     log_lines = [line for line in (v.status_log or "").split("\n") if line]
+    mesh_log = [line for line in ((mesh.status_log if mesh else "") or "").split("\n") if line]
     return VolumeRead(
         id=v.id,
         slug=v.slug,
@@ -123,6 +121,8 @@ def _volume_read(v: Volume) -> VolumeRead:
         description=v.description,
         has_mesh=v.has_mesh,
         mesh_filename=v.mesh_filename,
+        mesh_status=mesh.status if mesh else None,
+        mesh_status_log=mesh_log,
         created_at=v.created_at.isoformat(),
         status=v.status,
         status_log=log_lines,
@@ -136,7 +136,8 @@ def _volume_read(v: Volume) -> VolumeRead:
 def list_volumes(session: Session = Depends(get_session), user: User = Depends(get_current_user)):
     volumes = session.exec(select(Volume)).all()
     visible = [v for v in volumes if _can_see_volume(user, v, session)]
-    return [_volume_read(v) for v in visible]
+    meshes = {m.volume_id: m for m in session.exec(select(Mesh).where(Mesh.volume_id != None)).all()}  # noqa: E711
+    return [_volume_read(v, meshes.get(v.id)) for v in visible]
 
 
 @router.get("/{volume_id}", response_model=VolumeRead)
@@ -146,7 +147,7 @@ def get_volume(
     volume = session.get(Volume, volume_id)
     if not volume or not _can_see_volume(user, volume, session):
         raise HTTPException(status_code=404, detail="Volume not found")
-    return _volume_read(volume)
+    return _volume_read(volume, get_volume_mesh(session, volume.id))
 
 
 @router.get("/{volume_id}/status", response_model=AssetStatusRead)
@@ -201,13 +202,6 @@ def create_volume(
         with open(zip_path, "wb") as f:
             shutil.copyfileobj(source_upload.file, f)
 
-        mesh_filename = None
-        has_mesh = False
-        if mesh_file is not None:
-            mesh_filename = Path(mesh_file.filename).name
-            with open(vol_dir / mesh_filename, "wb") as f:
-                shutil.copyfileobj(mesh_file.file, f)
-            has_mesh = True
     except Exception as exc:  # noqa: BLE001 - surface save errors to the caller
         shutil.rmtree(vol_dir, ignore_errors=True)
         raise HTTPException(status_code=400, detail=f"Could not save upload: {exc}")
@@ -217,8 +211,6 @@ def create_volume(
         title=title,
         description=description,
         zarr_path="",  # filled in by _process_upload once conversion/extraction finishes
-        has_mesh=has_mesh,
-        mesh_filename=mesh_filename,
         created_by=editor.id,
         status=AssetStatus.processing,
         status_log=f"{_now()}  Upload received, queued for processing\n",
@@ -227,13 +219,21 @@ def create_volume(
     session.commit()
     session.refresh(volume)
 
+    # An optional mesh uploaded together with the volume is processed like any
+    # other mesh (see routers/meshes.py) but is owned by the volume.
+    mesh = None
+    if mesh_file is not None:
+        try:
+            mesh = attach_mesh_to_volume(session, volume, mesh_file, editor, background_tasks)
+        except Exception:
+            shutil.rmtree(vol_dir, ignore_errors=True)
+            session.delete(volume)
+            session.commit()
+            raise
+
     background_tasks.add_task(_process_upload, volume.id, str(vol_dir), source_kind, max_workers)
 
-    return _volume_read(volume)
-
-
-def _now() -> str:
-    return datetime.utcnow().strftime("%H:%M:%S")
+    return _volume_read(volume, mesh)
 
 
 def _process_upload(volume_id: int, vol_dir_str: str, source_kind: str, max_workers: int) -> None:
@@ -356,6 +356,7 @@ def _find_tiff_dir(scratch_dir: Path) -> Optional[Path]:
 @router.post("/{volume_id}/mesh", response_model=VolumeRead)
 def upload_or_replace_mesh(
     volume_id: int,
+    background_tasks: BackgroundTasks,
     mesh_file: UploadFile = File(...),
     session: Session = Depends(get_session),
     editor: User = Depends(require_editor),
@@ -363,16 +364,9 @@ def upload_or_replace_mesh(
     volume = session.get(Volume, volume_id)
     if not volume:
         raise HTTPException(status_code=404, detail="Volume not found")
-    vol_dir = _volume_dir(volume.slug)
-    mesh_filename = Path(mesh_file.filename).name
-    with open(vol_dir / mesh_filename, "wb") as f:
-        shutil.copyfileobj(mesh_file.file, f)
-    volume.mesh_filename = mesh_filename
-    volume.has_mesh = True
-    session.add(volume)
-    session.commit()
+    mesh = attach_mesh_to_volume(session, volume, mesh_file, editor, background_tasks)
     session.refresh(volume)
-    return _volume_read(volume)
+    return _volume_read(volume, mesh)
 
 
 @router.delete("/{volume_id}")
@@ -383,6 +377,7 @@ def delete_volume(
     if not volume:
         raise HTTPException(status_code=404, detail="Volume not found")
     shutil.rmtree(_volume_dir(volume.slug), ignore_errors=True)
+    delete_volume_mesh(session, volume)
     for grant in session.exec(select(VolumeAccess).where(VolumeAccess.volume_id == volume_id)).all():
         session.delete(grant)
     session.delete(volume)
@@ -494,14 +489,41 @@ def zarr_access_url(
 def mesh_access_url(
     volume_id: int, session: Session = Depends(get_session), user: User = Depends(get_current_user)
 ):
+    """Download link for the volume's attached mesh (the original upload).
+    Permission is the volume's: anyone who can see the volume can download it."""
     volume = session.get(Volume, volume_id)
     if not volume or not _can_see_volume(user, volume, session):
         raise HTTPException(status_code=404, detail="Volume not found")
     if not volume.has_mesh:
         raise HTTPException(status_code=404, detail="This volume has no mesh")
-    token = create_file_token(subject=user.username, asset_id=volume_id, kind="mesh")
+    token = create_file_token(subject=user.username, asset_id=volume_id, kind="volume-mesh-download")
     return FileAccessUrl(
         url=f"/api/volumes/{volume_id}/mesh-file/{token}",
+        expires_in_minutes=settings.FILE_TOKEN_EXPIRE_MINUTES,
+    )
+
+
+@router.get("/{volume_id}/mesh-view-url", response_model=FileAccessUrl)
+def mesh_view_url(
+    volume_id: int, request: Request, session: Session = Depends(get_session), user: User = Depends(get_current_user)
+):
+    """URL of the processed (.nxz) attached mesh for the 3DHOP viewer. Like the
+    download link, it is authorised by the volume, not by a mesh permission."""
+    volume = session.get(Volume, volume_id)
+    if not volume or not _can_see_volume(user, volume, session):
+        raise HTTPException(status_code=404, detail="Volume not found")
+    mesh = get_volume_mesh(session, volume_id)
+    if mesh is None:
+        raise HTTPException(status_code=404, detail="This volume has no viewable mesh")
+    if mesh.status != AssetStatus.ready:
+        raise HTTPException(
+            status_code=409,
+            detail="Mesh is still processing" if mesh.status == AssetStatus.processing else "Mesh processing failed — see the volume's mesh status",
+        )
+    token = create_file_token(subject=user.username, asset_id=volume_id, kind="volume-mesh-view")
+    base = str(request.base_url).rstrip("/")
+    return FileAccessUrl(
+        url=f"{base}/api/volumes/{volume_id}/mesh-view-file/{token}",
         expires_in_minutes=settings.FILE_TOKEN_EXPIRE_MINUTES,
     )
 
@@ -601,15 +623,34 @@ def _truncate_multiscales_json(raw: bytes, min_lod: int) -> Optional[bytes]:
 def serve_mesh_file(
     volume_id: int, token: str, session: Session = Depends(get_session)
 ):
-    _check_file_token(token, volume_id, "mesh")
+    _check_file_token(token, volume_id, "volume-mesh-download")
     volume = session.get(Volume, volume_id)
     if not volume or not volume.has_mesh:
         raise HTTPException(status_code=404, detail="Not found")
-    mesh_path = _volume_dir(volume.slug) / volume.mesh_filename
-    if not mesh_path.exists():
+    mesh = get_volume_mesh(session, volume_id)
+    mesh_path = volume_mesh_source(mesh)
+    filename = volume.mesh_filename or f"{volume.slug}.{mesh.file_extension}"
+    if mesh_path is None or not mesh_path.exists():
         raise HTTPException(status_code=404, detail="Not found")
     return FileResponse(
         mesh_path,
-        filename=volume.mesh_filename,
+        filename=filename,
+        headers={"Cache-Control": f"public, max-age={settings.FILE_TOKEN_EXPIRE_MINUTES * 60}, immutable"},
+    )
+
+
+@router.get("/{volume_id}/mesh-view-file/{token}")
+def serve_mesh_view_file(
+    volume_id: int, token: str, session: Session = Depends(get_session)
+):
+    _check_file_token(token, volume_id, "volume-mesh-view")
+    mesh = get_volume_mesh(session, volume_id)
+    if mesh is None or not mesh.mesh_filename:
+        raise HTTPException(status_code=404, detail="Not found")
+    nxz_path = volume_mesh_file(mesh)
+    if not nxz_path.exists():
+        raise HTTPException(status_code=404, detail="Not found")
+    return FileResponse(
+        nxz_path,
         headers={"Cache-Control": f"public, max-age={settings.FILE_TOKEN_EXPIRE_MINUTES * 60}, immutable"},
     )

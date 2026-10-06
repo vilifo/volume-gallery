@@ -131,8 +131,20 @@
 
       if (kind === "volume") {
         const meshSectionHtml = `
-          <h2 style="margin-top:2em">Attached mesh (download only)</h2>
-          <p class="dim" style="font-size:0.9em">${item.has_mesh ? escapeHtml(item.mesh_filename) : "No mesh uploaded."}</p>
+          <h2 style="margin-top:2em">Attached mesh</h2>
+          <p class="dim" style="font-size:0.9em">Processed like any other mesh, but not listed separately: access follows this volume, and it is viewed and downloaded from the volume's viewer.</p>
+          <p class="dim" style="font-size:0.9em">${
+            item.has_mesh
+              ? escapeHtml(item.mesh_filename) +
+                (item.mesh_status && item.mesh_status !== "ready"
+                  ? ` \u2014 ${escapeHtml(item.mesh_status)}${
+                      item.mesh_status === "failed" && item.mesh_status_log.length
+                        ? `: ${escapeHtml(item.mesh_status_log[item.mesh_status_log.length - 1])}`
+                        : ""
+                    }`
+                  : "")
+              : "No mesh uploaded."
+          }</p>
           <input type="file" id="mesh-file" style="max-width:320px" />
           <button id="mesh-upload-btn" style="margin-top:0.6em">Upload / replace mesh</button>
         `;

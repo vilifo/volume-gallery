@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Gallery — Assets Gallery</title>
+<title>Gallery — Volume Gallery</title>
 <link rel="stylesheet" href="/css/style.css" />
 <style>
   .status-badge {
@@ -56,9 +56,8 @@
     const role = getRole();
 
     const params = new URLSearchParams(window.location.search);
-    const justUploadedId = params.get("justUploaded");
+    let justUploadedId = params.get("justUploaded");
     if (justUploadedId) {
-      // Don't leave it in the URL — a refresh shouldn't re-trigger the highlight.
       window.history.replaceState({}, "", "/index.html");
     }
 
@@ -95,7 +94,6 @@
     function latestLogLine(v) {
       if (v.status === "ready" || !v.status_log || v.status_log.length === 0) return "";
       const last = v.status_log[v.status_log.length - 1];
-      // Log lines are "HH:MM:SS  message" — drop the timestamp for the inline readout.
       const message = last.replace(/^\d{2}:\d{2}:\d{2}\s+/, "");
       const cls = v.status === "failed" ? "failed" : "";
       return `<div class="log-line ${cls}">${escapeHtml(message)}</div>`;
@@ -110,7 +108,6 @@
     function renderRow(v) {
       const viewable = v.status === "ready";
       const swatch = getSwatchText(v.asset_type);
-
       const extraMeta = (v.asset_type === "volume" && v.mesh) ? " · mesh available" : "";
 
       return `
@@ -153,14 +150,12 @@
       const listEl = document.getElementById("list");
       let assets = [];
       try {
-        // Fetch all three asset types concurrently
         const [volumes, meshes, pointclouds] = await Promise.all([
           api.listVolumes(),
           api.listMeshes(),
           api.listPointClouds()
         ]);
 
-        // Inject the asset_type so the renderer and manage button know what they are
         volumes.forEach(v => v.asset_type = "volume");
         meshes.forEach(m => m.asset_type = "mesh");
         pointclouds.forEach(p => p.asset_type = "pointcloud");
@@ -182,10 +177,13 @@
       wireRowActions(listEl);
 
       if (justUploadedId) {
-        const row = listEl.querySelector(`[data-asset-row="${justUploadedId}"]`);
+        const matchingRows = Array.from(listEl.querySelectorAll(`[data-asset-row="${justUploadedId}"]`));
+        const row = matchingRows.find(r => r.querySelector('.processing')) || matchingRows[0];
+
         if (row) {
           row.classList.add("just-uploaded");
           row.scrollIntoView({ behavior: "smooth", block: "center" });
+          justUploadedId = null;
         }
       }
 

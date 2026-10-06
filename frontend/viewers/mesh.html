@@ -69,12 +69,14 @@
     const role = getRole();
     const params = new URLSearchParams(window.location.search);
     const meshId = params.get("id");
+    const volumeId = params.get("volume");
 
     const HOME_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12l9-9 9 9M5 10v10h14V10"/></svg>`;
     const ZOOM_IN_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.35-4.35M11 8v6M8 11h6"/></svg>`;
     const ZOOM_OUT_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.35-4.35M8 11h6"/></svg>`;
     const LIGHT_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>`;
     const DOWNLOAD_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0-4-4m4 4 4-4M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>`;
+    const BACK_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5m0 0 6-6m-6 6 6 6"/></svg>`;
     const EXPAND_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M21 16v3a2 2 0 0 1-2 2h-3M3 16v3a2 2 0 0 0 2 2h3"/></svg>`;
 
     document.getElementById("shell").innerHTML = `
@@ -92,13 +94,23 @@
     }
 
     async function init() {
-      if (!meshId) {
+      if (!meshId && !volumeId) {
         content.innerHTML = `<div class="error-box" style="margin:1.4em">No mesh specified.</div>`;
         return;
       }
       let mesh;
       try {
-        mesh = await api.getMesh(meshId);
+         if (volumeId) {
+          const volume = await api.getVolume(volumeId);
+          if (!volume.has_mesh) throw new Error("This volume has no mesh.");
+          mesh = {
+            title: `${volume.title} \u2014 mesh`,
+            description: volume.description,
+            can_download: true, // the volume's permission applies
+          };
+        } else {
+          mesh = await api.getMesh(meshId);
+        }
       } catch (err) {
         content.innerHTML = `<div class="error-box" style="margin:1.4em">${err.message}</div>`;
         return;
@@ -111,6 +123,7 @@
             ${mesh.description ? `<div class="viewer-desc">${escapeHtml(mesh.description)}</div>` : ""}
           </div>
           <div class="viewer-topbar-actions">
+            ${volumeId ? `<a href="/viewers/volume.html?id=${encodeURIComponent(volumeId)}"><button type="button" class="icon-btn">${BACK_ICON}<span>Back to volume</span></button></a>` : ""}
             ${mesh.can_download ? `<button id="download-btn" class="icon-btn">${DOWNLOAD_ICON}<span>Download</span></button>` : ""}
             <button id="fullscreen-btn" class="icon-btn primary">${EXPAND_ICON}<span>Fullscreen</span></button>
           </div>
@@ -139,7 +152,9 @@
       if (downloadBtn) {
         downloadBtn.addEventListener("click", async () => {
           try {
-            const access = await api.meshDownloadAccessUrl(meshId);
+            const access = volumeId
+              ? await api.meshAccessUrl(volumeId)
+              : await api.meshDownloadAccessUrl(meshId);
             window.location.href = access.url;
           } catch (err) {
             alert(err.message);
@@ -153,7 +168,9 @@
       }
 
       try {
-        const access = await api.meshNxzAccessUrl(meshId);
+        const access = volumeId
+          ? await api.volumeMeshViewUrl(volumeId)
+          : await api.meshNxzAccessUrl(meshId);
 
         // Trick 3DHOP's string parser into seeing a clean ".nxz" extension
         // by appending a dummy parameter.

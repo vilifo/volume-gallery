@@ -24,7 +24,9 @@ class Settings:
     # on PATH under their default names.
     NXSBUILD_BIN: str = os.environ.get("VG_NXSBUILD_BIN", "nxsbuild")
     NXSCOMPRESS_BIN: str = os.environ.get("VG_NXSCOMPRESS_BIN", "nxscompress")
-    POTREE_CONVERTER_BIN: str = os.environ.get("VG_POTREE_CONVERTER_BIN", "PotreeConverter")
+    POTREE_CONVERTER_BIN: str = os.environ.get("VG_POTREE_CONVERTER_BIN", "PotreeConverter") # Must be the full path to the PotreeConverter binary
+    if not os.path.exists(POTREE_CONVERTER_BIN):
+        POTREE_CONVERTER_BIN = POTREE_CONVERTER_BIN.replace("\\", "/")
 
     # --- Bootstrap admin (only used on first run, if no users exist) ---
     BOOTSTRAP_ADMIN_USER: str = os.environ.get("VG_ADMIN_USER", "admin")

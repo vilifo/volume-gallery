@@ -1,6 +1,6 @@
 import shutil
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, UploadFile, File, Form, Request
 from fastapi.responses import FileResponse
@@ -13,7 +13,7 @@ from ..deps import get_current_user, require_editor
 from ..security import create_file_token, decode_token
 from ..config import settings
 from ..helpers import convert_mesh_to_nxz
-from .volumes import SLUG_RE, _now  # shared slug validation + timestamp helper
+from ..utils import SLUG_RE, _now  # shared slug validation + timestamp helper
 
 router = APIRouter(prefix="/api/meshes", tags=["meshes"])
 
@@ -23,6 +23,8 @@ def _mesh_dir(slug: str) -> Path:
 
 
 def _can_see_mesh(user: User, mesh: Mesh, session: Session) -> bool:
+    if mesh.volume_id is not None:
+        return False  # attached to a volume: only reachable through that volume
     if user.role in (Role.admin, Role.editor):
         return True
     grant = session.exec(
@@ -32,6 +34,8 @@ def _can_see_mesh(user: User, mesh: Mesh, session: Session) -> bool:
 
 
 def _can_download_mesh(user: User, mesh: Mesh, session: Session) -> bool:
+    if mesh.volume_id is not None:
+        return False
     if user.role in (Role.admin, Role.editor):
         return True
     grant = session.exec(
@@ -48,11 +52,86 @@ def _mesh_read(m: Mesh, can_download: bool = False) -> MeshRead:
     )
 
 
+def _require_standalone(mesh: Optional[Mesh], hint: str) -> None:
+    """Meshes uploaded together with a volume are managed through that volume."""
+    if mesh is not None and mesh.volume_id is not None:
+        raise HTTPException(status_code=400, detail=f"This mesh belongs to a volume. {hint}.")
+
+
+# ---------- Meshes attached to a volume ----------
+# Used by the volumes router. The mesh is a normal Mesh row (converted by the
+# same background job as any other mesh), tagged with volume_id so that it
+# stays out of the mesh gallery and inherits the volume's permissions.
+
+def _child_mesh_slug(session: Session, volume_slug: str) -> str:
+    base = f"{volume_slug[:55]}-mesh"
+    candidate, n = base, 2
+    while session.exec(select(Mesh).where(Mesh.slug == candidate)).first() or _mesh_dir(candidate).exists():
+        candidate = f"{base}-{n}"
+        n += 1
+    return candidate
+
+
+def get_volume_mesh(session: Session, volume_id: int) -> Optional[Mesh]:
+    return session.exec(select(Mesh).where(Mesh.volume_id == volume_id)).first()
+
+
+def delete_volume_mesh(session: Session, volume) -> None:
+    """Removes the volume's attached mesh (files + row). Caller commits."""
+    for m in session.exec(select(Mesh).where(Mesh.volume_id == volume.id)).all():
+        shutil.rmtree(_mesh_dir(m.slug), ignore_errors=True)
+        session.delete(m)
+    volume.has_mesh = False
+    volume.mesh_filename = None
+    session.add(volume)
+
+
+def attach_mesh_to_volume(session: Session, volume, mesh_file: UploadFile, editor: User,
+                          background_tasks: BackgroundTasks) -> Mesh:
+    """Stores `mesh_file` as the volume's mesh (replacing any previous one) and
+    queues the usual mesh conversion."""
+    source_ext = Path(mesh_file.filename or "").suffix.lstrip(".").lower() or "bin"
+    delete_volume_mesh(session, volume)
+    slug = _child_mesh_slug(session, volume.slug)
+    mesh_dir = _mesh_dir(slug)
+    mesh_dir.mkdir(parents=True, exist_ok=False)
+    try:
+        with open(mesh_dir / f"_upload.{source_ext}", "wb") as f:
+            shutil.copyfileobj(mesh_file.file, f)
+    except Exception as exc:  # noqa: BLE001
+        shutil.rmtree(mesh_dir, ignore_errors=True)
+        raise HTTPException(status_code=400, detail=f"Could not save mesh upload: {exc}")
+
+    mesh = Mesh(
+        slug=slug, title=f"{volume.title} (mesh)", created_by=editor.id, volume_id=volume.id,
+        status=AssetStatus.processing, file_extension=source_ext,
+        status_log=f"{_now()}  Upload received, queued for processing\n",
+    )
+    session.add(mesh)
+    volume.has_mesh = True
+    volume.mesh_filename = Path(mesh_file.filename or "").name or f"mesh.{source_ext}"
+    session.add(volume)
+    session.commit()
+    session.refresh(mesh)
+    background_tasks.add_task(_process_mesh_upload, mesh.id, str(mesh_dir))
+    return mesh
+
+
+def volume_mesh_file(mesh: Mesh) -> Path:
+    """The processed (.nxz) file of an attached mesh, as shown in the viewer."""
+    return _mesh_dir(mesh.slug) / (mesh.mesh_filename or "mesh.nxz")
+
+
+def volume_mesh_source(mesh: Mesh) -> Path:
+    """The originally uploaded file of an attached mesh."""
+    return _mesh_dir(mesh.slug) / f"_upload.{mesh.file_extension}"
+
+
 # ---------- Gallery ----------
 
 @router.get("", response_model=List[MeshRead])
 def list_meshes(session: Session = Depends(get_session), user: User = Depends(get_current_user)):
-    meshes = session.exec(select(Mesh)).all()
+    meshes = session.exec(select(Mesh).where(Mesh.volume_id == None)).all()  # noqa: E711 - SQL IS NULL
     visible = [m for m in meshes if _can_see_mesh(user, m, session)]
     return [_mesh_read(m, _can_download_mesh(user, m, session)) for m in visible]
 
@@ -147,6 +226,7 @@ def delete_mesh(mesh_id: int, session: Session = Depends(get_session), _editor: 
     mesh = session.get(Mesh, mesh_id)
     if not mesh:
         raise HTTPException(status_code=404, detail="Mesh not found")
+    _require_standalone(mesh, "Delete the volume (or replace its mesh) instead")
     shutil.rmtree(_mesh_dir(mesh.slug), ignore_errors=True)
     for grant in session.exec(select(MeshAccess).where(MeshAccess.mesh_id == mesh_id)).all():
         session.delete(grant)
@@ -159,6 +239,7 @@ def delete_mesh(mesh_id: int, session: Session = Depends(get_session), _editor: 
 
 @router.get("/{mesh_id}/access", response_model=List[GrantedUserRead])
 def list_access(mesh_id: int, session: Session = Depends(get_session), _editor: User = Depends(require_editor)):
+    _require_standalone(session.get(Mesh, mesh_id), "Access follows the volume it belongs to")
     grants = session.exec(select(MeshAccess).where(MeshAccess.mesh_id == mesh_id)).all()
     result = []
     for g in grants:
@@ -176,6 +257,7 @@ def grant_access(
     target = session.get(User, payload.user_id)
     if not mesh or not target:
         raise HTTPException(status_code=404, detail="Mesh or user not found")
+    _require_standalone(mesh, "Access follows the volume it belongs to")
     existing = session.exec(
         select(MeshAccess).where(MeshAccess.mesh_id == mesh_id, MeshAccess.user_id == payload.user_id)
     ).first()
@@ -195,6 +277,7 @@ def grant_access(
 def revoke_access(
     mesh_id: int, user_id: int, session: Session = Depends(get_session), _editor: User = Depends(require_editor)
 ):
+    _require_standalone(session.get(Mesh, mesh_id), "Access follows the volume it belongs to")
     grant = session.exec(
         select(MeshAccess).where(MeshAccess.mesh_id == mesh_id, MeshAccess.user_id == user_id)
     ).first()
@@ -264,7 +347,7 @@ def _check_mesh_token(token: str, mesh_id: int) -> str:
 def serve_mesh_file(mesh_id: int, token: str, session: Session = Depends(get_session)):
     kind = _check_mesh_token(token, mesh_id)
     mesh = session.get(Mesh, mesh_id)
-    if not mesh or not mesh.mesh_filename:
+    if not mesh or not mesh.mesh_filename or mesh.volume_id is not None:
         raise HTTPException(status_code=404, detail=f"Mesh with id {mesh_id} not found or not ready")
     nxz_path = _mesh_dir(mesh.slug) / mesh.mesh_filename
     if not nxz_path.exists():

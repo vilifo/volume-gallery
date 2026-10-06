@@ -15,6 +15,7 @@ _COLUMN_MIGRATIONS = [
     ("volume", "num_lod_levels", "INTEGER", "NULL"),
     ("volumeaccess", "can_download", "BOOLEAN", "0"),
     ("pointcloudaccess", "can_download", "BOOLEAN", "0"),
+    ("mesh", "volume_id", "INTEGER", "NULL"),
 ]
 
 

@@ -118,6 +118,7 @@ export const api = {
     return request(`/api/volumes/${id}/zarr-access-url${qs}`);
   },
   meshAccessUrl(id) { return request(`/api/volumes/${id}/mesh-access-url`); },
+  volumeMeshViewUrl(id) { return request(`/api/volumes/${id}/mesh-view-url`); },
   listAccess(id) { return request(`/api/volumes/${id}/access`); },
   grantAccess(id, userId, canDownload) {
     return request(`/api/volumes/${id}/access`, {

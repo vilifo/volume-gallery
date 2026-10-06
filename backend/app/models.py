@@ -63,6 +63,7 @@ class Mesh(AssetBase, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     mesh_filename: Optional[str] = Field(default=None)
     file_extension: Optional[str] = Field(default="stl")  # file extension, e.g. "stl" or "ply"
+    volume_id: Optional[int] = Field(default=None, foreign_key="volume.id", index=True)
 
 
 class MeshAccess(AssetAccessBase, table=True):
