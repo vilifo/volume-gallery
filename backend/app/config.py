@@ -13,11 +13,24 @@ class Settings:
     # --- Storage ---
     DATA_DIR: Path = Path(os.environ.get("VG_DATA_DIR", "/data"))
     VOLUMES_DIR: Path = DATA_DIR / "volumes"
+    MESHES_DIR: Path = DATA_DIR / "meshes"
+    POINTCLOUDS_DIR: Path = DATA_DIR / "pointclouds"
     DB_PATH: Path = DATA_DIR / "gallery.db"
+
+    # --- External processing tools ---
+    # These binaries are NOT bundled with this app — see README's "Meshes and
+    # point clouds" section. Point these at wherever you've placed them
+    # (e.g. mounted into /usr/local/bin, or an absolute path) if they're not
+    # on PATH under their default names.
+    NXSBUILD_BIN: str = os.environ.get("VG_NXSBUILD_BIN", "nxsbuild")
+    NXSCOMPRESS_BIN: str = os.environ.get("VG_NXSCOMPRESS_BIN", "nxscompress")
+    POTREE_CONVERTER_BIN: str = os.environ.get("VG_POTREE_CONVERTER_BIN", "PotreeConverter") # Must be the full path to the PotreeConverter binary
+    if not os.path.exists(POTREE_CONVERTER_BIN):
+        POTREE_CONVERTER_BIN = POTREE_CONVERTER_BIN.replace("\\", "/")
 
     # --- Bootstrap admin (only used on first run, if no users exist) ---
     BOOTSTRAP_ADMIN_USER: str = os.environ.get("VG_ADMIN_USER", "admin")
-    BOOTSTRAP_ADMIN_PASSWORD: str = os.environ.get("VG_ADMIN_PASSWORD", "")
+    BOOTSTRAP_ADMIN_PASSWORD: str = os.environ.get("VG_ADMIN_PASSWORD", "changeme")
 
     # --- Frontend static files ---
     # In the Docker image this is /frontend (see Dockerfile). For local dev
@@ -29,3 +42,5 @@ class Settings:
 
 settings = Settings()
 settings.VOLUMES_DIR.mkdir(parents=True, exist_ok=True)
+settings.MESHES_DIR.mkdir(parents=True, exist_ok=True)
+settings.POINTCLOUDS_DIR.mkdir(parents=True, exist_ok=True)

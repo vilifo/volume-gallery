@@ -27,16 +27,16 @@
   }
   @keyframes vg-spin { to { transform: rotate(360deg); } }
 
-  .volume-row .log-line {
+  .asset-row .log-line {
     font-size: 0.78em;
     color: var(--text-dim);
     margin-top: 0.25em;
     font-family: var(--mono);
   }
-  .volume-row .log-line.failed { color: var(--danger); }
-  .volume-row .title.disabled { color: var(--text-dim); pointer-events: none; }
+  .asset-row .log-line.failed { color: var(--danger); }
+  .asset-row .title.disabled { color: var(--text-dim); pointer-events: none; }
 
-  .volume-row.just-uploaded {
+  .asset-row.just-uploaded {
     animation: vg-highlight 2.5s ease-out;
     border-radius: var(--radius);
   }
@@ -56,9 +56,8 @@
     const role = getRole();
 
     const params = new URLSearchParams(window.location.search);
-    const justUploadedId = params.get("justUploaded");
+    let justUploadedId = params.get("justUploaded");
     if (justUploadedId) {
-      // Don't leave it in the URL — a refresh shouldn't re-trigger the highlight.
       window.history.replaceState({}, "", "/index.html");
     }
 
@@ -68,7 +67,7 @@
         <div class="toolbar">
           <div>
             <h1>Gallery</h1>
-            <p class="subtitle">Volumes you can view.</p>
+            <p class="subtitle">Assets you can view.</p>
           </div>
         </div>
         <div id="list"></div>
@@ -95,34 +94,42 @@
     function latestLogLine(v) {
       if (v.status === "ready" || !v.status_log || v.status_log.length === 0) return "";
       const last = v.status_log[v.status_log.length - 1];
-      // Log lines are "HH:MM:SS  message" — drop the timestamp for the inline readout.
       const message = last.replace(/^\d{2}:\d{2}:\d{2}\s+/, "");
       const cls = v.status === "failed" ? "failed" : "";
       return `<div class="log-line ${cls}">${escapeHtml(message)}</div>`;
     }
 
+    function getSwatchText(assetType) {
+      if (assetType === "mesh") return "MSH";
+      if (assetType === "pointcloud") return "PTS";
+      return "CT"; // default/volume
+    }
+
     function renderRow(v) {
       const viewable = v.status === "ready";
+      const swatch = getSwatchText(v.asset_type);
+      const extraMeta = (v.asset_type === "volume" && v.mesh) ? " · mesh available" : "";
+
       return `
-        <div class="volume-row" data-volume-row="${v.id}">
-          <div class="swatch">CT</div>
+        <div class="asset-row" data-asset-row="${v.id}">
+          <div class="swatch">${swatch}</div>
           <div class="meta">
             <div class="title">
               ${
                 viewable
-                  ? `<a href="/viewer.html?id=${v.id}">${escapeHtml(v.title)}</a>`
+                  ? `<a href="/viewers/${v.asset_type}.html?id=${v.id}">${escapeHtml(v.title)}</a>`
                   : `<span class="disabled">${escapeHtml(v.title)}</span>`
               }
               ${statusBadge(v)}
             </div>
-            <div class="slug">${escapeHtml(v.slug)}${v.has_mesh ? " · mesh available" : ""}</div>
+            <div class="slug">${escapeHtml(v.slug)}${extraMeta}</div>
             ${latestLogLine(v)}
           </div>
           <div class="actions">
-            ${viewable ? `<a href="/viewer.html?id=${v.id}"><button>Open</button></a>` : ""}
+            ${viewable ? `<a href="/viewers/${v.asset_type}.html?id=${v.id}"><button>Open</button></a>` : ""}
             ${
               role === "admin" || role === "editor"
-                ? `<button data-manage="${v.id}">Manage</button>`
+                ? `<button data-manage="${v.id}" data-kind="${v.asset_type}">Manage</button>`
                 : ""
             }
           </div>
@@ -132,7 +139,7 @@
     function wireRowActions(listEl) {
       listEl.querySelectorAll("[data-manage]").forEach((btn) => {
         btn.addEventListener("click", () => {
-          window.location.href = `/manage.html?id=${btn.dataset.manage}`;
+          window.location.href = `/manage.html?id=${btn.dataset.manage}&kind=${btn.dataset.kind}`;
         });
       });
     }
@@ -141,33 +148,46 @@
 
     async function load({ isPoll = false } = {}) {
       const listEl = document.getElementById("list");
-      let volumes;
+      let assets = [];
       try {
-        volumes = await api.listVolumes();
+        const [volumes, meshes, pointclouds] = await Promise.all([
+          api.listVolumes(),
+          api.listMeshes(),
+          api.listPointClouds()
+        ]);
+
+        volumes.forEach(v => v.asset_type = "volume");
+        meshes.forEach(m => m.asset_type = "mesh");
+        pointclouds.forEach(p => p.asset_type = "pointcloud");
+
+        assets = [...volumes, ...meshes, ...pointclouds];
       } catch (err) {
         if (!isPoll) listEl.innerHTML = `<div class="error-box">${err.message}</div>`;
         return;
       }
 
-      if (volumes.length === 0) {
+      if (assets.length === 0) {
         listEl.innerHTML = `<div class="empty-state">
-          No volumes yet.${role !== "reader" ? " Use \u201cUpload volume\u201d to add one." : " Ask an editor to grant you access."}
+          No assets yet.${role !== "reader" ? " Use \u201cUpload asset\u201d to add one." : " Ask an editor to grant you access."}
         </div>`;
         return;
       }
 
-      listEl.innerHTML = volumes.map(renderRow).join("");
+      listEl.innerHTML = assets.map(renderRow).join("");
       wireRowActions(listEl);
 
       if (justUploadedId) {
-        const row = listEl.querySelector(`[data-volume-row="${justUploadedId}"]`);
+        const matchingRows = Array.from(listEl.querySelectorAll(`[data-asset-row="${justUploadedId}"]`));
+        const row = matchingRows.find(r => r.querySelector('.processing')) || matchingRows[0];
+
         if (row) {
           row.classList.add("just-uploaded");
           row.scrollIntoView({ behavior: "smooth", block: "center" });
+          justUploadedId = null;
         }
       }
 
-      const stillProcessing = volumes.some((v) => v.status === "processing");
+      const stillProcessing = assets.some((v) => v.status === "processing");
       clearTimeout(pollTimer);
       if (stillProcessing) {
         pollTimer = setTimeout(() => load({ isPoll: true }), 1500);

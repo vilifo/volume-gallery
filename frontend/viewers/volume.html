@@ -1,0 +1,1452 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Viewer — Volume Gallery</title>
+<link rel="stylesheet" href="/css/style.css" />
+<style>
+  /* This page trades the app's normal padded/max-width main column for an
+     edge-to-edge canvas — the render is the point of the page, everything
+     else (nav rail aside) should get out of its way. */
+  body.viewer-page { overflow: hidden; }
+  body.viewer-page .app-shell { height: 100vh; }
+  body.viewer-page main {
+    padding: 0;
+    max-width: none;
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    overflow: hidden;
+  }
+
+  .viewer-topbar {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 1.5em;
+    padding: 0.9em 1.4em;
+    border-bottom: 1px solid var(--line);
+    flex-shrink: 0;
+    background: var(--panel);
+  }
+  .viewer-topbar .viewer-titles { min-width: 0; }
+  .viewer-topbar h1 {
+    font-size: 1.1em;
+    margin: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .viewer-topbar .viewer-desc {
+    font-size: 0.83em;
+    color: var(--text-dim);
+    margin-top: 0.2em;
+    max-width: 60ch;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .viewer-topbar-actions { display: flex; gap: 0.6em; flex-shrink: 0; }
+
+  .icon-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5em;
+    padding: 0.5em 0.9em;
+    white-space: nowrap;
+  }
+  .icon-btn svg { width: 14px; height: 14px; flex-shrink: 0; }
+
+  .viewer-canvas-wrap {
+    flex: 1;
+    min-height: 0;
+    background: #000;
+    position: relative;
+    overflow: hidden;
+    display: flex;
+  }
+  /* The render area and the docked side panel are siblings, so opening or
+     closing the panel resizes the canvas instead of covering the volume. */
+  .viewer-canvas-area { position: relative; flex: 1; min-width: 0; height: 100%; overflow: hidden; }
+  .viewer-canvas-area > canvas { width: 100%; height: 100%; display: block; }
+  [hidden] { display: none !important; }
+  /* When the canvas wrap itself is the fullscreen element, it should still
+     behave like a normal fill-the-box layout rather than picking up any
+     browser UA default fullscreen centering. */
+  .viewer-canvas-wrap:fullscreen { width: 100vw; height: 100vh; }
+
+  .viewer-status {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.9em;
+    color: var(--text-dim);
+    font-family: var(--mono);
+    font-size: 0.85em;
+    background: rgba(0, 0, 0, 0.6);
+    padding: 1.5em;
+    text-align: left;
+    line-height: 1.5;
+    z-index: 4;
+  }
+
+  /* --- loading feedback: spinner + progress bar --- */
+  .spinner {
+    width: 14px; height: 14px;
+    flex-shrink: 0;
+    border: 2px solid rgba(255, 255, 255, 0.2);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: vg-spin 0.8s linear infinite;
+  }
+  @keyframes vg-spin { to { transform: rotate(360deg); } }
+  .viewer-progress {
+    position: absolute; left: 0; right: 0; top: 0;
+    height: 3px;
+    background: rgba(255, 255, 255, 0.08);
+    z-index: 3;
+    opacity: 0;
+    transition: opacity 0.25s ease;
+    pointer-events: none;
+    overflow: hidden;
+  }
+  .viewer-progress.active { opacity: 1; }
+  .viewer-progress-bar { height: 100%; width: 0; background: var(--accent); transition: width 0.25s ease; }
+  .viewer-progress.indeterminate .viewer-progress-bar { width: 35%; animation: vg-slide 1.1s ease-in-out infinite; }
+  @keyframes vg-slide { from { transform: translateX(-100%); } to { transform: translateX(300%); } }
+  .viewer-load-chip {
+    position: absolute; left: 12px; top: 12px;
+    display: flex; align-items: center; gap: 0.6em;
+    background: rgba(26, 29, 35, 0.92);
+    border-radius: 8px;
+    padding: 0.5em 0.8em;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--text-dim);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4), 0 0 0 1px rgba(255, 255, 255, 0.05);
+    opacity: 0;
+    transition: opacity 0.25s ease;
+    pointer-events: none;
+    z-index: 3;
+  }
+  .viewer-load-chip.active { opacity: 1; }
+
+  .ctl-chip {
+    position: absolute;
+    z-index: 3;
+    background: rgba(26, 29, 35, 0.92);
+    color: var(--text);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 8px;
+    padding: 0.45em 0.85em;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .ctl-chip:hover { border-color: var(--accent); color: var(--accent); }
+
+  /* --- Side panel (mirrors kilnrender.com's widget design): docked on the
+     right, closeable, with a segmented mode switch, a swap region for
+     mode-dependent controls (transfer function / windowing / density / slice
+     planes) and collapsible Scene and Advanced sections. --- */
+  .ctl-panel {
+    flex: 0 0 340px;
+    width: 340px;
+    height: 100%;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    background: var(--panel);
+    border-left: 1px solid var(--line);
+    color: var(--text);
+    font-size: 12px;
+  }
+  .ctl-panel-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    background: rgba(20, 23, 28, 0.95);
+    color: var(--accent);
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    font-size: 12px;
+    padding: 0.55em 0.6em 0.55em 0.9em;
+    flex-shrink: 0;
+  }
+  .ctl-close {
+    background: none;
+    border: none;
+    color: var(--text-dim);
+    font-size: 20px;
+    line-height: 1;
+    padding: 0.1em 0.4em;
+    cursor: pointer;
+    border-radius: 4px;
+  }
+  .ctl-close:hover { color: var(--text); background: rgba(255, 255, 255, 0.08); }
+  .ctl-panel-body { padding: 0.85em; overflow-y: auto; flex: 1; min-height: 0; }
+  .ctl-panel-body::-webkit-scrollbar { width: 6px; }
+  .ctl-panel-body::-webkit-scrollbar-track { background: transparent; }
+  .ctl-panel-body::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.15); border-radius: 3px; }
+
+  .ctl-segmented {
+    display: flex;
+    background: rgba(255, 255, 255, 0.05);
+    border-radius: 6px;
+    padding: 2px;
+    margin-bottom: 0.9em;
+  }
+  .ctl-segment {
+    flex: 1;
+    background: transparent;
+    border: none;
+    color: var(--text-dim);
+    padding: 0.45em 0;
+    border-radius: 5px;
+    font-size: 11px;
+    cursor: pointer;
+  }
+  .ctl-segment.active { background: var(--accent); color: #1a1400; font-weight: 600; }
+  .ctl-segment:not(.active):hover { color: var(--text); background: rgba(255, 255, 255, 0.06); }
+
+  .ctl-select-row { display: flex; align-items: center; justify-content: space-between; gap: 0.6em; margin-bottom: 0.7em; }
+  .ctl-row-label { color: var(--text-dim); font-size: 11px; flex-shrink: 0; }
+  .ctl-select-input {
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 4px;
+    color: var(--text);
+    font-size: 11px;
+    padding: 0.3em 0.4em;
+    flex: 1;
+    min-width: 0;
+  }
+
+  .ctl-tf-canvas-container {
+    position: relative;
+    margin-bottom: 0.9em;
+    border-radius: 6px;
+    overflow: hidden;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+  }
+  /* The stage is padded so handles at x/y = 0 or 1 sit fully inside the hit
+     area; the overlay canvas covers the whole stage and owns pointer input. */
+  .ctl-tf-stage { position: relative; padding: 10px; background: #000; }
+  .ctl-tf-canvas { display: block; width: 100%; height: 190px; background: #000; }
+  .ctl-tf-overlay {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    cursor: crosshair;
+    touch-action: none;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+  .ctl-tf-help { font-size: 10px; color: var(--text-dim); text-align: center; padding: 0.35em 0; background: rgba(0, 0, 0, 0.3); }
+
+  .ctl-slider-row { display: flex; align-items: center; gap: 0.6em; margin-bottom: 0.7em; }
+  .ctl-slider-label { width: 62px; flex-shrink: 0; color: var(--text-dim); font-size: 11px; }
+  .ctl-slider-track { position: relative; flex: 1; height: 4px; background: rgba(255, 255, 255, 0.1); border-radius: 2px; }
+  .ctl-slider-fill { position: absolute; top: 0; left: 0; height: 100%; background: var(--accent); border-radius: 2px; pointer-events: none; }
+  .ctl-slider-input {
+    position: absolute;
+    top: -6px;
+    left: 0;
+    width: 100%;
+    height: 16px;
+    margin: 0;
+    /* css/style.css gives every <input> a border and padding; on a range input
+       that shrinks the thumb's travel range and makes the fill stop short of it. */
+    padding: 0;
+    border: 0;
+    border-radius: 0;
+    -webkit-appearance: none;
+    appearance: none;
+    background: transparent;
+    cursor: pointer;
+  }
+  .ctl-slider-input::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    box-sizing: border-box;
+    width: 12px; height: 12px;
+    border-radius: 50%;
+    background: var(--accent);
+    border: 2px solid #14171c;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
+  }
+  .ctl-slider-input::-moz-range-thumb {
+    box-sizing: border-box;
+    width: 12px; height: 12px;
+    border-radius: 50%;
+    background: var(--accent);
+    border: 2px solid #14171c;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
+  }
+  .ctl-slider-input::-moz-range-track { background: transparent; }
+  .ctl-row-value { width: 42px; flex-shrink: 0; text-align: right; color: var(--text-dim); font-size: 10.5px; }
+  .ctl-mono { font-family: var(--mono); }
+
+  .ctl-range-track { position: relative; flex: 1; height: 4px; background: rgba(255, 255, 255, 0.1); border-radius: 2px; }
+  .ctl-range-fill { position: absolute; top: 0; height: 100%; background: var(--accent); border-radius: 2px; pointer-events: none; }
+  .ctl-range-input {
+    position: absolute;
+    top: -6px;
+    left: 0;
+    width: 100%;
+    height: 16px;
+    margin: 0;
+    /* css/style.css gives every <input> a border and padding; on a range input
+       that shrinks the thumb's travel range and makes the fill stop short of it. */
+    padding: 0;
+    border: 0;
+    border-radius: 0;
+    -webkit-appearance: none;
+    appearance: none;
+    background: transparent;
+    pointer-events: none;
+  }
+  .ctl-range-input::-webkit-slider-thumb {
+    pointer-events: auto;
+    -webkit-appearance: none;
+    box-sizing: border-box;
+    width: 12px; height: 12px;
+    border-radius: 50%;
+    background: var(--accent);
+    border: 2px solid #14171c;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
+    cursor: pointer;
+  }
+  .ctl-range-input::-moz-range-thumb {
+    pointer-events: auto;
+    box-sizing: border-box;
+    width: 12px; height: 12px;
+    border-radius: 50%;
+    background: var(--accent);
+    border: 2px solid #14171c;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
+    cursor: pointer;
+  }
+  .ctl-range-input::-moz-range-track { background: transparent; }
+
+  .ctl-toggle-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.7em; cursor: pointer; }
+  .ctl-toggle-row.disabled { cursor: not-allowed; opacity: 0.55; }
+  .ctl-toggle-label { font-size: 11px; color: var(--text-dim); }
+  .ctl-toggle-input { position: absolute; opacity: 0; width: 0; height: 0; }
+  .ctl-toggle-track {
+    position: relative;
+    width: 30px; height: 16px;
+    background: rgba(255, 255, 255, 0.12);
+    border-radius: 8px;
+    transition: background 0.15s ease;
+    flex-shrink: 0;
+  }
+  .ctl-toggle-track::after {
+    content: "";
+    position: absolute;
+    top: 2px; left: 2px;
+    width: 12px; height: 12px;
+    border-radius: 50%;
+    background: var(--text-dim);
+    transition: transform 0.15s ease, background 0.15s ease;
+  }
+  .ctl-toggle-input:checked + .ctl-toggle-track { background: rgba(232, 163, 61, 0.35); }
+  .ctl-toggle-input:checked + .ctl-toggle-track::after { transform: translateX(14px); background: var(--accent); }
+
+  .ctl-slice-toggle { position: relative; display: flex; align-items: center; flex-shrink: 0; cursor: pointer; }
+  .ctl-subhead { margin: 0.2em 0 0.7em; }
+
+  .ctl-collapsible { border-top: 1px solid rgba(255, 255, 255, 0.06); margin-top: 0.4em; padding-top: 0.4em; }
+  .ctl-collapsible-header {
+    display: flex; align-items: center; gap: 0.4em;
+    background: none; border: none;
+    padding: 0.4em 0;
+    cursor: pointer;
+    width: 100%;
+  }
+  .ctl-collapsible-arrow { color: var(--text-dim); transition: transform 0.15s ease; flex-shrink: 0; }
+  .ctl-collapsible.open .ctl-collapsible-arrow { transform: rotate(90deg); }
+  .ctl-eyebrow { text-transform: uppercase; font-size: 10px; letter-spacing: 0.08em; color: var(--text-dim); font-weight: 600; }
+  .ctl-collapsible-body { display: none; padding-top: 0.5em; }
+  .ctl-collapsible.open .ctl-collapsible-body { display: block; }
+
+  .viewer-stats-hud {
+    position: absolute;
+    left: 12px;
+    bottom: 12px;
+    background: rgba(26, 29, 35, 0.85);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    border-radius: 10px;
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.4), 0 0 0 1px rgba(255, 255, 255, 0.05);
+    padding: 0.5em 1em 0.8em;
+    font-family: var(--mono);
+    font-size: 0.72em;
+    color: var(--text-dim);
+    line-height: 1.65;
+    pointer-events: none; /* let the camera controls through; only the close button is clickable */
+    z-index: 2;
+  }
+  .viewer-stats-head { display: flex; align-items: center; justify-content: space-between; gap: 2em; margin-bottom: 0.2em; }
+  .viewer-stats-head .ctl-eyebrow { font-family: inherit; }
+  .viewer-stats-hud .ctl-close { pointer-events: auto; font-size: 16px; }
+  .viewer-stats-text { white-space: pre-wrap; }
+
+  @media (max-width: 700px) {
+    .viewer-topbar { flex-wrap: wrap; }
+    .icon-btn .icon-btn-label { display: none; }
+    .viewer-stats-hud { font-size: 0.65em; }
+    /* Narrow screens: the panel floats over the render instead of docking. */
+    .ctl-panel { position: absolute; right: 0; top: 0; bottom: 0; width: min(340px, 90%); flex: none; z-index: 5; }
+  }
+</style>
+</head>
+<body class="viewer-page">
+  <div class="app-shell" id="shell"></div>
+
+  <script type="module">
+    import { api, requireLogin, getRole, getUsername, renderShell, wireLogout } from "/js/api.js";
+    import { KilnViewer } from "/vendor/kiln-render/lib/kiln-render.js";
+
+    requireLogin();
+    const role = getRole();
+    const params = new URLSearchParams(window.location.search);
+    const volumeId = params.get("id");
+
+    const EXPAND_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M21 16v3a2 2 0 0 1-2 2h-3M3 16v3a2 2 0 0 0 2 2h3"/></svg>`;
+    const COLLAPSE_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3v3a2 2 0 0 1-2 2H4M15 3v3a2 2 0 0 0 2 2h3M4 16h3a2 2 0 0 1 2 2v3M20 16h-3a2 2 0 0 0-2 2v3"/></svg>`;
+    const DOWNLOAD_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0-4-4m4 4 4-4M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>`;
+    const CUBE_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8 12 3 3 8m18 0v8l-9 5m9-13-9 5m0 8-9-5V8m9 13v-8M3 8l9 5"/></svg>`;
+    const LINK_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>`;
+
+    document.getElementById("shell").innerHTML = `
+      ${renderShell("gallery", role, getUsername())}
+      <main>
+        <div id="content" style="display:flex; flex-direction:column; height:100%;"></div>
+      </main>
+    `;
+    wireLogout();
+
+    const content = document.getElementById("content");
+    const $ = (id) => document.getElementById(id);
+
+    function escapeHtml(s) {
+      const d = document.createElement("div");
+      d.textContent = s;
+      return d.innerHTML;
+    }
+
+    function webgpuStatus() {
+      if (!window.isSecureContext) {
+        const here = window.location.origin;
+        return {
+          ok: false,
+          message:
+            `WebGPU is blocked because this page isn't loaded from a secure origin ` +
+            `(currently ${here}). Browsers only expose WebGPU on https:// or ` +
+            `http://localhost — a plain http://<ip> address doesn't qualify, even ` +
+            `with a supported browser and GPU. Put this app behind HTTPS (see the ` +
+            `README's "HTTPS" section), or for quick LAN testing in Chrome/Edge, ` +
+            `visit chrome://flags/#unsafely-treat-insecure-origin-as-secure, add ` +
+            `${here}, and relaunch the browser.`,
+        };
+      }
+      if (!("gpu" in navigator)) {
+        return {
+          ok: false,
+          message:
+            "This browser doesn't implement WebGPU. Use Chrome/Edge 113+, Safari 26+, " +
+            "or Firefox 141+, and make sure hardware acceleration is enabled in the " +
+            "browser's settings.",
+        };
+      }
+      return { ok: true };
+    }
+
+    // ------------------------------------------------------------------
+    // View state <-> URL. Parameter names and formats follow the upstream
+    // kiln-render basic-viewer share link (mode, wc, ww, density, iso, tf,
+    // tfpts, up, scale, cam, clipMin, clipMax, wireframe, axis, slices,
+    // sliceVis), plus `id` (this volume) and `minLevel` (max detail level).
+    // ------------------------------------------------------------------
+    const MODES = ["dvr", "mip", "iso", "lod", "slice", "slice-lod"];
+    const UP_AXES = ["x", "y", "z", "-x", "-y", "-z"];
+    const TF_PRESETS = [
+      ["coolwarm", "Cool-Warm"], ["grayscale", "Grayscale"],
+      ["grayscale-inverted", "Grayscale (inverted)"], ["hot", "Hot"],
+      ["cool", "Cool"], ["viridis", "Viridis"], ["plasma", "Plasma"],
+      ["seismic", "Seismic"],
+    ];
+
+    const fx = (v, digits = 3) => Number(v).toFixed(digits);
+
+    function stateToParams(state, minLevel) {
+      const p = new URLSearchParams();
+      p.set("id", volumeId);
+      p.set("mode", state.mode);
+      p.set("wc", fx(state.windowCenter));
+      p.set("ww", fx(state.windowWidth));
+      p.set("density", fx(state.densityScale, 2));
+      p.set("iso", fx(state.isoValue));
+      p.set("tf", state.tfPreset);
+      p.set("tfpts", state.tfPoints.map((pt) => `${fx(pt.x)},${fx(pt.y)}`).join(","));
+      p.set("up", state.upAxis);
+      p.set("scale", fx(state.renderScale, 2));
+      p.set("cam", state.cam.map((v) => fx(v)).join(","));
+      if (state.clipMin.some((v) => v !== 0)) p.set("clipMin", state.clipMin.map((v) => fx(v)).join(","));
+      if (state.clipMax.some((v) => v !== 1)) p.set("clipMax", state.clipMax.map((v) => fx(v)).join(","));
+      if (state.showWireframe) p.set("wireframe", "1");
+      if (state.showAxis) p.set("axis", "1");
+      const slicesDefault = state.sliceX === 0.5 && state.sliceY === 0.5 && state.sliceZ === 0.5;
+      if (state.mode.startsWith("slice") || !slicesDefault) {
+        p.set("slices", [state.sliceX, state.sliceY, state.sliceZ].map((v) => fx(v)).join(","));
+      }
+      const visMask = (state.showSliceX ? 1 : 0) | (state.showSliceY ? 2 : 0) | (state.showSliceZ ? 4 : 0);
+      if (visMask !== 7) p.set("sliceVis", String(visMask)); // omitted when all visible
+      if (minLevel != null) p.set("minLevel", String(minLevel));
+      return p;
+    }
+
+    // Lossless variant used when reloading in place (no URL rounding involved).
+    function stateToOptions(state) {
+      return {
+        mode: state.mode,
+        windowCenter: state.windowCenter,
+        windowWidth: state.windowWidth,
+        densityScale: state.densityScale,
+        isoValue: state.isoValue,
+        renderScale: state.renderScale,
+        tfPreset: state.tfPreset,
+        tfPoints: state.tfPoints.map((pt) => ({ x: pt.x, y: pt.y })),
+        upAxis: state.upAxis,
+        cam: state.cam,
+        clipMin: state.clipMin,
+        clipMax: state.clipMax,
+        sliceX: state.sliceX,
+        sliceY: state.sliceY,
+        sliceZ: state.sliceZ,
+        showSliceX: state.showSliceX,
+        showSliceY: state.showSliceY,
+        showSliceZ: state.showSliceZ,
+        showWireframe: state.showWireframe,
+        showAxis: state.showAxis,
+      };
+    }
+
+    function numList(str, counts) {
+      if (!str) return undefined;
+      const parts = str.split(",").map(Number);
+      return counts.includes(parts.length) && parts.every(Number.isFinite) ? parts : undefined;
+    }
+
+    function paramsToOptions(p, numLodLevels) {
+      const o = {};
+      const num = (key) => {
+        if (!p.has(key)) return undefined;
+        const v = Number(p.get(key));
+        return Number.isFinite(v) ? v : undefined;
+      };
+      const mode = p.get("mode");
+      if (MODES.includes(mode)) o.mode = mode;
+      const wc = num("wc"); if (wc !== undefined) o.windowCenter = wc;
+      const ww = num("ww"); if (ww !== undefined) o.windowWidth = ww;
+      const density = num("density"); if (density !== undefined) o.densityScale = density;
+      const iso = num("iso"); if (iso !== undefined) o.isoValue = iso;
+      const scale = num("scale"); if (scale !== undefined) o.renderScale = scale;
+      const tf = p.get("tf");
+      if (TF_PRESETS.some(([v]) => v === tf)) o.tfPreset = tf;
+      const tfpts = (p.get("tfpts") || "").split(",").filter((x) => x !== "").map(Number);
+      if (tfpts.length >= 2 && tfpts.length % 2 === 0 && tfpts.every(Number.isFinite)) {
+        o.tfPoints = [];
+        for (let i = 0; i < tfpts.length; i += 2) o.tfPoints.push({ x: tfpts[i], y: tfpts[i + 1] });
+      }
+      const up = p.get("up");
+      if (UP_AXES.includes(up)) o.upAxis = up;
+      const cam = numList(p.get("cam"), [3, 6]); if (cam) o.cam = cam;
+      const clipMin = numList(p.get("clipMin"), [3]); if (clipMin) o.clipMin = clipMin;
+      const clipMax = numList(p.get("clipMax"), [3]); if (clipMax) o.clipMax = clipMax;
+      const slices = numList(p.get("slices"), [3]);
+      if (slices) [o.sliceX, o.sliceY, o.sliceZ] = slices;
+      if (p.has("sliceVis")) {
+        const mask = parseInt(p.get("sliceVis"), 10);
+        if (!isNaN(mask)) {
+          o.showSliceX = !!(mask & 1);
+          o.showSliceY = !!(mask & 2);
+          o.showSliceZ = !!(mask & 4);
+        }
+      }
+      if (p.get("wireframe") === "1") o.showWireframe = true;
+      if (p.get("axis") === "1") o.showAxis = true;
+
+      let minLevel = null;
+      if (p.has("minLevel")) {
+        const v = parseInt(p.get("minLevel"), 10);
+        if (Number.isInteger(v) && v >= 0 && numLodLevels && v < numLodLevels) minLevel = v;
+      }
+      return { options: o, minLevel };
+    }
+
+    // ------------------------------------------------------------------
+    // UI state that must survive a reload of the viewer (the side panel is
+    // rebuilt for each KilnViewer, so its open/closed state lives here).
+    // ------------------------------------------------------------------
+    const uiState = { panelOpen: true, infoOpen: true, sceneOpen: true, advancedOpen: false, panelScroll: 0 };
+
+    function setPanelOpen(open) {
+      uiState.panelOpen = open;
+      const panel = document.querySelector(".ctl-panel");
+      if (panel) panel.hidden = !open;
+      $("panel-open").hidden = open;
+    }
+    function setInfoOpen(open) {
+      uiState.infoOpen = open;
+      $("stats-hud").hidden = !open;
+      $("info-open").hidden = open;
+    }
+
+    function showStatus(text, { busy = true } = {}) {
+      const el = $("status");
+      el.style.display = "flex";
+      el.replaceChildren();
+      if (busy) {
+        const sp = document.createElement("div");
+        sp.className = "spinner";
+        el.append(sp);
+      }
+      const span = document.createElement("span");
+      span.textContent = text;
+      el.append(span);
+    }
+
+    // state: "off" | "indeterminate" | "determinate"
+    function setLoadUi(state, fraction = 0, text = "") {
+      const on = state !== "off";
+      $("load-progress").classList.toggle("active", on);
+      $("load-progress").classList.toggle("indeterminate", state === "indeterminate");
+      $("load-chip").classList.toggle("active", on);
+      $("load-progress-bar").style.width = state === "determinate" ? `${Math.round(fraction * 100)}%` : "";
+      if (text) $("load-text").textContent = text;
+    }
+
+    let currentViewer = null;
+
+    async function init() {
+      if (!volumeId) {
+        content.innerHTML = `<div class="error-box" style="margin:1.4em">No volume specified.</div>`;
+        return;
+      }
+      let volume;
+      try {
+        volume = await api.getVolume(volumeId);
+      } catch (err) {
+        content.innerHTML = `<div class="error-box" style="margin:1.4em">${err.message}</div>`;
+        return;
+      }
+
+      content.innerHTML = `
+        <div class="viewer-topbar">
+          <div class="viewer-titles">
+            <h1>${escapeHtml(volume.title)}</h1>
+            ${volume.description ? `<div class="viewer-desc">${escapeHtml(volume.description)}</div>` : ""}
+          </div>
+          <div class="viewer-topbar-actions">
+            <button id="share-btn" class="icon-btn" title="Copy a link to this exact view">${LINK_ICON}<span class="icon-btn-label">Share</span></button>
+            ${
+              volume.mesh_status === "ready"
+                ? `<button id="view-mesh" class="icon-btn" title="Open the attached mesh in the 3D mesh viewer">${CUBE_ICON}<span class="icon-btn-label">View mesh</span></button>`
+                : ""
+            }
+            <button id="fullscreen-btn" class="icon-btn primary">${EXPAND_ICON}<span class="icon-btn-label">Fullscreen</span></button>
+          </div>
+        </div>
+        <div class="viewer-canvas-wrap" id="canvas-wrap">
+          <div class="viewer-canvas-area" id="canvas-area">
+            <canvas id="canvas"></canvas>
+            <div class="viewer-progress" id="load-progress"><div class="viewer-progress-bar" id="load-progress-bar"></div></div>
+            <div class="viewer-load-chip" id="load-chip"><div class="spinner"></div><span id="load-text">Loading\u2026</span></div>
+            <div class="viewer-status" id="status"></div>
+            <div class="viewer-stats-hud" id="stats-hud">
+              <div class="viewer-stats-head">
+                <span class="ctl-eyebrow">Info</span>
+                <button type="button" class="ctl-close" id="info-close" aria-label="Close info box" title="Close">\u00d7</button>
+              </div>
+              <div class="viewer-stats-text" id="stats-text">\u2014</div>
+            </div>
+            <button type="button" class="ctl-chip" id="info-open" style="left:12px; bottom:12px" hidden>Info</button>
+            <button type="button" class="ctl-chip" id="panel-open" style="right:12px; top:12px" hidden>Controls</button>
+          </div>
+        </div>
+      `;
+
+      const canvasWrap = $("canvas-wrap");
+      const canvasArea = $("canvas-area");
+
+      $("info-close").addEventListener("click", () => setInfoOpen(false));
+      $("info-open").addEventListener("click", () => setInfoOpen(true));
+      $("panel-open").addEventListener("click", () => setPanelOpen(true));
+
+      const fullscreenBtn = $("fullscreen-btn");
+      fullscreenBtn.addEventListener("click", () => {
+        if (document.fullscreenElement) {
+          document.exitFullscreen();
+        } else {
+          canvasWrap.requestFullscreen().catch((err) => alert(`Couldn't enter fullscreen: ${err.message}`));
+        }
+      });
+      document.addEventListener("fullscreenchange", () => {
+        const isFull = document.fullscreenElement === canvasWrap;
+        fullscreenBtn.innerHTML = isFull
+          ? `${COLLAPSE_ICON}<span class="icon-btn-label">Exit fullscreen</span>`
+          : `${EXPAND_ICON}<span class="icon-btn-label">Fullscreen</span>`;
+      });
+
+      const gpu = webgpuStatus();
+      if (!gpu.ok) {
+        showStatus(gpu.message, { busy: false });
+        return;
+      }
+
+      // Levels are OME-NGFF multiscale indices: 0 = full resolution, higher
+      // = coarser. Defaulting to the middle of the pyramid means the finest
+      // (most memory/bandwidth-hungry) half is never streamed unless the
+      // user explicitly asks for it — see the "Max detail level" control.
+      const numLevels = volume.num_lod_levels;
+      const fromUrl = paramsToOptions(params, numLevels);
+      const defaultMinLevel = numLevels && numLevels > 1 ? Math.floor(numLevels / 2) : null;
+      let activeMinLevel = fromUrl.minLevel ?? defaultMinLevel;
+      // View/transfer-function state to hand to the next KilnViewer: initially
+      // whatever the URL says, afterwards a snapshot of the live viewer.
+      let nextOptions = fromUrl.options;
+
+      // KilnViewer only tells its engine about a size change when the canvas
+      // size differs from the element's current size. A canvas that was used
+      // by a previous viewer already has the right size, so the new engine
+      // never got sized and nothing was drawn. Every (re)load therefore uses
+      // a brand-new canvas (starting at 1x1, so a resize is always seen).
+      // loadToken discards the result of a load superseded by a newer one.
+      let loadToken = 0;
+      let stopStats = null;
+      let urlSync = null;
+
+      function replaceCanvas() {
+        const canvas = document.createElement("canvas");
+        canvas.id = "canvas";
+        canvas.width = 1;
+        canvas.height = 1;
+        $("canvas").replaceWith(canvas);
+        return canvas;
+      }
+
+      async function loadVolume(minLevel) {
+        const token = ++loadToken;
+        activeMinLevel = minLevel;
+
+        // Snapshot the live view + transfer function BEFORE tearing anything
+        // down, so a reload (e.g. a new max detail level) changes nothing visually.
+        if (currentViewer) {
+          urlSync?.stop();
+          urlSync = null;
+          nextOptions = stateToOptions(currentViewer.getState());
+        }
+        showStatus(currentViewer ? "Reloading with new detail limit\u2026" : "Requesting WebGPU device\u2026");
+        setLoadUi("indeterminate", 0, "Loading\u2026");
+        if (stopStats) {
+          stopStats();
+          stopStats = null;
+        }
+        if (currentViewer) {
+          const old = currentViewer;
+          currentViewer = null;
+          try {
+            old.dispose();
+          } catch (err) {
+            console.warn("Viewer dispose failed:", err);
+          }
+        }
+        canvasWrap.querySelector(".ctl-panel")?.remove();
+        if (token !== loadToken) return;
+
+        try {
+          const access = await api.zarrAccessUrl(volumeId, minLevel);
+          if (token !== loadToken) return;
+          const canvas = replaceCanvas();
+          const viewer = await KilnViewer.create(canvas, access.url, nextOptions);
+          if (token !== loadToken) {
+            viewer.dispose();
+            return;
+          }
+          currentViewer = viewer;
+          $("status").style.display = "none";
+          buildControlPanel(viewer, canvasWrap, {
+            numLodLevels: numLevels,
+            minLevel,
+            onMinLevelChange: (newMinLevel) => loadVolume(newMinLevel),
+          });
+          stopStats = startStatsLoop(viewer);
+          urlSync = startUrlSync(viewer, () => activeMinLevel);
+        } catch (err) {
+          if (token !== loadToken) return;
+          console.error(err);
+          setLoadUi("off");
+          showStatus(`Could not load volume: ${err.message}`, { busy: false });
+        }
+      }
+
+      loadVolume(activeMinLevel);
+
+      $("share-btn").addEventListener("click", async () => {
+        urlSync?.flush();
+        const btn = $("share-btn");
+        const label = btn.querySelector(".icon-btn-label");
+        try {
+          await navigator.clipboard.writeText(window.location.href);
+          if (label) {
+            label.textContent = "Copied";
+            setTimeout(() => { label.textContent = "Share"; }, 1500);
+          }
+        } catch {
+          window.prompt("Copy this link:", window.location.href);
+        }
+      });
+      const viewMeshBtn = $("view-mesh");
+      if (viewMeshBtn) {
+        viewMeshBtn.addEventListener("click", () => {
+          window.location.href = `/viewers/mesh.html?volume=${encodeURIComponent(volumeId)}`;
+        });
+      }
+
+      const downloadBtn = $("download-mesh");
+      if (downloadBtn) {
+        downloadBtn.addEventListener("click", async () => {
+          try {
+            const access = await api.meshAccessUrl(volumeId);
+            window.location.href = access.url;
+          } catch (err) {
+            alert(err.message);
+          }
+        });
+      }
+    }
+
+    // Keeps the page URL in sync with the live view (camera, mode, transfer
+    // function, clip/slice planes, ...) so a reload or a copied link restores it.
+    function startUrlSync(viewer, getMinLevel) {
+      let last = window.location.search;
+      const write = () => {
+        try {
+          const qs = "?" + stateToParams(viewer.getState(), getMinLevel()).toString();
+          if (qs !== last) {
+            history.replaceState(history.state, "", window.location.pathname + qs + window.location.hash);
+            last = qs;
+          }
+        } catch (err) {
+          // replaceState can be rate-limited by the browser; the next tick retries.
+        }
+      };
+      const timer = setInterval(write, 500);
+      write();
+      return { flush: write, stop: () => { write(); clearInterval(timer); } };
+    }
+
+    // The side panel: a segmented mode switch, a "swap region" whose contents
+    // depend on the selected mode (transfer function + windowing + density
+    // for DVR, windowing for MIP, + iso value for ISO, + slice planes for
+    // Slice), a collapsible Scene section (up axis, wireframe/axis overlays,
+    // per-axis clip range in voxel coordinates) and a collapsible Advanced
+    // section (render scale, max detail level, LOD/jitter/TAA/indirection).
+    function buildControlPanel(viewer, container, lodOptions) {
+
+      const renderer = viewer.renderer;
+      const camera = viewer.camera;
+      const tf = viewer.transferFunction;
+      const [dimX, dimY, dimZ] = viewer.metadata.dimensions;
+      const dims = { X: dimX, Y: dimY, Z: dimZ };
+
+      const state = {
+        mode: ["dvr", "mip", "iso", "slice"].includes(viewer.mode)
+          ? viewer.mode
+          : viewer.mode === "slice-lod" ? "slice" : "dvr",
+        lod: viewer.mode === "lod" || viewer.mode === "slice-lod",
+        tfPreset: tf.preset,
+        upAxis: camera.getUpAxis(),
+        clipMinX: Math.round(renderer.clipMin[0] * dimX),
+        clipMinY: Math.round(renderer.clipMin[1] * dimY),
+        clipMinZ: Math.round(renderer.clipMin[2] * dimZ),
+        clipMaxX: Math.round(renderer.clipMax[0] * dimX) || dimX,
+        clipMaxY: Math.round(renderer.clipMax[1] * dimY) || dimY,
+        clipMaxZ: Math.round(renderer.clipMax[2] * dimZ) || dimZ,
+      };
+
+      function effectiveMode() {
+        if (state.lod && state.mode === "dvr") return "lod";
+        if (state.lod && state.mode === "slice") return "slice-lod";
+        return state.mode; // MIP/ISO have no LOD-streaming variant
+      }
+      function applyMode() { viewer.mode = effectiveMode(); }
+
+      const dirty = () => {
+        renderer.markDirty();
+        renderer.resetAccumulation();
+      };
+
+      const arrowSvg = `<svg class="ctl-panel-arrow" viewBox="0 0 8 8" width="8" height="8"><path d="M2 0l4 4-4 4z" fill="currentColor"/></svg>`;
+      const collapsibleArrow = arrowSvg.replace('class="ctl-panel-arrow"', 'class="ctl-collapsible-arrow"');
+
+      const panel = document.createElement("aside");
+      panel.className = "ctl-panel";
+      panel.hidden = !uiState.panelOpen;
+      panel.innerHTML = `
+        <div class="ctl-panel-header">
+          <span>Volume controls</span>
+          <button type="button" class="ctl-close" data-role="panel-close" aria-label="Close controls" title="Close">\u00d7</button>
+        </div>
+        <div class="ctl-panel-body">
+          <div class="ctl-segmented" data-role="mode-segmented">
+            ${["dvr", "mip", "iso", "slice"].map((m) => `
+              <button type="button" class="ctl-segment${state.mode === m ? " active" : ""}" data-mode="${m}">
+                ${m === "dvr" ? "DVR" : m === "mip" ? "MIP" : m === "iso" ? "ISO" : "Slice"}
+              </button>`).join("")}
+          </div>
+
+          <div class="ctl-swap-region" data-role="swap-region"></div>
+
+          <div class="ctl-collapsible${uiState.sceneOpen ? " open" : ""}" data-key="sceneOpen">
+            <button type="button" class="ctl-collapsible-header">
+              ${collapsibleArrow}
+              <span class="ctl-eyebrow">Scene</span>
+            </button>
+            <div class="ctl-collapsible-body">
+              <label class="ctl-select-row">
+                <span class="ctl-row-label ctl-select-label">Up Axis</span>
+                <select class="ctl-select-input" data-role="up-axis">
+                  ${UP_AXES.map((a) =>
+                    `<option value="${a}"${state.upAxis === a ? " selected" : ""}>${a.toUpperCase()}</option>`
+                  ).join("")}
+                </select>
+              </label>
+              <label class="ctl-toggle-row">
+                <span class="ctl-row-label ctl-toggle-label">Wireframe</span>
+                <input type="checkbox" class="ctl-toggle-input" data-role="wireframe" ${renderer.showWireframe ? "checked" : ""}>
+                <span class="ctl-toggle-track"></span>
+              </label>
+              <label class="ctl-toggle-row">
+                <span class="ctl-row-label ctl-toggle-label">Axes</span>
+                <input type="checkbox" class="ctl-toggle-input" data-role="axes" ${renderer.showAxis ? "checked" : ""}>
+                <span class="ctl-toggle-track"></span>
+              </label>
+              <div data-role="clip-rows">
+                ${["X", "Y", "Z"].map((axis) => `
+                  <div class="ctl-slider-row">
+                    <span class="ctl-row-label ctl-slider-label">Clip ${axis}</span>
+                    <div class="ctl-range-track" data-role="clip-track-${axis}">
+                      <div class="ctl-range-fill" data-role="clip-fill-${axis}"></div>
+                      <input type="range" class="ctl-range-input" data-role="clip-min-${axis}" min="0" max="${dims[axis]}" step="1" value="${state["clipMin" + axis]}">
+                      <input type="range" class="ctl-range-input" data-role="clip-max-${axis}" min="0" max="${dims[axis]}" step="1" value="${state["clipMax" + axis]}">
+                    </div>
+                    <span class="ctl-row-value ctl-mono" data-role="clip-value-${axis}">${state["clipMin" + axis]}\u2013${state["clipMax" + axis]}</span>
+                  </div>
+                `).join("")}
+              </div>
+            </div>
+          </div>
+
+          <div class="ctl-collapsible${uiState.advancedOpen ? " open" : ""}" data-key="advancedOpen">
+            <button type="button" class="ctl-collapsible-header">
+              ${collapsibleArrow}
+              <span class="ctl-eyebrow">Advanced</span>
+            </button>
+            <div class="ctl-collapsible-body">
+              <div class="ctl-slider-row">
+                <span class="ctl-row-label ctl-slider-label">Render Scale</span>
+                <div class="ctl-slider-track">
+                  <div class="ctl-slider-fill" data-role="fill-renderScale"></div>
+                  <input type="range" class="ctl-slider-input" data-role="slider-renderScale" min="0.25" max="1" step="0.25" value="${viewer.renderScale}">
+                </div>
+                <span class="ctl-row-value ctl-mono" data-role="value-renderScale">${viewer.renderScale.toFixed(2)}</span>
+              </div>
+              ${
+                lodOptions.numLodLevels && lodOptions.numLodLevels > 1
+                  ? `
+              <label class="ctl-select-row" title="Level 0 = full resolution; higher levels are coarser downsamples. Levels finer than this are never streamed, regardless of how close the camera gets. Changing it reloads the volume; the view and transfer function are kept.">
+                <span class="ctl-row-label ctl-select-label">Max detail level</span>
+                <select class="ctl-select-input" data-role="min-level">
+                  ${Array.from({ length: lodOptions.numLodLevels }, (_, i) => i)
+                    .map((i) => {
+                      const label = i === 0 ? "0 (full res)" : i === lodOptions.numLodLevels - 1 ? `${i} (coarsest)` : String(i);
+                      const selected = i === (lodOptions.minLevel ?? 0) ? " selected" : "";
+                      return `<option value="${i}"${selected}>${label}</option>`;
+                    })
+                    .join("")}
+                </select>
+              </label>`
+                  : ""
+              }
+              <label class="ctl-toggle-row${state.mode !== "dvr" && state.mode !== "slice" ? " disabled" : ""}" title="Only available for DVR and Slice modes">
+                <span class="ctl-row-label ctl-toggle-label">LOD Levels</span>
+                <input type="checkbox" class="ctl-toggle-input" data-role="lod" ${state.lod ? "checked" : ""} ${state.mode !== "dvr" && state.mode !== "slice" ? "disabled" : ""}>
+                <span class="ctl-toggle-track"></span>
+              </label>
+              <label class="ctl-toggle-row">
+                <span class="ctl-row-label ctl-toggle-label">Jitter</span>
+                <input type="checkbox" class="ctl-toggle-input" data-role="jitter" ${renderer.enableJitter ? "checked" : ""}>
+                <span class="ctl-toggle-track"></span>
+              </label>
+              <label class="ctl-toggle-row">
+                <span class="ctl-row-label ctl-toggle-label">TAA</span>
+                <input type="checkbox" class="ctl-toggle-input" data-role="taa" ${renderer.enableTAA ? "checked" : ""}>
+                <span class="ctl-toggle-track"></span>
+              </label>
+              <label class="ctl-toggle-row">
+                <span class="ctl-row-label ctl-toggle-label">Indirection</span>
+                <input type="checkbox" class="ctl-toggle-input" data-role="indirection" ${renderer.useIndirection ? "checked" : ""}>
+                <span class="ctl-toggle-track"></span>
+              </label>
+            </div>
+          </div>
+        </div>
+      `;
+      container.appendChild(panel);
+
+      const panelBody = panel.querySelector(".ctl-panel-body");
+      panelBody.scrollTop = uiState.panelScroll;
+      panelBody.addEventListener("scroll", () => { uiState.panelScroll = panelBody.scrollTop; });
+      panel.querySelector('[data-role="panel-close"]').addEventListener("click", () => setPanelOpen(false));
+      $("panel-open").hidden = uiState.panelOpen;
+
+      // --- generic slider row (single handle): wires an <input type=range>
+      // plus its fill bar and numeric readout. Wiring only paints the current
+      // value; `apply(value)` runs on user input only, so merely building the
+      // panel (e.g. after a reload) can never nudge the view. ---
+      function wireSlider(root, role, apply, format) {
+        const input = root.querySelector(`[data-role="slider-${role}"]`);
+        const fill = root.querySelector(`[data-role="fill-${role}"]`);
+        const value = root.querySelector(`[data-role="value-${role}"]`);
+        const paint = () => {
+          const v = parseFloat(input.value);
+          const pct = ((v - parseFloat(input.min)) / (parseFloat(input.max) - parseFloat(input.min))) * 100;
+          fill.style.width = `calc(6px + (100% - 12px) * ${pct / 100})`;
+          value.textContent = format(v);
+        };
+        input.addEventListener("input", () => { paint(); apply(parseFloat(input.value)); });
+        paint();
+      }
+
+      // --- generic dual-handle range row (clip sliders), values in voxel
+      // units. Both <input type=range> share one visual track; each only
+      // captures pointer events on its own thumb (see .ctl-range-input CSS),
+      // and JS clamps min <= max on interaction. ---
+      function wireClipAxis(axis, dim, apply) {
+        const minInput = panel.querySelector(`[data-role="clip-min-${axis}"]`);
+        const maxInput = panel.querySelector(`[data-role="clip-max-${axis}"]`);
+        const fill = panel.querySelector(`[data-role="clip-fill-${axis}"]`);
+        const valueEl = panel.querySelector(`[data-role="clip-value-${axis}"]`);
+        const paint = () => {
+          let lo = parseInt(minInput.value, 10);
+          let hi = parseInt(maxInput.value, 10);
+          if (lo > hi) { [lo, hi] = [hi, lo]; minInput.value = lo; maxInput.value = hi; }
+          const loPct = (lo / dim) * 100;
+          const hiPct = (hi / dim) * 100;
+          fill.style.left = `calc(${loPct}% + ${6 - loPct / 100 * 12}px)`;
+          fill.style.width = `calc(${hiPct - loPct}% - ${(hiPct - loPct) / 100 * 12}px)`;
+          valueEl.textContent = `${lo}\u2013${hi}`;
+          return [lo, hi];
+        };
+        const onInput = () => { const [lo, hi] = paint(); apply(lo / dim, hi / dim); };
+        minInput.addEventListener("input", onInput);
+        maxInput.addEventListener("input", onInput);
+        paint();
+      }
+
+      // --- transfer function editor: the gradient/opacity curve is drawn by
+      // kiln-render's renderPreview() on the bottom canvas; the control points
+      // are drawn on a transparent overlay that also receives all pointer
+      // input. Pointer capture keeps a drag alive when the cursor leaves the
+      // canvas (or the panel) and values are clamped to 0..1, so every extreme
+      // is reachable. Press empty space to add a point (and drag it at once),
+      // drag a point to move it, double-click a point to remove it. The first
+      // and last point stay at x = 0 and x = 1 (kiln-render re-adds them
+      // otherwise); only their opacity moves. ---
+      let tfResizeObserver = null;
+      function wireTfCanvas(root) {
+        const canvas = root.querySelector(".ctl-tf-canvas");
+        const overlay = root.querySelector(".ctl-tf-overlay");
+        let dragPoint = null;
+
+        function redraw() {
+          const rect = canvas.getBoundingClientRect();
+          if (rect.width === 0 || rect.height === 0) return; // panel closed
+          const dpr = window.devicePixelRatio || 1;
+          const cw = Math.max(1, Math.round(rect.width * dpr));
+          const ch = Math.max(1, Math.round(rect.height * dpr));
+          if (canvas.width !== cw || canvas.height !== ch) {
+            canvas.width = cw;
+            canvas.height = ch;
+          }
+          tf.renderPreview(canvas, viewer.windowCenter, viewer.windowWidth);
+
+          const stageRect = overlay.getBoundingClientRect();
+          const ow = Math.round(stageRect.width * dpr);
+          const oh = Math.round(stageRect.height * dpr);
+          if (overlay.width !== ow || overlay.height !== oh) {
+            overlay.width = ow;
+            overlay.height = oh;
+          }
+          const ctx = overlay.getContext("2d");
+          ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+          ctx.clearRect(0, 0, stageRect.width, stageRect.height);
+
+          const ox = rect.left - stageRect.left;
+          const oy = rect.top - stageRect.top;
+          ctx.lineWidth = 2;
+          for (const p of tf.getOpacityPoints()) {
+            ctx.beginPath();
+            ctx.arc(ox + p.x * rect.width, oy + (1 - p.y) * rect.height, p === dragPoint ? 7 : 6, 0, Math.PI * 2);
+            ctx.fillStyle = "#e8a33d";
+            ctx.strokeStyle = "rgba(20,23,28,0.9)";
+            ctx.fill();
+            ctx.stroke();
+          }
+        }
+
+        // Normalised (0..1) position relative to the preview canvas. Clamped,
+        // so a pointer that left the canvas still maps to its nearest edge.
+        function pointFromEvent(evt) {
+          const rect = canvas.getBoundingClientRect();
+          const x = Math.min(1, Math.max(0, (evt.clientX - rect.left) / rect.width));
+          const y = Math.min(1, Math.max(0, 1 - (evt.clientY - rect.top) / rect.height));
+          return { x, y };
+        }
+
+        function nearestPointIndex(pt, thresholdPx = 11) {
+          const points = tf.getOpacityPoints();
+          const rect = canvas.getBoundingClientRect();
+          let best = -1, bestDist = Infinity;
+          points.forEach((p, i) => {
+            const dx = (p.x - pt.x) * rect.width;
+            const dy = (p.y - pt.y) * rect.height;
+            const dist = Math.sqrt(dx * dx + dy * dy);
+            if (dist < bestDist) { bestDist = dist; best = i; }
+          });
+          return bestDist <= thresholdPx ? best : -1;
+        }
+
+        function applyPoints(points) {
+          tf.setOpacityPoints(points);
+          dirty();
+          redraw();
+        }
+
+        function endDrag() {
+          if (dragPoint === null) return;
+          dragPoint = null;
+          redraw();
+        }
+
+        overlay.addEventListener("pointerdown", (evt) => {
+          if (evt.button !== 0) return;
+          evt.preventDefault();
+          const pt = pointFromEvent(evt);
+          const points = tf.getOpacityPoints();
+          const idx = nearestPointIndex(pt);
+          if (idx >= 0) {
+            dragPoint = points[idx];
+          } else {
+            dragPoint = pt;
+            points.push(pt);
+            points.sort((a, b) => a.x - b.x);
+            applyPoints(points);
+          }
+          overlay.setPointerCapture(evt.pointerId);
+          redraw();
+        });
+        overlay.addEventListener("pointermove", (evt) => {
+          if (dragPoint === null) return;
+          const pt = pointFromEvent(evt);
+          const points = tf.getOpacityPoints();
+          const idx = points.indexOf(dragPoint);
+          if (idx < 0) return;
+          let x = pt.x;
+          if (idx === 0) x = 0;
+          else if (idx === points.length - 1) x = 1;
+          else x = Math.min(points[idx + 1].x, Math.max(points[idx - 1].x, x));
+          dragPoint = { x, y: pt.y };
+          points[idx] = dragPoint;
+          applyPoints(points);
+        });
+        overlay.addEventListener("pointerup", endDrag);
+        overlay.addEventListener("pointercancel", endDrag);
+        overlay.addEventListener("lostpointercapture", endDrag);
+        overlay.addEventListener("dblclick", (evt) => {
+          const points = tf.getOpacityPoints();
+          const idx = nearestPointIndex(pointFromEvent(evt));
+          if (idx <= 0 || idx >= points.length - 1) return; // keep the end points
+          points.splice(idx, 1);
+          applyPoints(points);
+        });
+
+        tfResizeObserver?.disconnect();
+        tfResizeObserver = new ResizeObserver(() => redraw());
+        tfResizeObserver.observe(overlay);
+
+        redraw();
+        return redraw;
+      }
+
+      // --- swap region: rebuilt whenever the mode changes, since which
+      // controls are relevant differs by mode. ---
+      let redrawTf = null;
+      function renderSwapRegion() {
+        const swap = panel.querySelector('[data-role="swap-region"]');
+        const showDensity = state.mode === "dvr";
+        const showIso = state.mode === "iso";
+        const showSlices = state.mode === "slice";
+        swap.innerHTML = `
+          <label class="ctl-select-row">
+            <span class="ctl-row-label ctl-select-label">Preset</span>
+            <select class="ctl-select-input" data-role="tf-preset">
+              ${TF_PRESETS.map(([v, label]) => `<option value="${v}"${state.tfPreset === v ? " selected" : ""}>${label}</option>`).join("")}
+            </select>
+          </label>
+          <div class="ctl-tf-canvas-container">
+            <div class="ctl-tf-stage">
+              <canvas class="ctl-tf-canvas"></canvas>
+              <canvas class="ctl-tf-overlay"></canvas>
+            </div>
+            <div class="ctl-tf-help">Click to add \u00b7 drag to move \u00b7 double-click to remove</div>
+          </div>
+          <div class="ctl-slider-row">
+            <span class="ctl-row-label ctl-slider-label">Center</span>
+            <div class="ctl-slider-track">
+              <div class="ctl-slider-fill" data-role="fill-center"></div>
+              <input type="range" class="ctl-slider-input" data-role="slider-center" min="0" max="1" step="0.01" value="${viewer.windowCenter}">
+            </div>
+            <span class="ctl-row-value ctl-mono" data-role="value-center">${viewer.windowCenter.toFixed(2)}</span>
+          </div>
+          <div class="ctl-slider-row">
+            <span class="ctl-row-label ctl-slider-label">Width</span>
+            <div class="ctl-slider-track">
+              <div class="ctl-slider-fill" data-role="fill-width"></div>
+              <input type="range" class="ctl-slider-input" data-role="slider-width" min="0.01" max="1" step="0.01" value="${viewer.windowWidth}">
+            </div>
+            <span class="ctl-row-value ctl-mono" data-role="value-width">${viewer.windowWidth.toFixed(2)}</span>
+          </div>
+          ${showDensity ? `
+          <div class="ctl-slider-row">
+            <span class="ctl-row-label ctl-slider-label">Density</span>
+            <div class="ctl-slider-track">
+              <div class="ctl-slider-fill" data-role="fill-density"></div>
+              <input type="range" class="ctl-slider-input" data-role="slider-density" min="0.1" max="10" step="0.1" value="${renderer.densityScale}">
+            </div>
+            <span class="ctl-row-value ctl-mono" data-role="value-density">${renderer.densityScale.toFixed(2)}</span>
+          </div>` : ""}
+          ${showIso ? `
+          <div class="ctl-slider-row">
+            <span class="ctl-row-label ctl-slider-label">Iso value</span>
+            <div class="ctl-slider-track">
+              <div class="ctl-slider-fill" data-role="fill-iso"></div>
+              <input type="range" class="ctl-slider-input" data-role="slider-iso" min="0" max="1" step="0.001" value="${viewer.isoValue}">
+            </div>
+            <span class="ctl-row-value ctl-mono" data-role="value-iso">${viewer.isoValue.toFixed(3)}</span>
+          </div>` : ""}
+          ${showSlices ? `
+          <div class="ctl-eyebrow ctl-subhead">Slice planes</div>
+          ${["X", "Y", "Z"].map((axis) => `
+          <div class="ctl-slider-row">
+            <label class="ctl-slice-toggle" title="Show the ${axis} slice">
+              <input type="checkbox" class="ctl-toggle-input" data-role="slice-show-${axis}" ${renderer["showSlice" + axis] ? "checked" : ""}>
+              <span class="ctl-toggle-track"></span>
+            </label>
+            <span class="ctl-row-label ctl-slider-label">Slice ${axis}</span>
+            <div class="ctl-slider-track">
+              <div class="ctl-slider-fill" data-role="fill-slice${axis}"></div>
+              <input type="range" class="ctl-slider-input" data-role="slider-slice${axis}" min="0" max="1" step="0.001" value="${renderer["slice" + axis]}">
+            </div>
+            <span class="ctl-row-value ctl-mono" data-role="value-slice${axis}"></span>
+          </div>`).join("")}` : ""}
+        `;
+
+        wireSlider(swap, "center", (v) => { viewer.windowCenter = v; if (redrawTf) redrawTf(); }, (v) => v.toFixed(2));
+        wireSlider(swap, "width", (v) => { viewer.windowWidth = v; if (redrawTf) redrawTf(); }, (v) => v.toFixed(2));
+        if (showDensity) wireSlider(swap, "density", (v) => { renderer.densityScale = v; dirty(); }, (v) => v.toFixed(2));
+        if (showIso) wireSlider(swap, "iso", (v) => { viewer.isoValue = v; }, (v) => v.toFixed(3));
+        if (showSlices) {
+          for (const axis of ["X", "Y", "Z"]) {
+            const dim = dims[axis];
+            wireSlider(swap, "slice" + axis, (v) => { renderer["slice" + axis] = v; dirty(); },
+              (v) => String(Math.min(dim - 1, Math.floor(v * dim))));
+            swap.querySelector(`[data-role="slice-show-${axis}"]`).addEventListener("change", (evt) => {
+              renderer["showSlice" + axis] = evt.target.checked;
+              dirty();
+            });
+          }
+        }
+
+        swap.querySelector('[data-role="tf-preset"]').addEventListener("change", (evt) => {
+          state.tfPreset = evt.target.value;
+          tf.setPreset(state.tfPreset);
+          dirty();
+          if (redrawTf) redrawTf();
+        });
+
+        redrawTf = wireTfCanvas(swap);
+      }
+      renderSwapRegion();
+
+      // --- mode segmented control ---
+      panel.querySelectorAll('[data-role="mode-segmented"] .ctl-segment').forEach((btn) => {
+        btn.addEventListener("click", () => {
+          state.mode = btn.dataset.mode;
+          panel.querySelectorAll('[data-role="mode-segmented"] .ctl-segment').forEach((b) =>
+            b.classList.toggle("active", b === btn)
+          );
+          applyMode();
+          renderSwapRegion();
+          // LOD toggle availability depends on mode — update the Advanced
+          // section's toggle state rather than re-render the whole panel.
+          const lodInput = panel.querySelector('[data-role="lod"]');
+          const lodRow = lodInput.closest(".ctl-toggle-row");
+          const lodAvailable = state.mode === "dvr" || state.mode === "slice";
+          lodInput.disabled = !lodAvailable;
+          lodRow.classList.toggle("disabled", !lodAvailable);
+        });
+      });
+
+      // --- Scene section ---
+      panel.querySelector('[data-role="up-axis"]').addEventListener("change", (evt) => {
+        camera.setUpAxis(evt.target.value);
+      });
+      panel.querySelector('[data-role="wireframe"]').addEventListener("change", (evt) => {
+        renderer.showWireframe = evt.target.checked;
+      });
+      panel.querySelector('[data-role="axes"]').addEventListener("change", (evt) => {
+        renderer.showAxis = evt.target.checked;
+      });
+
+      wireClipAxis("X", dimX, (lo, hi) => { renderer.clipMin[0] = lo; renderer.clipMax[0] = hi; dirty(); });
+      wireClipAxis("Y", dimY, (lo, hi) => { renderer.clipMin[1] = lo; renderer.clipMax[1] = hi; dirty(); });
+      wireClipAxis("Z", dimZ, (lo, hi) => { renderer.clipMin[2] = lo; renderer.clipMax[2] = hi; dirty(); });
+
+      // --- Advanced section ---
+      wireSlider(panel, "renderScale", (v) => { viewer.renderScale = v; }, (v) => v.toFixed(2));
+      const minLevelSelect = panel.querySelector('[data-role="min-level"]');
+      if (minLevelSelect) {
+        minLevelSelect.addEventListener("change", (evt) => {
+          // Which levels exist at all is baked into the signed URL kiln-render
+          // fetches from, so this reloads the viewer. The current view and
+          // transfer function are carried over (see loadVolume()).
+          lodOptions.onMinLevelChange(parseInt(evt.target.value, 10));
+        });
+      }
+      panel.querySelector('[data-role="lod"]').addEventListener("change", (evt) => {
+        state.lod = evt.target.checked;
+        applyMode();
+      });
+      panel.querySelector('[data-role="jitter"]').addEventListener("change", (evt) => {
+        renderer.enableJitter = evt.target.checked;
+      });
+      panel.querySelector('[data-role="taa"]').addEventListener("change", (evt) => {
+        renderer.enableTAA = evt.target.checked;
+      });
+      panel.querySelector('[data-role="indirection"]').addEventListener("change", (evt) => {
+        renderer.useIndirection = evt.target.checked;
+      });
+
+      // --- collapsible sections (Scene / Advanced); open state is remembered
+      // across reloads in uiState ---
+      panel.querySelectorAll(".ctl-collapsible").forEach((section) => {
+        section.querySelector(".ctl-collapsible-header").addEventListener("click", () => {
+          section.classList.toggle("open");
+          uiState[section.dataset.key] = section.classList.contains("open");
+        });
+      });
+    }
+
+    // Drives the info box and the loading indicator for one viewer. Returns a
+    // function that stops it.
+    function startStatsLoop(viewer) {
+      const statsEl = $("stats-text");
+      const meta = viewer.metadata;
+      let frames = 0;
+      let lastFpsTime = performance.now();
+      let fps = 0;
+
+      viewer.onBeforeFrame = () => {
+        frames++;
+        const now = performance.now();
+        if (now - lastFpsTime >= 500) {
+          fps = (frames * 1000) / (now - lastFpsTime);
+          frames = 0;
+          lastFpsTime = now;
+        }
+      };
+
+      let running = true;
+      let rafId = 0;
+      let lastUiTime = 0;
+      let lastLoaded = -1;
+      let lastBytes = -1;
+      let lastActivity = performance.now();
+      let idleSince = null;
+
+      function frame(now) {
+        if (!running) return;
+        rafId = requestAnimationFrame(frame);
+        if (now - lastUiTime < 250) return;
+        lastUiTime = now;
+
+        const s = viewer.streamingManager.getStats();
+
+        // Loading = bricks still queued/in flight, or the streamer hasn't
+        // produced its first desired set yet. "Still making progress" guards
+        // against a full atlas leaving requests queued forever.
+        if (s.loadedCount !== lastLoaded || s.totalBytesDownloaded !== lastBytes) {
+          lastLoaded = s.loadedCount;
+          lastBytes = s.totalBytesDownloaded;
+          lastActivity = now;
+        }
+        const started = s.desiredCount > 0 || s.pendingCount > 0;
+        const busy = !started || (s.pendingCount > 0 && now - lastActivity < 3000);
+        if (busy) {
+          idleSince = null;
+          if (!started) {
+            setLoadUi("indeterminate", 0, "Preparing\u2026");
+          } else {
+            const frac = s.desiredCount > 0 ? Math.min(1, s.loadedCount / s.desiredCount) : 0;
+            setLoadUi("determinate", frac, `Loading ${Math.round(frac * 100)}%  (${s.loadedCount}/${s.desiredCount} bricks)`);
+          }
+        } else {
+          idleSince ??= now;
+          if (now - idleSince > 600) setLoadUi("off"); // short grace period avoids flicker
+        }
+
+        if (uiState.infoOpen) {
+          const [dx, dy, dz] = meta.dimensions;
+          const mb = (s.totalBytesDownloaded / (1024 * 1024)).toFixed(1);
+          const kbs = (s.bytesPerSecond / 1024).toFixed(0);
+          statsEl.textContent =
+            `fps          ${fps.toFixed(0)}\n` +
+            `dimensions   ${dx}\u00d7${dy}\u00d7${dz}\n` +
+            `bit depth    ${meta.bitDepth}-bit \u00d7 ${meta.numChannels}ch\n` +
+            `lod levels   ${meta.maxLod + 1}\n` +
+            `bricks       ${s.loadedCount}/${s.desiredCount} loaded\n` +
+            `atlas        ${s.atlasUsage}/${s.atlasCapacity}\n` +
+            `downloaded   ${mb} MB (${kbs} KB/s)\n` +
+            (s.timeToFirstRender != null ? `first frame  ${s.timeToFirstRender.toFixed(0)} ms\n` : "");
+        }
+      }
+      rafId = requestAnimationFrame(frame);
+
+      return () => {
+        running = false;
+        cancelAnimationFrame(rafId);
+        viewer.onBeforeFrame = undefined;
+        setLoadUi("off");
+      };
+    }
+
+    init();
+  </script>
+</body>
+</html>

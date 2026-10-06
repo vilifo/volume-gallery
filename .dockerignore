@@ -1,8 +1,8 @@
 data/
 .venv/
 __pycache__/
+.idea/
+nginx/certs
 *.pyc
 .env
-.git/
-node_modules/
-.idea/
+/frontend/vendor/

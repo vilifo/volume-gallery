@@ -8,7 +8,7 @@ from .database import init_db, engine
 from .models import User, Role
 from .security import hash_password
 from .config import settings
-from .routers import auth, users, volumes
+from .routers import auth, users, volumes, meshes, pointclouds
 
 
 def _bootstrap_admin():
@@ -45,6 +45,8 @@ app = FastAPI(title="Volume Gallery", lifespan=lifespan)
 app.include_router(auth.router)
 app.include_router(users.router)
 app.include_router(volumes.router)
+app.include_router(meshes.router)
+app.include_router(pointclouds.router)
 
 # Serve the frontend (single-page-ish static site) at the root.
 app.mount("/", StaticFiles(directory=settings.FRONTEND_DIR, html=True), name="frontend")

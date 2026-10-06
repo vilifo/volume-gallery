@@ -3,8 +3,11 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Manage volume — Volume Gallery</title>
+<title>Manage — Volume Gallery</title>
 <link rel="stylesheet" href="/css/style.css" />
+<style>
+  .cd-toggle { display: inline-flex; align-items: center; gap: 0.4em; font-size: 0.85em; color: var(--text-dim); }
+</style>
 </head>
 <body>
   <div class="app-shell" id="shell"></div>
@@ -17,7 +20,36 @@
     if (role !== "editor" && role !== "admin") window.location.href = "/index.html";
 
     const params = new URLSearchParams(window.location.search);
-    const volumeId = params.get("id");
+    const kind = params.get("kind") || "volume"; // "volume" | "mesh" | "pointcloud"
+    const itemId = params.get("id");
+
+    // Dispatch table so the rest of this page can stay kind-agnostic.
+    const KIND = {
+      volume: {
+        label: "Volume",
+        get: (id) => api.getVolume(id),
+        listAccess: (id) => api.listAccess(id),
+        grantAccess: (id, userId, canDownload) => api.grantAccess(id, userId, canDownload),
+        revokeAccess: (id, userId) => api.revokeAccess(id, userId),
+        del: (id) => api.deleteVolume(id),
+      },
+      mesh: {
+        label: "Mesh",
+        get: (id) => api.getMesh(id),
+        listAccess: (id) => api.listMeshAccess(id),
+        grantAccess: (id, userId, canDownload) => api.grantMeshAccess(id, userId, canDownload),
+        revokeAccess: (id, userId) => api.revokeMeshAccess(id, userId),
+        del: (id) => api.deleteMesh(id),
+      },
+      pointcloud: {
+        label: "Point Cloud",
+        get: (id) => api.getPointCloud(id),
+        listAccess: (id) => api.listPointCloudAccess(id),
+        grantAccess: (id, userId, canDownload) => api.grantPointCloudAccess(id, userId, canDownload),
+        revokeAccess: (id, userId) => api.revokePointCloudAccess(id, userId),
+        del: (id) => api.deletePointCloud(id),
+      },
+    }[kind];
 
     document.getElementById("shell").innerHTML = `
       ${renderShell("gallery", role, getUsername())}
@@ -28,9 +60,9 @@
     const content = document.getElementById("content");
 
     async function load() {
-      const [volume, granted, allUsers] = await Promise.all([
-        api.getVolume(volumeId),
-        api.listAccess(volumeId),
+      const [item, granted, allUsers] = await Promise.all([
+        KIND.get(itemId),
+        KIND.listAccess(itemId),
         api.listUsers().catch(() => []), // editors may not have list-users; fall back gracefully
       ]);
 
@@ -38,14 +70,14 @@
       const readerCandidates = allUsers.filter((u) => u.role === "reader" && !grantedIds.has(u.id));
 
       content.innerHTML = `
-        <h1>${escapeHtml(volume.title)}</h1>
-        <p class="subtitle mono">${escapeHtml(volume.slug)}</p>
+        <h1>${escapeHtml(item.title)}</h1>
+        <p class="subtitle mono">${KIND.label} \u00b7 ${escapeHtml(item.slug)}</p>
         ${
-          volume.status !== "ready"
-            ? `<div class="${volume.status === "failed" ? "error-box" : "dim"}" style="margin-bottom:1.2em">
-                <strong>${volume.status === "failed" ? "Processing failed" : "Still processing"}</strong>
-                ${volume.status_log && volume.status_log.length
-                  ? `<div class="mono" style="margin-top:0.4em;font-size:0.85em;white-space:pre-wrap">${escapeHtml(volume.status_log.join("\n"))}</div>`
+          item.status !== "ready"
+            ? `<div class="${item.status === "failed" ? "error-box" : "dim"}" style="margin-bottom:1.2em">
+                <strong>${item.status === "failed" ? "Processing failed" : "Still processing"}</strong>
+                ${item.status_log && item.status_log.length
+                  ? `<div class="mono" style="margin-top:0.4em;font-size:0.85em;white-space:pre-wrap">${escapeHtml(item.status_log.join("\n"))}</div>`
                   : ""}
               </div>`
             : ""
@@ -53,45 +85,91 @@
 
         <h2>Reader access</h2>
         <table>
-          <thead><tr><th>User</th><th></th></tr></thead>
+          <thead>
+            <tr>
+              <th>User</th>
+              ${kind === "mesh" ? "<th>Can download</th>" : ""}
+              <th></th>
+            </tr>
+          </thead>
           <tbody id="granted-body">
             ${granted
               .map(
                 (u) => `<tr>
-                  <td>${escapeHtml(u.username)}</td>
+                  <td>${escapeHtml(u.username)}</td>${kind === "mesh" ? `
+                  <td>
+                    <label class="cd-toggle">
+                      <input type="checkbox" data-cd-toggle="${u.id}" ${u.can_download ? "checked" : ""}>
+                      download
+                    </label>
+                  </td>` : ""}
                   <td><button class="danger" data-revoke="${u.id}">Revoke</button></td>
                 </tr>`
               )
-              .join("") || `<tr><td colspan="2" class="dim">No readers granted yet.</td></tr>`}
+              .join("") || `<tr><td colspan="${kind === "mesh" ? 3 : 2}" class="dim">No readers granted yet.</td></tr>`}
           </tbody>
         </table>
 
         ${
           readerCandidates.length
-            ? `<div class="field" style="margin-top:1em;max-width:320px">
+            ? `<div class="field" style="margin-top:1em;max-width:360px">
                 <label for="grant-select">Grant access to</label>
-                <div style="display:flex;gap:0.5em">
+                <div style="display:flex;gap:0.5em;align-items:center">
                   <select id="grant-select">
                     ${readerCandidates.map((u) => `<option value="${u.id}">${escapeHtml(u.username)}</option>`).join("")}
                   </select>
+                  ${kind === "mesh" ? `<label class="cd-toggle"><input type="checkbox" id="grant-cd"> download</label>` : ""}
                   <button id="grant-btn" class="primary">Grant</button>
                 </div>
               </div>`
             : `<p class="dim" style="margin-top:1em">${allUsers.length ? "All readers already have access." : "Sign in as admin to see the full user list here."}</p>`
         }
 
-        <h2 style="margin-top:2em">Mesh</h2>
-        <p class="dim" style="font-size:0.9em">${volume.has_mesh ? escapeHtml(volume.mesh_filename) : "No mesh uploaded."}</p>
-        <input type="file" id="mesh-file" style="max-width:320px" />
-        <button id="mesh-upload-btn" style="margin-top:0.6em">Upload / replace mesh</button>
-
         <h2 style="margin-top:2em">Danger zone</h2>
-        <button class="danger" id="delete-btn">Delete this volume</button>
+        <button class="danger" id="delete-btn">Delete this ${KIND.label.toLowerCase()}</button>
       `;
+
+      if (kind === "volume") {
+        const meshSectionHtml = `
+          <h2 style="margin-top:2em">Attached mesh</h2>
+          <p class="dim" style="font-size:0.9em">Processed like any other mesh, but not listed separately: access follows this volume, and it is viewed and downloaded from the volume's viewer.</p>
+          <p class="dim" style="font-size:0.9em">${
+            item.has_mesh
+              ? escapeHtml(item.mesh_filename) +
+                (item.mesh_status && item.mesh_status !== "ready"
+                  ? ` \u2014 ${escapeHtml(item.mesh_status)}${
+                      item.mesh_status === "failed" && item.mesh_status_log.length
+                        ? `: ${escapeHtml(item.mesh_status_log[item.mesh_status_log.length - 1])}`
+                        : ""
+                    }`
+                  : "")
+              : "No mesh uploaded."
+          }</p>
+          <input type="file" id="mesh-file" style="max-width:320px" />
+          <button id="mesh-upload-btn" style="margin-top:0.6em">Upload / replace mesh</button>
+        `;
+        document.getElementById("delete-btn").insertAdjacentHTML("beforebegin", meshSectionHtml);
+
+        document.getElementById("mesh-upload-btn").addEventListener("click", async () => {
+          const file = document.getElementById("mesh-file").files[0];
+          if (!file) return;
+          const fd = new FormData();
+          fd.append("mesh_file", file);
+          await api.uploadMesh(itemId, fd);
+          load();
+        });
+      }
 
       content.querySelectorAll("[data-revoke]").forEach((btn) => {
         btn.addEventListener("click", async () => {
-          await api.revokeAccess(volumeId, btn.dataset.revoke);
+          await KIND.revokeAccess(itemId, btn.dataset.revoke);
+          load();
+        });
+      });
+
+      content.querySelectorAll("[data-cd-toggle]").forEach((cb) => {
+        cb.addEventListener("change", async () => {
+          await KIND.grantAccess(itemId, cb.dataset.cdToggle, cb.checked);
           load();
         });
       });
@@ -100,23 +178,16 @@
       if (grantBtn) {
         grantBtn.addEventListener("click", async () => {
           const userId = document.getElementById("grant-select").value;
-          await api.grantAccess(volumeId, userId);
+          // Safely check for the grant-cd checkbox since it won't exist for non-mesh types
+          const canDownload = document.getElementById("grant-cd")?.checked || false;
+          await KIND.grantAccess(itemId, userId, canDownload);
           load();
         });
       }
 
-      document.getElementById("mesh-upload-btn").addEventListener("click", async () => {
-        const file = document.getElementById("mesh-file").files[0];
-        if (!file) return;
-        const fd = new FormData();
-        fd.append("mesh_file", file);
-        await api.uploadMesh(volumeId, fd);
-        load();
-      });
-
       document.getElementById("delete-btn").addEventListener("click", async () => {
-        if (!confirm(`Delete "${volume.title}"? This removes its files permanently.`)) return;
-        await api.deleteVolume(volumeId);
+        if (!confirm(`Delete "${item.title}"? This removes its files permanently.`)) return;
+        await KIND.del(itemId);
         window.location.href = "/index.html";
       });
     }

@@ -1,43 +1,63 @@
 import json
-import re
 import shutil
 import zipfile
 from collections import deque
-from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, UploadFile, File, Form, Request
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, UploadFile, File, Form, Query, Request
+from fastapi.responses import FileResponse, Response
 from sqlmodel import Session, select
 
 from ..database import get_session, engine
-from ..models import User, Role, Volume, VolumeAccess, VolumeStatus
-from ..schemas import VolumeRead, VolumeStatusRead, VolumeAccessGrant, FileAccessUrl, UserRead
+from ..models import User, Role, Volume, VolumeAccess, Mesh, AssetStatus
+from ..schemas import VolumeRead, AssetStatusRead, AccessGrant, FileAccessUrl, UserRead
 from ..deps import get_current_user, require_editor
 from ..security import create_file_token, decode_token
 from ..config import settings
-from ..tiff_convert import convert_tiff_stack_to_ome_zarr
+from ..helpers.volume import convert_tiff_stack_to_ome_zarr
+from ..utils import SLUG_RE, _now  # noqa: F401 - re-exported for the other asset routers
+from .meshes import attach_mesh_to_volume, delete_volume_mesh, get_volume_mesh, volume_mesh_source, volume_mesh_file
 
 router = APIRouter(prefix="/api/volumes", tags=["volumes"])
-
-SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{1,62}$")
-
 
 def _volume_dir(slug: str) -> Path:
     return settings.VOLUMES_DIR / slug
 
 
-def _has_multiscales(attrs: dict) -> bool:
-    """Checks the two shapes OME-NGFF metadata can take: a flat
-    `multiscales` key (v2, and plain v3/v0.4), or one namespaced under
-    `ome` (v0.5's convention for zarr-v3 group attributes)."""
+def _get_multiscales(attrs: dict) -> Optional[list]:
+    """Returns the `multiscales` array from a Zarr group's attributes,
+    handling both shapes OME-NGFF metadata can take: a flat `multiscales`
+    key (v2, and plain v3/v0.4), or one namespaced under `ome` (v0.5's
+    convention for zarr-v3 group attributes). None if neither is present."""
     if not isinstance(attrs, dict):
-        return False
+        return None
     if "multiscales" in attrs:
-        return True
+        return attrs["multiscales"]
     ome = attrs.get("ome")
-    return isinstance(ome, dict) and "multiscales" in ome
+    if isinstance(ome, dict) and "multiscales" in ome:
+        return ome["multiscales"]
+    return None
+
+
+def _has_multiscales(attrs: dict) -> bool:
+    return _get_multiscales(attrs) is not None
+
+
+def _count_multiscale_levels(zarr_root: Path) -> Optional[int]:
+    """Number of resolution levels (index 0 = finest) in the multiscale
+    pyramid at zarr_root, or None if it can't be determined. Used to compute
+    the "max detail level" UI control's default (half of this)."""
+    attrs = _read_group_attrs(zarr_root)
+    if attrs is None:
+        return None
+    multiscales = _get_multiscales(attrs)
+    if not multiscales or not isinstance(multiscales, list):
+        return None
+    datasets = multiscales[0].get("datasets") if isinstance(multiscales[0], dict) else None
+    if not isinstance(datasets, list) or not datasets:
+        return None
+    return len(datasets)
 
 
 def _read_group_attrs(directory: Path) -> Optional[dict]:
@@ -91,8 +111,9 @@ def _can_see_volume(user: User, volume: Volume, session: Session) -> bool:
     return grant is not None
 
 
-def _volume_read(v: Volume) -> VolumeRead:
+def _volume_read(v: Volume, mesh: Optional[Mesh] = None) -> VolumeRead:
     log_lines = [line for line in (v.status_log or "").split("\n") if line]
+    mesh_log = [line for line in ((mesh.status_log if mesh else "") or "").split("\n") if line]
     return VolumeRead(
         id=v.id,
         slug=v.slug,
@@ -100,9 +121,12 @@ def _volume_read(v: Volume) -> VolumeRead:
         description=v.description,
         has_mesh=v.has_mesh,
         mesh_filename=v.mesh_filename,
+        mesh_status=mesh.status if mesh else None,
+        mesh_status_log=mesh_log,
         created_at=v.created_at.isoformat(),
         status=v.status,
         status_log=log_lines,
+        num_lod_levels=v.num_lod_levels,
     )
 
 
@@ -112,7 +136,8 @@ def _volume_read(v: Volume) -> VolumeRead:
 def list_volumes(session: Session = Depends(get_session), user: User = Depends(get_current_user)):
     volumes = session.exec(select(Volume)).all()
     visible = [v for v in volumes if _can_see_volume(user, v, session)]
-    return [_volume_read(v) for v in visible]
+    meshes = {m.volume_id: m for m in session.exec(select(Mesh).where(Mesh.volume_id != None)).all()}  # noqa: E711
+    return [_volume_read(v, meshes.get(v.id)) for v in visible]
 
 
 @router.get("/{volume_id}", response_model=VolumeRead)
@@ -122,10 +147,10 @@ def get_volume(
     volume = session.get(Volume, volume_id)
     if not volume or not _can_see_volume(user, volume, session):
         raise HTTPException(status_code=404, detail="Volume not found")
-    return _volume_read(volume)
+    return _volume_read(volume, get_volume_mesh(session, volume.id))
 
 
-@router.get("/{volume_id}/status", response_model=VolumeStatusRead)
+@router.get("/{volume_id}/status", response_model=AssetStatusRead)
 def get_volume_status(
     volume_id: int, session: Session = Depends(get_session), user: User = Depends(get_current_user)
 ):
@@ -136,7 +161,7 @@ def get_volume_status(
     if not volume or not _can_see_volume(user, volume, session):
         raise HTTPException(status_code=404, detail="Volume not found")
     log_lines = [line for line in (volume.status_log or "").split("\n") if line]
-    return VolumeStatusRead(id=volume.id, status=volume.status, status_log=log_lines)
+    return AssetStatusRead(id=volume.id, status=volume.status, status_log=log_lines)
 
 
 # ---------- Editor: create / upload / delete ----------
@@ -153,6 +178,7 @@ def create_volume(
     tiff_zip: Optional[UploadFile] = File(
         None, description="Zip archive of a flat .tif/.tiff slice stack, converted to OME-Zarr on upload"
     ),
+    max_workers: int = Form(8, description="Parallel read threads for TIFF conversion"),
     mesh_file: Optional[UploadFile] = File(None),
     session: Session = Depends(get_session),
     editor: User = Depends(require_editor),
@@ -169,12 +195,6 @@ def create_volume(
     vol_dir = _volume_dir(slug)
     vol_dir.mkdir(parents=True, exist_ok=False)
 
-    # Only the actual byte-copying happens here, synchronously — this is
-    # already-received request data, not CPU/IO-heavy work, so it's fast
-    # regardless of file size. Extraction/conversion (the slow part) happens
-    # in a background task after we respond, so the client isn't stuck
-    # holding the HTTP request open for however long that takes; instead the
-    # gallery polls GET /{id}/status for progress.
     source_kind = "zarr" if zarr_zip is not None else "tiff"
     source_upload = zarr_zip if zarr_zip is not None else tiff_zip
     try:
@@ -182,13 +202,6 @@ def create_volume(
         with open(zip_path, "wb") as f:
             shutil.copyfileobj(source_upload.file, f)
 
-        mesh_filename = None
-        has_mesh = False
-        if mesh_file is not None:
-            mesh_filename = Path(mesh_file.filename).name
-            with open(vol_dir / mesh_filename, "wb") as f:
-                shutil.copyfileobj(mesh_file.file, f)
-            has_mesh = True
     except Exception as exc:  # noqa: BLE001 - surface save errors to the caller
         shutil.rmtree(vol_dir, ignore_errors=True)
         raise HTTPException(status_code=400, detail=f"Could not save upload: {exc}")
@@ -198,26 +211,32 @@ def create_volume(
         title=title,
         description=description,
         zarr_path="",  # filled in by _process_upload once conversion/extraction finishes
-        has_mesh=has_mesh,
-        mesh_filename=mesh_filename,
         created_by=editor.id,
-        status=VolumeStatus.processing,
+        status=AssetStatus.processing,
         status_log=f"{_now()}  Upload received, queued for processing\n",
     )
     session.add(volume)
     session.commit()
     session.refresh(volume)
 
-    background_tasks.add_task(_process_upload, volume.id, str(vol_dir), source_kind)
+    # An optional mesh uploaded together with the volume is processed like any
+    # other mesh (see routers/meshes.py) but is owned by the volume.
+    mesh = None
+    if mesh_file is not None:
+        try:
+            mesh = attach_mesh_to_volume(session, volume, mesh_file, editor, background_tasks)
+        except Exception:
+            shutil.rmtree(vol_dir, ignore_errors=True)
+            session.delete(volume)
+            session.commit()
+            raise
 
-    return _volume_read(volume)
+    background_tasks.add_task(_process_upload, volume.id, str(vol_dir), source_kind, max_workers)
+
+    return _volume_read(volume, mesh)
 
 
-def _now() -> str:
-    return datetime.utcnow().strftime("%H:%M:%S")
-
-
-def _process_upload(volume_id: int, vol_dir_str: str, source_kind: str) -> None:
+def _process_upload(volume_id: int, vol_dir_str: str, source_kind: str, max_workers: int) -> None:
     """Runs after create_volume's response has already been sent. Opens its
     own DB session — the request-scoped one from create_volume is closed by
     the time this runs."""
@@ -228,6 +247,7 @@ def _process_upload(volume_id: int, vol_dir_str: str, source_kind: str) -> None:
             return
 
         def log(message: str) -> None:
+            print(f"[Volume {volume.slug}] {message}")
             volume.status_log = (volume.status_log or "") + f"{_now()}  {message}\n"
             session.add(volume)
             session.commit()
@@ -238,12 +258,13 @@ def _process_upload(volume_id: int, vol_dir_str: str, source_kind: str) -> None:
                 log("Extracting OME-Zarr archive")
                 zarr_root = _extract_zarr_zip_from_path(zip_path, vol_dir)
             else:
-                zarr_root = _convert_tiff_zip_from_path(zip_path, vol_dir, log)
+                zarr_root = _convert_tiff_zip_from_path(zip_path, vol_dir, max_workers, log)
             volume.zarr_path = str(zarr_root.relative_to(vol_dir))
-            volume.status = VolumeStatus.ready
+            volume.num_lod_levels = _count_multiscale_levels(zarr_root)
+            volume.status = AssetStatus.ready
             log("Ready")
         except Exception as exc:  # noqa: BLE001 - the failure message IS the point, shown to the user
-            volume.status = VolumeStatus.failed
+            volume.status = AssetStatus.failed
             log(f"Failed: {exc}")
         session.add(volume)
         session.commit()
@@ -274,7 +295,7 @@ def _extract_zarr_zip_from_path(zip_path: Path, vol_dir: Path) -> Path:
     return zarr_root
 
 
-def _convert_tiff_zip_from_path(zip_path: Path, vol_dir: Path, log) -> Path:
+def _convert_tiff_zip_from_path(zip_path: Path, vol_dir: Path, max_workers: int, log) -> Path:
     """Extracts a TIFF-stack .zip already saved at zip_path into a scratch
     directory, converts it to OME-Zarr under vol_dir, then deletes the
     extracted TIFF files — only the converted OME-Zarr store is kept on disk
@@ -307,15 +328,11 @@ def _convert_tiff_zip_from_path(zip_path: Path, vol_dir: Path, log) -> Path:
     try:
         convert_tiff_stack_to_ome_zarr(tiff_source_dir, zarr_dir)
     finally:
-        # Only the converted OME-Zarr store is kept — the source TIFFs are
-        # deleted whether conversion succeeded or failed.
         shutil.rmtree(scratch_dir, ignore_errors=True)
 
     log("Locating OME-Zarr metadata")
     zarr_root = _find_ome_zarr_root(vol_dir)
     if zarr_root is None:
-        # Shouldn't happen — write_image() always emits multiscales metadata —
-        # but don't silently accept a store our own viewer couldn't load.
         raise ValueError("TIFF conversion completed but produced no readable OME-NGFF metadata")
     return zarr_root
 
@@ -339,6 +356,7 @@ def _find_tiff_dir(scratch_dir: Path) -> Optional[Path]:
 @router.post("/{volume_id}/mesh", response_model=VolumeRead)
 def upload_or_replace_mesh(
     volume_id: int,
+    background_tasks: BackgroundTasks,
     mesh_file: UploadFile = File(...),
     session: Session = Depends(get_session),
     editor: User = Depends(require_editor),
@@ -346,16 +364,9 @@ def upload_or_replace_mesh(
     volume = session.get(Volume, volume_id)
     if not volume:
         raise HTTPException(status_code=404, detail="Volume not found")
-    vol_dir = _volume_dir(volume.slug)
-    mesh_filename = Path(mesh_file.filename).name
-    with open(vol_dir / mesh_filename, "wb") as f:
-        shutil.copyfileobj(mesh_file.file, f)
-    volume.mesh_filename = mesh_filename
-    volume.has_mesh = True
-    session.add(volume)
-    session.commit()
+    mesh = attach_mesh_to_volume(session, volume, mesh_file, editor, background_tasks)
     session.refresh(volume)
-    return _volume_read(volume)
+    return _volume_read(volume, mesh)
 
 
 @router.delete("/{volume_id}")
@@ -366,6 +377,7 @@ def delete_volume(
     if not volume:
         raise HTTPException(status_code=404, detail="Volume not found")
     shutil.rmtree(_volume_dir(volume.slug), ignore_errors=True)
+    delete_volume_mesh(session, volume)
     for grant in session.exec(select(VolumeAccess).where(VolumeAccess.volume_id == volume_id)).all():
         session.delete(grant)
     session.delete(volume)
@@ -387,7 +399,7 @@ def list_access(
 @router.post("/{volume_id}/access")
 def grant_access(
     volume_id: int,
-    payload: VolumeAccessGrant,
+    payload: AccessGrant,
     session: Session = Depends(get_session),
     editor: User = Depends(require_editor),
 ):
@@ -433,22 +445,32 @@ def revoke_access(
 def zarr_access_url(
     volume_id: int,
     request: Request,
+    min_level: Optional[int] = Query(
+        None, ge=0,
+        description="Finest OME-NGFF multiscale level index to load (0 = full resolution; "
+                     "higher = coarser). Levels below this are never streamed. Omit for no cap.",
+    ),
     session: Session = Depends(get_session),
     user: User = Depends(get_current_user),
 ):
     volume = session.get(Volume, volume_id)
     if not volume or not _can_see_volume(user, volume, session):
         raise HTTPException(status_code=404, detail="Volume not found")
-    if volume.status != VolumeStatus.ready:
+    if volume.status != AssetStatus.ready:
         raise HTTPException(
             status_code=409,
             detail=(
                 "Volume is still processing"
-                if volume.status == VolumeStatus.processing
+                if volume.status == AssetStatus.processing
                 else "Volume processing failed — see its status log"
             ),
         )
-    token = create_file_token(subject=user.username, volume_id=volume_id, kind="zarr")
+    if min_level is not None and volume.num_lod_levels and min_level >= volume.num_lod_levels:
+        raise HTTPException(
+            status_code=400,
+            detail=f"min_level must be less than this volume's {volume.num_lod_levels} levels",
+        )
+    token = create_file_token(subject=user.username, asset_id=volume_id, kind="zarr", min_lod=min_level)
     # kiln-render's KilnViewer.create() picks its data provider with a plain
     # `url.includes(".zarr")` check — the path segment below must contain that
     # literal substring or it silently falls back to its other (incompatible)
@@ -467,19 +489,46 @@ def zarr_access_url(
 def mesh_access_url(
     volume_id: int, session: Session = Depends(get_session), user: User = Depends(get_current_user)
 ):
+    """Download link for the volume's attached mesh (the original upload).
+    Permission is the volume's: anyone who can see the volume can download it."""
     volume = session.get(Volume, volume_id)
     if not volume or not _can_see_volume(user, volume, session):
         raise HTTPException(status_code=404, detail="Volume not found")
     if not volume.has_mesh:
         raise HTTPException(status_code=404, detail="This volume has no mesh")
-    token = create_file_token(subject=user.username, volume_id=volume_id, kind="mesh")
+    token = create_file_token(subject=user.username, asset_id=volume_id, kind="volume-mesh-download")
     return FileAccessUrl(
         url=f"/api/volumes/{volume_id}/mesh-file/{token}",
         expires_in_minutes=settings.FILE_TOKEN_EXPIRE_MINUTES,
     )
 
 
-def _check_file_token(token: str, volume_id: int, kind: str) -> str:
+@router.get("/{volume_id}/mesh-view-url", response_model=FileAccessUrl)
+def mesh_view_url(
+    volume_id: int, request: Request, session: Session = Depends(get_session), user: User = Depends(get_current_user)
+):
+    """URL of the processed (.nxz) attached mesh for the 3DHOP viewer. Like the
+    download link, it is authorised by the volume, not by a mesh permission."""
+    volume = session.get(Volume, volume_id)
+    if not volume or not _can_see_volume(user, volume, session):
+        raise HTTPException(status_code=404, detail="Volume not found")
+    mesh = get_volume_mesh(session, volume_id)
+    if mesh is None:
+        raise HTTPException(status_code=404, detail="This volume has no viewable mesh")
+    if mesh.status != AssetStatus.ready:
+        raise HTTPException(
+            status_code=409,
+            detail="Mesh is still processing" if mesh.status == AssetStatus.processing else "Mesh processing failed — see the volume's mesh status",
+        )
+    token = create_file_token(subject=user.username, asset_id=volume_id, kind="volume-mesh-view")
+    base = str(request.base_url).rstrip("/")
+    return FileAccessUrl(
+        url=f"{base}/api/volumes/{volume_id}/mesh-view-file/{token}",
+        expires_in_minutes=settings.FILE_TOKEN_EXPIRE_MINUTES,
+    )
+
+
+def _check_file_token(token: str, volume_id: int, kind: str) -> dict:
     payload = decode_token(token)
     if (
         not payload
@@ -488,7 +537,7 @@ def _check_file_token(token: str, volume_id: int, kind: str) -> str:
         or payload.get("vol") != volume_id
     ):
         raise HTTPException(status_code=403, detail="Invalid or expired link")
-    return payload["sub"]
+    return payload
 
 
 @router.get("/{volume_id}/dataset.ome.zarr/{token}/{path:path}")
@@ -498,7 +547,7 @@ def serve_zarr_file(
     """Serves individual chunk/metadata files inside the OME-Zarr store.
     kiln-render performs many small ranged GETs against this — keep it fast and stateless.
     """
-    _check_file_token(token, volume_id, "zarr")
+    payload = _check_file_token(token, volume_id, "zarr")
     volume = session.get(Volume, volume_id)
     if not volume:
         raise HTTPException(status_code=404, detail="Volume not found")
@@ -511,18 +560,97 @@ def serve_zarr_file(
         raise HTTPException(status_code=400, detail="Invalid path")
     if not target.exists() or not target.is_file():
         raise HTTPException(status_code=404, detail="Not found")
-    return FileResponse(target)
+
+    min_lod = payload.get("min_lod")
+    # Every file this endpoint can serve is immutable for the lifetime of
+    # the signed token that grants access to it (a volume's data never
+    # changes after processing finishes, and this URL's content is fully
+    # determined by the token's own claims — same token always means same
+    # bytes). Cache-Control here lets the browser skip re-fetching chunks it
+    # already has on a page reload, or when kiln-render re-requests
+    # something already in cache — capped to the token's own validity
+    # window since the URL 403s once it expires anyway.
+    cache_headers = {"Cache-Control": f"public, max-age={settings.FILE_TOKEN_EXPIRE_MINUTES * 60}, immutable"}
+
+    # Only the store's own root metadata file (no "/" in path — a per-level
+    # array's metadata is at e.g. "5/zarr.json", which has one) ever lists
+    # the multiscale pyramid; everything else (chunk data, per-level array
+    # metadata) is served completely unmodified regardless of min_lod, since
+    # capping only means "which levels are listed as available", not
+    # anything about the bytes of the levels that remain.
+    if min_lod and "/" not in path and path in (".zattrs", "zarr.json"):
+        rewritten = _truncate_multiscales_json(target.read_bytes(), min_lod)
+        if rewritten is not None:
+            media_type = "application/json"
+            return Response(content=rewritten, media_type=media_type, headers=cache_headers)
+    return FileResponse(target, headers=cache_headers)
+
+
+def _truncate_multiscales_json(raw: bytes, min_lod: int) -> Optional[bytes]:
+    """Drops multiscale dataset entries finer than min_lod (i.e. keeps
+    datasets[min_lod:]) from a root metadata file's content, in whichever of
+    the two OME-NGFF attribute shapes it uses. The chunk data those dropped
+    entries pointed at is simply never requested by the client afterward —
+    nothing on disk is touched. Returns None (meaning: serve the original
+    file unchanged) if the content isn't parseable or has no multiscales."""
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+
+    # v2 (.zattrs): multiscales sits at the top level of the file itself.
+    # v3 (zarr.json): it's nested under "attributes" (and possibly "ome").
+    is_v3 = "attributes" in data and isinstance(data.get("attributes"), dict)
+    attrs = data["attributes"] if is_v3 else data
+    multiscales = _get_multiscales(attrs)
+    if not multiscales or not isinstance(multiscales, list):
+        return None
+
+    changed = False
+    for entry in multiscales:
+        if not isinstance(entry, dict):
+            continue
+        datasets = entry.get("datasets")
+        if isinstance(datasets, list) and 0 < min_lod < len(datasets):
+            entry["datasets"] = datasets[min_lod:]
+            changed = True
+    if not changed:
+        return None
+    return json.dumps(data).encode("utf-8")
 
 
 @router.get("/{volume_id}/mesh-file/{token}")
 def serve_mesh_file(
     volume_id: int, token: str, session: Session = Depends(get_session)
 ):
-    _check_file_token(token, volume_id, "mesh")
+    _check_file_token(token, volume_id, "volume-mesh-download")
     volume = session.get(Volume, volume_id)
     if not volume or not volume.has_mesh:
         raise HTTPException(status_code=404, detail="Not found")
-    mesh_path = _volume_dir(volume.slug) / volume.mesh_filename
-    if not mesh_path.exists():
+    mesh = get_volume_mesh(session, volume_id)
+    mesh_path = volume_mesh_source(mesh)
+    filename = volume.mesh_filename or f"{volume.slug}.{mesh.file_extension}"
+    if mesh_path is None or not mesh_path.exists():
         raise HTTPException(status_code=404, detail="Not found")
-    return FileResponse(mesh_path, filename=volume.mesh_filename)
+    return FileResponse(
+        mesh_path,
+        filename=filename,
+        headers={"Cache-Control": f"public, max-age={settings.FILE_TOKEN_EXPIRE_MINUTES * 60}, immutable"},
+    )
+
+
+@router.get("/{volume_id}/mesh-view-file/{token}")
+def serve_mesh_view_file(
+    volume_id: int, token: str, session: Session = Depends(get_session)
+):
+    _check_file_token(token, volume_id, "volume-mesh-view")
+    mesh = get_volume_mesh(session, volume_id)
+    if mesh is None or not mesh.mesh_filename:
+        raise HTTPException(status_code=404, detail="Not found")
+    nxz_path = volume_mesh_file(mesh)
+    if not nxz_path.exists():
+        raise HTTPException(status_code=404, detail="Not found")
+    return FileResponse(
+        nxz_path,
+        headers={"Cache-Control": f"public, max-age={settings.FILE_TOKEN_EXPIRE_MINUTES * 60}, immutable"},
+    )
