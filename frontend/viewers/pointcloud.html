@@ -95,7 +95,8 @@
       try {
         pc = await api.getPointCloud(pcId);
       } catch (err) {
-        content.innerHTML = `<div class="error-box" style="margin:1.4em">${err.message}</div>`;
+        const safeMessage = escapeHtml(String(err?.message ?? "Failed to load point cloud."));
+        content.innerHTML = `<div class="error-box" style="margin:1.4em">${safeMessage}</div>`;
         return;
       }
 
