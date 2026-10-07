@@ -15,5 +15,5 @@ dask==2026.8.0
 ome-zarr==0.19.2
 zarr==3.4.0
 # --- Mesh and point cloud processing (backend/app/helpers/mesh.py) ---
-trimesh==5.1.0
+trimesh==5.1.1
 
