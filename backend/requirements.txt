@@ -1,6 +1,6 @@
 fastapi==0.141.1
 uvicorn[standard]==0.52.4
-sqlmodel==0.0.42
+sqlmodel==0.0.47
 python-jose[cryptography]==3.5.0
 passlib==1.7.4
 bcrypt==4.0.1
