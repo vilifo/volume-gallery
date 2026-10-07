@@ -12,6 +12,24 @@
 */
 
 :root {
+  --radius: 3px;
+  --sans: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --mono: ui-monospace, "SF Mono", "Cascadia Mono", Consolas, monospace;
+}
+
+/*
+  Theming. Dark is the base palette. With no stored choice the page follows the
+  OS (prefers-color-scheme); the rail's theme switch writes data-theme="light"
+  or "dark" on <html> (see js/api.js, js/theme-init.js) to override it.
+
+  Floating viewer chrome that sits on top of the always-black 3D canvas keeps the
+  dark palette in either theme (it is listed in the first selector, which
+  re-declares the dark values on those elements themselves).
+*/
+:root,
+.theme-dark,
+.ctl-panel, .ctl-chip, .viewer-load-chip, .viewer-stats-hud,
+.mesh-toolbar, .viewer-status {
   --bg: #14171c;
   --panel: #1c2026;
   --panel-raised: #22262d;
@@ -20,11 +38,54 @@
   --text-dim: #8b919b;
   --accent: #e8a33d;
   --accent-dim: #a97a34;
+  --accent-hover: #f0ae4d;
+  --on-accent: #1a1400;
   --danger: #d9694f;
   --ok: #6fae7c;
-  --radius: 3px;
-  --sans: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-  --mono: ui-monospace, "SF Mono", "Cascadia Mono", Consolas, monospace;
+  --row-hover: rgba(255, 255, 255, 0.02);
+  --swatch-a: #2b3038;
+  --swatch-b: #1c2026;
+  color-scheme: dark;
+}
+
+:root[data-theme="light"] {
+  --bg: #f4f3ef;
+  --panel: #ffffff;
+  --panel-raised: #eeece7;
+  --line: #d8d5cd;
+  --text: #1d2127;
+  --text-dim: #5f6671;
+  --accent: #a85f00;
+  --accent-dim: #c98a3c;
+  --accent-hover: #8f5000;
+  --on-accent: #ffffff;
+  --danger: #c0462d;
+  --ok: #357a48;
+  --row-hover: rgba(0, 0, 0, 0.03);
+  --swatch-a: #e4e1da;
+  --swatch-b: #f4f3ef;
+  color-scheme: light;
+}
+
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    --bg: #f4f3ef;
+    --panel: #ffffff;
+    --panel-raised: #eeece7;
+    --line: #d8d5cd;
+    --text: #1d2127;
+    --text-dim: #5f6671;
+    --accent: #a85f00;
+    --accent-dim: #c98a3c;
+    --accent-hover: #8f5000;
+    --on-accent: #ffffff;
+    --danger: #c0462d;
+    --ok: #357a48;
+    --row-hover: rgba(0, 0, 0, 0.03);
+    --swatch-a: #e4e1da;
+    --swatch-b: #f4f3ef;
+    color-scheme: light;
+  }
 }
 
 * { box-sizing: border-box; }
@@ -63,10 +124,10 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 button.primary {
   background: var(--accent);
   border-color: var(--accent);
-  color: #1a1400;
+  color: var(--on-accent);
   font-weight: 600;
 }
-button.primary:hover { background: #f0ae4d; }
+button.primary:hover { background: var(--accent-hover); }
 button.danger { border-color: var(--danger); color: var(--danger); }
 button.danger:hover { background: rgba(217,105,79,0.12); }
 button:disabled { opacity: 0.5; cursor: not-allowed; }
@@ -114,6 +175,48 @@ label { display: block; font-size: 0.85em; color: var(--text-dim); margin-bottom
 .rail .spacer { flex: 1; }
 .rail .signed-in-as { font-size: 0.85em; color: var(--text-dim); margin-bottom: 0.6em; }
 
+/* --- theme switch: 3-position icon switch (light / system / dark) --- */
+.theme-switch {
+  --pos: 1;
+  position: relative;
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  width: 108px;
+  padding: 2px;
+  margin-bottom: 0.8em;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--bg);
+}
+.theme-switch[data-pos="0"] { --pos: 0; }
+.theme-switch[data-pos="1"] { --pos: 1; }
+.theme-switch[data-pos="2"] { --pos: 2; }
+.theme-switch::before {            /* sliding thumb */
+  content: "";
+  position: absolute;
+  top: 2px; bottom: 2px; left: 2px;
+  width: calc((100% - 4px) / 3);
+  border-radius: 999px;
+  background: var(--panel-raised);
+  border: 1px solid var(--line);
+  transform: translateX(calc(var(--pos) * 100%));
+  transition: transform 0.18s ease;
+}
+.theme-switch button {
+  position: relative;              /* above the thumb */
+  display: flex; align-items: center; justify-content: center;
+  height: 24px;
+  padding: 0;
+  border: none;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-dim);
+}
+.theme-switch button:hover { color: var(--text); border: none; }
+.theme-switch button[aria-checked="true"] { color: var(--accent); }
+.theme-switch svg { width: 14px; height: 14px; }
+@media (prefers-reduced-motion: reduce) { .theme-switch::before { transition: none; } }
+
 main { flex: 1; padding: 2.2em 2.6em; max-width: 1100px; }
 
 h1 { font-size: 1.5em; margin: 0 0 0.2em; }
@@ -131,11 +234,11 @@ h2 { font-size: 1.1em; margin: 0 0 0.8em; }
   padding: 0.9em 0;
   border-bottom: 1px solid var(--line);
 }
-.asset-row:hover { background: rgba(255,255,255,0.02); }
+.asset-row:hover { background: var(--row-hover); }
 .swatch {
   width: 48px; height: 48px;
   border-radius: var(--radius);
-  background: linear-gradient(135deg, #2b3038, #1c2026);
+  background: linear-gradient(135deg, var(--swatch-a), var(--swatch-b));
   border: 1px solid var(--line);
   flex-shrink: 0;
   display: flex; align-items: center; justify-content: center;
@@ -247,6 +350,7 @@ th { color: var(--text-dim); font-weight: 500; font-size: 0.82em; }
   .rail { width: 100%; flex-direction: row; align-items: center; padding: 1em; }
   .rail nav { flex-direction: row; }
   .rail .spacer { display: none; }
+  .theme-switch { margin: 0 0.8em 0 0; }
   main { padding: 1.4em; }
   .viewer-layout { flex-direction: column; }
   .viewer-side { width: 100%; }

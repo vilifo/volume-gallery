@@ -4,7 +4,8 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Mesh Viewer — Volume Gallery</title>
-<link rel="stylesheet" href="/css/style.css" />
+<script src="/js/theme-init.js?v=theme2"></script>
+<link rel="stylesheet" href="/css/style.css?v=theme2" />
 <link rel="stylesheet" href="/vendor/3dhop/stylesheet/3dhop.css" />
 <style>
   body.viewer-page { overflow: hidden; }
@@ -63,7 +64,7 @@
   <script src="/vendor/3dhop/js/trackball_turntable.js"></script>
 
   <script type="module">
-    import { api, requireLogin, getRole, getUsername, renderShell, wireLogout } from "/js/api.js";
+    import { api, requireLogin, getRole, getUsername, renderShell, wireLogout } from "/js/api.js?v=theme2";
 
     requireLogin();
     const role = getRole();
