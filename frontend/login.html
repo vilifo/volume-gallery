@@ -4,7 +4,8 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Sign in — Volume Gallery</title>
-<link rel="stylesheet" href="/css/style.css" />
+<script src="/js/theme-init.js?v=theme2"></script>
+<link rel="stylesheet" href="/css/style.css?v=theme2" />
 </head>
 <body>
   <div class="login-shell">
@@ -27,7 +28,7 @@
   </div>
 
   <script type="module">
-    import { api, setSession, getToken } from "/js/api.js";
+    import { api, setSession, getToken } from "/js/api.js?v=theme2";
 
     if (getToken()) window.location.href = "/index.html";
 

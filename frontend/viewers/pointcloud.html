@@ -4,8 +4,13 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Point Cloud Viewer — Volume Gallery</title>
-<link rel="stylesheet" href="/css/style.css" />
+<script src="/js/theme-init.js?v=theme2"></script>
+<link rel="stylesheet" href="/css/style.css?v=theme2" />
 <link rel="stylesheet" href="/vendor/potree/potree.css" />
+<link rel="stylesheet" href="/vendor/libs/jquery-ui/jquery-ui.min.css" />
+<link rel="stylesheet" href="/vendor/libs/openlayers3/ol.css" />
+<link rel="stylesheet" href="/vendor/libs/spectrum/spectrum.css" />
+<link rel="stylesheet" href="/vendor/libs/jstree/themes/mixed/style.css" />
 <style>
   body.viewer-page { overflow: hidden; }
   body.viewer-page .app-shell { height: 100vh; }
@@ -24,27 +29,13 @@
   .icon-btn svg { width: 14px; height: 14px; flex-shrink: 0; }
 
   .pc-render-area { flex: 1; min-height: 0; position: relative; background: #000; }
-  #potree_render_area { width: 100%; height: 100%; }
-  /* Potree's own sidebar/menu chrome is never loaded (no loadGUI() call —
-     see the script below), but a couple of its panels default to visible
-     regardless; keep them out of the way rather than fighting each one. */
-  #potree_sidebar_container, .potree_menu_toggle { display: none !important; }
-
-  .pc-panel {
-    position: absolute; top: 12px; right: 12px; z-index: 5;
-    width: 220px;
-    background: rgba(26, 29, 35, 0.92);
-    backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
-    border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 10px;
-    padding: 0.8em;
-    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
-    color: var(--text); font-size: 12px;
+  /* Potree's native sidebar (sidebar.html) is loaded by viewer.loadGUI() into
+     #potree_sidebar_container; viewer.toggleSidebar() shifts the render area's
+     "left" offset, so it must be absolutely positioned and sized by its edges. */
+  .pc-render-area .potree_container { position: absolute; inset: 0; }
+  #potree_render_area {
+    position: absolute; top: 0; right: 0; bottom: 0; left: 0; width: auto; height: auto;
   }
-  .pc-panel .row { display: flex; align-items: center; justify-content: space-between; gap: 0.6em; margin-bottom: 0.6em; }
-  .pc-panel .row:last-child { margin-bottom: 0; }
-  .pc-panel label { color: var(--text-dim); font-size: 11px; }
-  .pc-panel input[type="range"] { flex: 1; margin-left: 0.6em; }
-  .pc-panel .value { font-family: var(--mono); font-size: 10.5px; color: var(--text-dim); width: 3.5em; text-align: right; }
 
   .viewer-status {
     position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
@@ -57,13 +48,19 @@
   <div class="app-shell" id="shell"></div>
 
   <script src="/vendor/libs/jquery/jquery-3.1.1.js"></script>
+  <script src="/vendor/libs/spectrum/spectrum.js"></script>
+  <script src="/vendor/libs/jquery-ui/jquery-ui.min.js"></script>
   <script src="/vendor/libs/other/BinaryHeap.js"></script>
   <script src="/vendor/libs/tween/tween.min.js"></script>
+  <script src="/vendor/libs/d3/d3.js"></script>
   <script src="/vendor/libs/proj4/proj4.js"></script>
+  <script src="/vendor/libs/openlayers3/ol.js"></script>
+  <script src="/vendor/libs/i18next/i18next.js"></script>
+  <script src="/vendor/libs/jstree/jstree.js"></script>
   <script src="/vendor/potree/potree.js"></script>
 
   <script type="module">
-    import { api, requireLogin, getRole, getUsername, renderShell, wireLogout } from "/js/api.js";
+    import { api, requireLogin, getRole, getUsername, renderShell, wireLogout } from "/js/api.js?v=theme2";
 
     requireLogin();
     const role = getRole();
@@ -111,23 +108,9 @@
           </div>
         </div>
         <div class="pc-render-area" id="render-area">
-          <div id="potree_render_area"></div>
-          <div id="potree_sidebar_container"></div>
-          <div class="pc-panel">
-            <div class="row">
-              <label for="pb-slider">Point budget</label>
-              <input type="range" id="pb-slider" min="100000" max="4000000" step="100000" value="1000000">
-              <span class="value" id="pb-value">1.0M</span>
-            </div>
-            <div class="row">
-              <label for="ps-slider">Point size</label>
-              <input type="range" id="ps-slider" min="0.5" max="4" step="0.1" value="1">
-              <span class="value" id="ps-value">1.0</span>
-            </div>
-            <div class="row">
-              <label for="edl-toggle">Eye-dome lighting</label>
-              <input type="checkbox" id="edl-toggle" checked>
-            </div>
+          <div class="potree_container">
+            <div id="potree_render_area"></div>
+            <div id="potree_sidebar_container"></div>
           </div>
           <div class="viewer-status" id="status">Loading point cloud viewer\u2026</div>
         </div>
@@ -168,6 +151,12 @@
         viewer.setFOV(60);
         viewer.setPointBudget(1_000_000);
         viewer.setBackground("black");
+        viewer.loadGUI(() => {
+          viewer.setLanguage("en");
+          $("#menu_appearance").next().show();
+          $("#menu_tools").next().show();
+          viewer.toggleSidebar();
+        });
 
         Potree.loadPointCloud(`${access.url}metadata.json`, "cloud", (e) => {
           if (!e || !e.pointcloud) {
@@ -181,26 +170,6 @@
           pointcloud.material.pointSizeType = Potree.PointSizeType.ADAPTIVE;
           viewer.fitToScreen();
           statusEl.style.display = "none";
-
-          const pbSlider = document.getElementById("pb-slider");
-          const pbValue = document.getElementById("pb-value");
-          pbSlider.addEventListener("input", () => {
-            const n = parseInt(pbSlider.value, 10);
-            viewer.setPointBudget(n);
-            pbValue.textContent = `${(n / 1_000_000).toFixed(1)}M`;
-          });
-
-          const psSlider = document.getElementById("ps-slider");
-          const psValue = document.getElementById("ps-value");
-          psSlider.addEventListener("input", () => {
-            const v = parseFloat(psSlider.value);
-            pointcloud.material.size = v;
-            psValue.textContent = v.toFixed(1);
-          });
-
-          document.getElementById("edl-toggle").addEventListener("change", (evt) => {
-            viewer.setEDLEnabled(evt.target.checked);
-          });
         });
       } catch (err) {
         statusEl.textContent = `Could not load point cloud: ${err.message}`;

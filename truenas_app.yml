@@ -1,9 +1,6 @@
 services:
   volume-gallery:
-    build:
-      context: .
-      dockerfile: backend/Dockerfile
-    image: ${VG_IMAGE:-volume-gallery:latest}
+    image: vilfoges/volume-gallery:latest
     container_name: volume-gallery
     restart: unless-stopped
     init: true
@@ -18,20 +15,18 @@ services:
     expose:
       - "8000"
     environment:
-      VG_SECRET_KEY: ${VG_SECRET_KEY}
+      VG_SECRET_KEY: your_key_here
       VG_ADMIN_USER: ${VG_ADMIN_USER:-admin}
-      VG_ADMIN_PASSWORD: ${VG_ADMIN_PASSWORD}
+      VG_ADMIN_PASSWORD: your_password_here
       VG_ACCESS_TOKEN_MINUTES: ${VG_ACCESS_TOKEN_MINUTES:-480}
       VG_FILE_TOKEN_MINUTES: ${VG_FILE_TOKEN_MINUTES:-30}
       VG_PROCESSING_DIR: ${VG_PROCESSING_DIR:-}
     volumes:
-      - ${VG_HOST_DATA_DIR:-./data}:/data
-      - ${VG_HOST_PROCESSING_DIR:-./processing}:/processing
+      - /mnt/your/path/to/data/here:/data
+      - /mnt/your/path/to/processing/here:/processing
 
   nginx:
-    build:
-      context: ./nginx
-      dockerfile: Dockerfile
+    image: vilfoges/volume-gallery-nginx:latest
     container_name: volume-gallery-nginx
     restart: unless-stopped
     logging:
@@ -49,4 +44,4 @@ services:
       VG_HTTPS_PORT: ${VG_HTTPS_PORT:-8443}
       NGINX_ENVSUBST_OUTPUT_DIR: /etc/nginx
     volumes:
-      - ${VG_CERT_DIR:-./nginx/certs}:/etc/nginx/certs:ro
+      - /mnt/your/path/to/certs/here:/etc/nginx/certs:ro

@@ -4,7 +4,8 @@
     <meta charset="UTF-8"/>
     <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
     <title>Upload asset — Volume Gallery</title>
-    <link rel="stylesheet" href="/css/style.css"/>
+    <script src="/js/theme-init.js?v=theme2"></script>
+    <link rel="stylesheet" href="/css/style.css?v=theme2"/>
     <style>
         .source-toggle {
             display: flex;
@@ -21,7 +22,7 @@
         .source-toggle button.active {
             background: var(--accent);
             border-color: var(--accent);
-            color: #1a1400;
+            color: var(--on-accent);
             font-weight: 600;
         }
 
@@ -118,7 +119,7 @@
 <div class="app-shell" id="shell"></div>
 
 <script type="module">
-    import {api, requireLogin, getRole, getUsername, renderShell, wireLogout} from "/js/api.js";
+    import {api, requireLogin, getRole, getUsername, renderShell, wireLogout} from "/js/api.js?v=theme2";
 
     requireLogin();
     const role = getRole();

@@ -126,7 +126,6 @@ export const api = {
   revokeAccess(id, userId) {
     return request(`/api/volumes/${id}/access/${userId}`, { method: "DELETE" });
   },
-  volumeDownloadAccessUrl(id) { return request(`/api/volumes/${id}/download-access-url`); },
 
   // meshes
   listMeshes() { return request("/api/meshes"); },
@@ -189,6 +188,54 @@ export const api = {
   deleteUser(id) { return request(`/api/users/${id}`, { method: "DELETE" }); },
 };
 
+// Theme preference: "light" | "dark" | absent (= follow the OS setting).
+// Keep THEME_KEY in sync with js/theme-init.js, which applies it before first paint.
+const THEME_KEY = "vg_theme";
+
+export function getThemePref() {
+  const v = localStorage.getItem(THEME_KEY);
+  return v === "light" || v === "dark" ? v : "system";
+}
+
+export function setThemePref(pref) {
+  if (pref === "light" || pref === "dark") {
+    localStorage.setItem(THEME_KEY, pref);
+    document.documentElement.dataset.theme = pref;
+  } else {
+    localStorage.removeItem(THEME_KEY);
+    delete document.documentElement.dataset.theme;
+  }
+}
+
+const THEME_ORDER = ["light", "system", "dark"]; // switch positions, left to right
+
+export function wireTheme() {
+  const sw = document.querySelector(".theme-switch");
+  if (!sw) return;
+  const buttons = [...sw.querySelectorAll("button[data-theme-pref]")];
+  const sync = () => {
+    const cur = getThemePref();
+    sw.dataset.pos = String(THEME_ORDER.indexOf(cur));
+    buttons.forEach((b) => {
+      const on = b.dataset.themePref === cur;
+      b.setAttribute("aria-checked", String(on));
+      b.tabIndex = on ? 0 : -1;
+    });
+  };
+  const choose = (pref) => { setThemePref(pref); sync(); };
+  buttons.forEach((b) => b.addEventListener("click", () => choose(b.dataset.themePref)));
+  sw.addEventListener("keydown", (e) => {
+    const step = e.key === "ArrowRight" || e.key === "ArrowDown" ? 1
+      : e.key === "ArrowLeft" || e.key === "ArrowUp" ? -1 : 0;
+    if (!step) return;
+    e.preventDefault();
+    const i = (THEME_ORDER.indexOf(getThemePref()) + step + THEME_ORDER.length) % THEME_ORDER.length;
+    choose(THEME_ORDER[i]);
+    buttons[i].focus();
+  });
+  sync();
+}
+
 export function renderShell(activePage, role, username) {
   const navItems = [{ href: "/index.html", label: "Gallery", key: "gallery" }];
   if (role === "editor" || role === "admin") {
@@ -209,6 +256,17 @@ export function renderShell(activePage, role, username) {
       <div class="role-tag">${role}</div>
       <nav>${nav}</nav>
       <div class="spacer"></div>
+      <div class="theme-switch" role="radiogroup" aria-label="Theme" data-pos="1">
+        <button type="button" role="radio" data-theme-pref="light" aria-label="Light theme" title="Light">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
+        </button>
+        <button type="button" role="radio" data-theme-pref="system" aria-label="Follow system theme" title="System (follow PC setting)">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/></svg>
+        </button>
+        <button type="button" role="radio" data-theme-pref="dark" aria-label="Dark theme" title="Dark">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
+        </button>
+      </div>
       <div class="signed-in-as">Signed in as <strong>${username}</strong></div>
       <button id="logout-btn">Sign out</button>
     </div>
@@ -216,6 +274,7 @@ export function renderShell(activePage, role, username) {
 }
 
 export function wireLogout() {
+  wireTheme(); // every page that renders the shell already calls this
   const btn = document.getElementById("logout-btn");
   if (btn) {
     btn.addEventListener("click", () => {
