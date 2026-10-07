@@ -12,6 +12,7 @@ from ..schemas import MeshRead, AssetStatusRead, AccessGrant, GrantedUserRead, F
 from ..deps import get_current_user, require_editor
 from ..security import create_file_token, decode_token
 from ..config import settings
+from .. import workdir
 from ..helpers import convert_mesh_to_nxz
 from ..utils import SLUG_RE, _now  # shared slug validation + timestamp helper
 
@@ -20,6 +21,12 @@ router = APIRouter(prefix="/api/meshes", tags=["meshes"])
 
 def _mesh_dir(slug: str) -> Path:
     return settings.MESHES_DIR / slug
+
+
+def _work_dir(slug: str) -> Path:
+    """Where this mesh's upload is staged and converted: its own data folder,
+    or — if VG_PROCESSING_DIR is set — a scratch folder (see workdir.py)."""
+    return workdir.work_dir_for("meshes", slug, _mesh_dir(slug))
 
 
 def _can_see_mesh(user: User, mesh: Mesh, session: Session) -> bool:
@@ -80,6 +87,7 @@ def delete_volume_mesh(session: Session, volume) -> None:
     """Removes the volume's attached mesh (files + row). Caller commits."""
     for m in session.exec(select(Mesh).where(Mesh.volume_id == volume.id)).all():
         shutil.rmtree(_mesh_dir(m.slug), ignore_errors=True)
+        workdir.discard_job("meshes", m.slug)
         session.delete(m)
     volume.has_mesh = False
     volume.mesh_filename = None
@@ -96,10 +104,12 @@ def attach_mesh_to_volume(session: Session, volume, mesh_file: UploadFile, edito
     mesh_dir = _mesh_dir(slug)
     mesh_dir.mkdir(parents=True, exist_ok=False)
     try:
-        with open(mesh_dir / f"_upload.{source_ext}", "wb") as f:
+        work_dir = workdir.prepare_work_dir("meshes", slug, mesh_dir)  # == mesh_dir unless VG_PROCESSING_DIR is set
+        with open(work_dir / f"_upload.{source_ext}", "wb") as f:
             shutil.copyfileobj(mesh_file.file, f)
     except Exception as exc:  # noqa: BLE001
         shutil.rmtree(mesh_dir, ignore_errors=True)
+        workdir.discard_job("meshes", slug)
         raise HTTPException(status_code=400, detail=f"Could not save mesh upload: {exc}")
 
     mesh = Mesh(
@@ -175,11 +185,13 @@ def create_mesh(
 
     source_ext = Path(mesh_file.filename or "").suffix.lstrip(".").lower() or "bin"
     try:
-        upload_path = mesh_dir / f"_upload.{source_ext}"
+        work_dir = workdir.prepare_work_dir("meshes", slug, mesh_dir)  # == mesh_dir unless VG_PROCESSING_DIR is set
+        upload_path = work_dir / f"_upload.{source_ext}"
         with open(upload_path, "wb") as f:
             shutil.copyfileobj(mesh_file.file, f)
     except Exception as exc:  # noqa: BLE001
         shutil.rmtree(mesh_dir, ignore_errors=True)
+        workdir.discard_job("meshes", slug)
         raise HTTPException(status_code=400, detail=f"Could not save upload: {exc}")
 
     mesh = Mesh(
@@ -209,14 +221,26 @@ def _process_mesh_upload(mesh_id: int, mesh_dir_str: str) -> None:
             session.add(mesh)
             session.commit()
 
+        # Conversion runs in work_dir: mesh_dir itself, or a scratch folder when
+        # VG_PROCESSING_DIR is set — then the original upload (kept for downloads)
+        # and the converted .nxz are moved into mesh_dir when done.
+        work_dir = _work_dir(mesh.slug)
+        staged = work_dir != mesh_dir
         try:
-            nxz_path = convert_mesh_to_nxz(mesh_dir, log)
+            nxz_path = convert_mesh_to_nxz(work_dir, log)
+            if staged:
+                log("Moving results into the data directory")
+                for produced in (work_dir / f"_upload.{mesh.file_extension}", nxz_path):
+                    workdir.move_into_place(produced, mesh_dir / produced.name)
             mesh.mesh_filename = nxz_path.name
             mesh.status = AssetStatus.ready
             log("Ready")
         except Exception as exc:  # noqa: BLE001 - the failure message IS the point, shown to the user
             mesh.status = AssetStatus.failed
             log(f"Failed: {exc}")
+        finally:
+            if staged:
+                workdir.discard_job("meshes", mesh.slug)  # success or failure: scratch is never kept
         session.add(mesh)
         session.commit()
 
@@ -228,6 +252,7 @@ def delete_mesh(mesh_id: int, session: Session = Depends(get_session), _editor: 
         raise HTTPException(status_code=404, detail="Mesh not found")
     _require_standalone(mesh, "Delete the volume (or replace its mesh) instead")
     shutil.rmtree(_mesh_dir(mesh.slug), ignore_errors=True)
+    workdir.discard_job("meshes", mesh.slug)
     for grant in session.exec(select(MeshAccess).where(MeshAccess.mesh_id == mesh_id)).all():
         session.delete(grant)
     session.delete(mesh)

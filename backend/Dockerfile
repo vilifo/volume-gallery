@@ -27,6 +27,11 @@ RUN mkdir -p /opt/PotreeConverter/dist_libs && \
 #   docker build -f backend/Dockerfile -t volume-gallery .
 FROM python:3.12-slim
 
+# Unbuffered stdout/stderr so the per-job progress lines the app prints show up in
+# `docker logs` as they happen; no .pyc files written into the image layers/mounts.
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
 # Install system dependencies required for CMake and building Nexus
 RUN apt-get update && apt-get install -y \
     wget \
@@ -34,6 +39,7 @@ RUN apt-get update && apt-get install -y \
     ca-certificates \
     unzip \
     libtbb12 \
+    libgl1 \
     && rm -rf /var/lib/apt/lists/*
 
 # Create a dedicated directory for PotreeConverter
@@ -94,9 +100,20 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY backend/app ./app
 COPY frontend /frontend
 
+# /processing is the mount point for the optional scratch directory (set
+# VG_PROCESSING_DIR=/processing to use it, see the README). No VOLUME for it:
+# when nothing is mounted there, an anonymous volume would just pile up.
+RUN mkdir -p /data /processing
+
 ENV VG_DATA_DIR=/data
 VOLUME ["/data"]
 
 EXPOSE 8000
+
+# The static frontend at / needs no login, so a 200 there means uvicorn is up and serving.
+# nginx waits for this (see docker-compose.yml) instead of starting while the app boots;
+# the first probe runs one interval after start, hence the short interval.
+HEALTHCHECK --interval=10s --timeout=5s --start-period=30s --retries=3 \
+    CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/', timeout=4)"]
 
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers", "--forwarded-allow-ips=*"]

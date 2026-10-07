@@ -1,5 +1,7 @@
 import os
+import tempfile
 from pathlib import Path  # noqa: E402
+from typing import Optional
 
 class Settings:
     # --- Security ---
@@ -16,6 +18,20 @@ class Settings:
     MESHES_DIR: Path = DATA_DIR / "meshes"
     POINTCLOUDS_DIR: Path = DATA_DIR / "pointclouds"
     DB_PATH: Path = DATA_DIR / "gallery.db"
+
+    # Optional scratch ("processing") directory. When set, everything heavy —
+    # staging of uploads, archive extraction, TIFF -> OME-Zarr conversion, mesh
+    # and point-cloud conversion, and the temp files of the web server and of
+    # the external converters — happens here instead of inside DATA_DIR; only
+    # the finished result is moved into DATA_DIR. In Docker, mount a host
+    # directory (ideally on a fast disk) and point this at the mount point,
+    # e.g. VG_PROCESSING_DIR=/processing. Leave unset/empty to process inside
+    # DATA_DIR as before.
+    PROCESSING_DIR: Optional[Path] = (
+        Path(os.environ["VG_PROCESSING_DIR"].strip())
+        if os.environ.get("VG_PROCESSING_DIR", "").strip()
+        else None
+    )
 
     # --- External processing tools ---
     # These binaries are NOT bundled with this app — see README's "Meshes and
@@ -44,3 +60,13 @@ settings = Settings()
 settings.VOLUMES_DIR.mkdir(parents=True, exist_ok=True)
 settings.MESHES_DIR.mkdir(parents=True, exist_ok=True)
 settings.POINTCLOUDS_DIR.mkdir(parents=True, exist_ok=True)
+
+if settings.PROCESSING_DIR is not None:
+    # Large uploads are spooled to temp files by the web framework while the
+    # request is being parsed, and the external converters (nxsbuild,
+    # PotreeConverter) honour TMPDIR — point both at the processing directory
+    # so none of that lands in the container's writable layer (/tmp).
+    _tmp = settings.PROCESSING_DIR / ".tmp"
+    _tmp.mkdir(parents=True, exist_ok=True)
+    tempfile.tempdir = str(_tmp)
+    os.environ["TMPDIR"] = str(_tmp)

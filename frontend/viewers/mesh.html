@@ -112,7 +112,8 @@
           mesh = await api.getMesh(meshId);
         }
       } catch (err) {
-        content.innerHTML = `<div class="error-box" style="margin:1.4em">${err.message}</div>`;
+        const safeMessage = escapeHtml(String(err?.message ?? "Failed to load mesh."));
+        content.innerHTML = `<div class="error-box" style="margin:1.4em">${safeMessage}</div>`;
         return;
       }
 

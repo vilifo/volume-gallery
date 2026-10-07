@@ -19,6 +19,7 @@ frontend/   Static HTML/CSS/JS gallery UI + vendored kiln-render library
 nginx/      Reverse proxy config + self-signed cert generator (see below)
 .github/    GitHub Actions workflow that builds & publishes to Docker Hub
 data/       (created at runtime) SQLite DB + one folder per volume
+processing/ (optional, created at runtime) scratch space for uploads being processed
 ```
 
 - Each volume is a folder on disk containing its OME-Zarr store and an
@@ -131,6 +132,52 @@ The app is then at `https://<host>:8443/` (or whatever `VG_HTTPS_PORT` you
 set — nginx redirects plain `http://` to `https://` automatically). See
 "Putting it behind HTTPS" below for what that cert script does and your
 options if you'd rather use a real certificate.
+
+### Processing directory (optional)
+
+By default an upload is saved, unpacked and converted inside its own folder
+under `/data`. If `/data` sits on slow or precious storage (a NAS dataset with
+snapshots, say), you can have all of that happen in a separate scratch
+directory instead — the data is still stored in `/data`; only the *processing*
+moves. Set these in `.env`:
+
+```bash
+VG_PROCESSING_DIR=/processing                      # blank (the default) = process inside /data
+VG_HOST_PROCESSING_DIR=/mnt/scratch/volume-gallery  # host folder mounted at /processing
+```
+
+then `docker compose up -d`. `VG_HOST_PROCESSING_DIR` is a plain bind mount,
+so it can be any host directory — ideally on a fast disk that isn't the data
+dataset (a tmpfs/RAM disk works too if it is big enough).
+
+What happens with it enabled:
+
+- Uploads (zip archives, individually uploaded TIFF slices, meshes, point
+  clouds) are staged in `<processing>/<volumes|meshes|pointclouds>/<slug>/`,
+  extraction and conversion run there, and the finished OME-Zarr store, mesh
+  files or Potree octree are then moved into `/data`. The volume's folder in
+  `/data` is created at upload time, so slugs are still reserved there.
+- The spooled temp files of large uploads and the temp files of the external
+  converters (`nxsbuild`, `PotreeConverter`) go to `<processing>/.tmp`, so none
+  of it ends up in the container's `/tmp`.
+- The scratch folder of a job is deleted when it finishes, whether it
+  succeeded or failed. The status log shows a "Moving … into the data
+  directory" step while the result is being copied across.
+- Leave room for roughly 2–3× the size of your largest upload.
+- On startup, scratch folders left behind by a crash or restart are removed.
+  Assets that were still processing at that point (a restart kills the
+  background job) are marked `failed` with an explanatory log line — delete
+  and re-upload them. Volumes still waiting for their TIFF slices keep theirs.
+
+The same option works without Docker: `export VG_PROCESSING_DIR=/some/dir`.
+
+### Running as a non-root user (optional)
+
+The app container runs as root by default. To run it as another user — on
+TrueNAS SCALE typically the `apps` user — set `VG_UID` and `VG_GID` in `.env`
+(see `.env.example`) and make the host folders behind `VG_HOST_DATA_DIR` (and
+`VG_HOST_PROCESSING_DIR`, if you use it) writable by that user, e.g.
+`chown -R 568:568 /mnt/tank/apps/volume-gallery/data`.
 
 ---
 

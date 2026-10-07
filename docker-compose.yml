@@ -5,9 +5,21 @@
         "context": ".",
         "dockerfile": "backend/Dockerfile"
       },
-      "image": "volume-gallery:latest",
+      "image": "${VG_IMAGE:-volume-gallery:latest}",
       "container_name": "volume-gallery",
       "restart": "unless-stopped",
+      "init": true,
+      "user": "${VG_UID:-0}:${VG_GID:-0}",
+      "security_opt": [
+        "no-new-privileges:true"
+      ],
+      "logging": {
+        "driver": "json-file",
+        "options": {
+          "max-size": "10m",
+          "max-file": "3"
+        }
+      },
       "expose": [
         "8000"
       ],
@@ -16,21 +28,32 @@
         "VG_ADMIN_USER": "${VG_ADMIN_USER:-admin}",
         "VG_ADMIN_PASSWORD": "${VG_ADMIN_PASSWORD}",
         "VG_ACCESS_TOKEN_MINUTES": "${VG_ACCESS_TOKEN_MINUTES:-480}",
-        "VG_FILE_TOKEN_MINUTES": "${VG_FILE_TOKEN_MINUTES:-30}"
+        "VG_FILE_TOKEN_MINUTES": "${VG_FILE_TOKEN_MINUTES:-30}",
+        "VG_PROCESSING_DIR": "${VG_PROCESSING_DIR:-}"
       },
       "volumes": [
-        "${VG_HOST_DATA_DIR:-./data}:/data"
+        "${VG_HOST_DATA_DIR:-./data}:/data",
+        "${VG_HOST_PROCESSING_DIR:-./processing}:/processing"
       ]
     },
     "nginx": {
       "image": "nginx:1.27-alpine",
       "container_name": "volume-gallery-nginx",
       "restart": "unless-stopped",
-      "depends_on": [
-        "volume-gallery"
-      ],
+      "logging": {
+        "driver": "json-file",
+        "options": {
+          "max-size": "10m",
+          "max-file": "3"
+        }
+      },
+      "depends_on": {
+        "volume-gallery": {
+          "condition": "service_healthy"
+        }
+      },
       "ports": [
-        "8080:80",
+        "${VG_HTTP_PORT:-8080}:80",
         "${VG_HTTPS_PORT:-8443}:443"
       ],
       "environment": {
@@ -39,7 +62,7 @@
         },
       "volumes": [
         "./nginx/nginx.conf.template:/etc/nginx/templates/nginx.conf.template:ro",
-        "./nginx/certs:/etc/nginx/certs:ro"
+        "${VG_CERT_DIR:-./nginx/certs}:/etc/nginx/certs:ro"
       ]
     }
   }
