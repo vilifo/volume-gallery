@@ -15,6 +15,7 @@ from ..schemas import VolumeRead, AssetStatusRead, AccessGrant, FileAccessUrl, U
 from ..deps import get_current_user, require_editor
 from ..security import create_file_token, decode_token
 from ..config import settings
+from .. import workdir
 from ..helpers.volume import convert_tiff_stack_to_ome_zarr
 from ..utils import SLUG_RE, _now  # noqa: F401 - re-exported for the other asset routers
 from .meshes import attach_mesh_to_volume, delete_volume_mesh, get_volume_mesh, volume_mesh_source, volume_mesh_file
@@ -23,10 +24,17 @@ router = APIRouter(prefix="/api/volumes", tags=["volumes"])
 
 TIFF_IMPORT_DIR = "_tiff_import"  # scratch folder holding the slices until they are converted
 TIFF_SUFFIXES = (".tif", ".tiff")
+ZARR_DIRNAME = "data.ome.zarr"  # the converted/extracted store, as kept in the volume's data folder
 
 
 def _volume_dir(slug: str) -> Path:
     return settings.VOLUMES_DIR / slug
+
+
+def _work_dir(slug: str) -> Path:
+    """Where this volume's upload is staged and processed: its own data folder,
+    or — if VG_PROCESSING_DIR is set — a scratch folder (see workdir.py)."""
+    return workdir.work_dir_for("volumes", slug, _volume_dir(slug))
 
 
 def _get_multiscales(attrs: dict) -> Optional[list]:
@@ -182,11 +190,6 @@ def create_volume(
     tiff_zip: Optional[UploadFile] = File(
         None, description="Zip archive of a flat .tif/.tiff slice stack, converted to OME-Zarr on upload"
     ),
-    tiff_upload: bool = Form(
-        False,
-        description="Create the volume empty and receive the TIFF slices as individual files via "
-                    "POST /{id}/tiff-files (in batches), then POST /{id}/tiff-files/complete",
-    ),
     max_workers: int = Form(8, description="Parallel read threads for TIFF conversion"),
     mesh_file: Optional[UploadFile] = File(None),
     session: Session = Depends(get_session),
@@ -194,11 +197,11 @@ def create_volume(
 ):
     if not SLUG_RE.match(slug):
         raise HTTPException(status_code=400, detail="Slug must be lowercase alphanumeric/-/_ (2-63 chars)")
-    n_sources = sum([zarr_zip is not None, tiff_zip is not None, tiff_upload])
+    n_sources = sum([zarr_zip is not None, tiff_zip is not None])
     if n_sources == 0:
-        raise HTTPException(status_code=400, detail="Provide one of zarr_zip, tiff_zip or tiff_upload")
+        raise HTTPException(status_code=400, detail="Provide one of zarr_zip, tiff_zip")
     if n_sources > 1:
-        raise HTTPException(status_code=400, detail="Provide only one of zarr_zip, tiff_zip or tiff_upload")
+        raise HTTPException(status_code=400, detail="Provide only one of zarr_zip, tiff_zip")
     if session.exec(select(Volume).where(Volume.slug == slug)).first():
         raise HTTPException(status_code=409, detail="A volume with this slug already exists")
 
@@ -208,14 +211,16 @@ def create_volume(
     source_kind = "zarr" if zarr_zip is not None else "tiff" if tiff_zip is not None else "tiff-files"
     source_upload = zarr_zip if zarr_zip is not None else tiff_zip
     try:
+        work_dir = workdir.prepare_work_dir("volumes", slug, vol_dir)
         if source_upload is not None:
-            zip_path = vol_dir / "_upload.zip"
+            zip_path = work_dir / "_upload.zip"
             with open(zip_path, "wb") as f:
                 shutil.copyfileobj(source_upload.file, f)
         else:
-            (vol_dir / TIFF_IMPORT_DIR).mkdir()  # slices arrive later, see upload_tiff_files()
+            (work_dir / TIFF_IMPORT_DIR).mkdir()  # slices arrive later, see upload_tiff_files()
     except Exception as exc:  # noqa: BLE001 - surface save errors to the caller
         shutil.rmtree(vol_dir, ignore_errors=True)
+        workdir.discard_job("volumes", slug)
         raise HTTPException(status_code=400, detail=f"Could not save upload: {exc}")
 
     volume = Volume(
@@ -243,6 +248,7 @@ def create_volume(
             mesh = attach_mesh_to_volume(session, volume, mesh_file, editor, background_tasks)
         except Exception:
             shutil.rmtree(vol_dir, ignore_errors=True)
+            workdir.discard_job("volumes", slug)
             session.delete(volume)
             session.commit()
             raise
@@ -251,74 +257,6 @@ def create_volume(
         background_tasks.add_task(_process_upload, volume.id, str(vol_dir), source_kind, max_workers)
 
     return _volume_read(volume, mesh)
-
-
-# ---------- Individual TIFF slices ----------
-# A stack can be thousands of slices, which a single multipart request can't
-# carry (Starlette rejects more than 1000 files per request), and one
-# multi-gigabyte request is fragile anyway. So the browser creates the volume
-# with tiff_upload=true, sends the slices in batches, and finishes with
-# /tiff-files/complete, which starts the same conversion the zip path uses.
-
-def _safe_tiff_name(raw: Optional[str]) -> str:
-    name = Path((raw or "").replace("\\", "/")).name  # basename only, whichever separator the client used
-    if not name or name.startswith(".") or "\x00" in name:
-        raise HTTPException(status_code=400, detail=f"Invalid file name: {raw!r}")
-    if Path(name).suffix.lower() not in TIFF_SUFFIXES:
-        raise HTTPException(status_code=400, detail=f"{name}: only .tif/.tiff files are accepted")
-    return name
-
-
-def _pending_tiff_dir(volume: Optional[Volume]) -> Path:
-    if volume is None:
-        raise HTTPException(status_code=404, detail="Volume not found")
-    scratch = _volume_dir(volume.slug) / TIFF_IMPORT_DIR
-    if volume.status != AssetStatus.uploaded or not scratch.is_dir():
-        raise HTTPException(status_code=409, detail="This volume is not waiting for TIFF slices")
-    return scratch
-
-
-@router.post("/{volume_id}/tiff-files")
-def upload_tiff_files(
-    volume_id: int,
-    tiff_files: List[UploadFile] = File(..., description="A batch of single-slice .tif/.tiff files"),
-    session: Session = Depends(get_session),
-    _editor: User = Depends(require_editor),
-):
-    scratch = _pending_tiff_dir(session.get(Volume, volume_id))
-    files = [f for f in tiff_files if f.filename]
-    names = [_safe_tiff_name(f.filename) for f in files]
-    if len(set(names)) != len(names):
-        raise HTTPException(status_code=400, detail="Duplicate file names in this batch")
-    for name in names:
-        if (scratch / name).exists():
-            raise HTTPException(status_code=409, detail=f"{name} was already uploaded — file names must be unique")
-    for upload, name in zip(files, names):
-        with open(scratch / name, "wb") as out:
-            shutil.copyfileobj(upload.file, out)
-    return {"received": len(names), "total": sum(1 for _ in scratch.iterdir())}
-
-
-@router.post("/{volume_id}/tiff-files/complete", response_model=VolumeRead)
-def complete_tiff_upload(
-    volume_id: int,
-    background_tasks: BackgroundTasks,
-    max_workers: int = Form(8),
-    session: Session = Depends(get_session),
-    _editor: User = Depends(require_editor),
-):
-    volume = session.get(Volume, volume_id)
-    scratch = _pending_tiff_dir(volume)
-    count = sum(1 for p in scratch.iterdir() if p.is_file())
-    if count == 0:
-        raise HTTPException(status_code=400, detail="No TIFF slices have been uploaded yet")
-    volume.status = AssetStatus.processing
-    volume.status_log = (volume.status_log or "") + f"{_now()}  Received {count} TIFF slices, queued for processing\n"
-    session.add(volume)
-    session.commit()
-    session.refresh(volume)
-    background_tasks.add_task(_process_upload, volume.id, str(_volume_dir(volume.slug)), "tiff-files", max_workers)
-    return _volume_read(volume, get_volume_mesh(session, volume.id))
 
 
 def _process_upload(volume_id: int, vol_dir_str: str, source_kind: str, max_workers: int) -> None:
@@ -337,15 +275,20 @@ def _process_upload(volume_id: int, vol_dir_str: str, source_kind: str, max_work
             session.add(volume)
             session.commit()
 
+        work_dir = _work_dir(volume.slug)
+        staged = work_dir != vol_dir
         try:
-            zip_path = vol_dir / "_upload.zip"
+            zip_path = work_dir / "_upload.zip"
             if source_kind == "zarr":
                 log("Extracting OME-Zarr archive")
-                zarr_root = _extract_zarr_zip_from_path(zip_path, vol_dir)
+                zarr_root = _extract_zarr_zip_from_path(zip_path, work_dir)
             elif source_kind == "tiff-files":
-                zarr_root = _convert_tiff_scratch_dir(vol_dir / TIFF_IMPORT_DIR, vol_dir, log)
+                zarr_root = _convert_tiff_scratch_dir(work_dir / TIFF_IMPORT_DIR, work_dir, log)
             else:
-                zarr_root = _convert_tiff_zip_from_path(zip_path, vol_dir, max_workers, log)
+                zarr_root = _convert_tiff_zip_from_path(zip_path, work_dir, max_workers, log)
+            if staged:
+                log("Moving the finished OME-Zarr store into the data directory")
+                zarr_root = workdir.move_into_place(zarr_root, vol_dir / ZARR_DIRNAME)
             volume.zarr_path = str(zarr_root.relative_to(vol_dir))
             volume.num_lod_levels = _count_multiscale_levels(zarr_root)
             volume.status = AssetStatus.ready
@@ -353,6 +296,9 @@ def _process_upload(volume_id: int, vol_dir_str: str, source_kind: str, max_work
         except Exception as exc:  # noqa: BLE001 - the failure message IS the point, shown to the user
             volume.status = AssetStatus.failed
             log(f"Failed: {exc}")
+        finally:
+            if staged:
+                workdir.discard_job("volumes", volume.slug)  # success or failure: scratch is never kept
         session.add(volume)
         session.commit()
 
@@ -419,7 +365,7 @@ def _convert_tiff_scratch_dir(scratch_dir: Path, vol_dir: Path, log) -> Path:
     )
     log(f"Converting {n_files} TIFF slices to OME-Zarr (this can take a while for large stacks)")
 
-    zarr_dir = vol_dir / "data.ome.zarr"
+    zarr_dir = vol_dir / ZARR_DIRNAME
     try:
         convert_tiff_stack_to_ome_zarr(tiff_source_dir, zarr_dir)
     finally:
@@ -472,6 +418,7 @@ def delete_volume(
     if not volume:
         raise HTTPException(status_code=404, detail="Volume not found")
     shutil.rmtree(_volume_dir(volume.slug), ignore_errors=True)
+    workdir.discard_job("volumes", volume.slug)
     delete_volume_mesh(session, volume)
     for grant in session.exec(select(VolumeAccess).where(VolumeAccess.volume_id == volume_id)).all():
         session.delete(grant)

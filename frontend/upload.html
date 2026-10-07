@@ -138,15 +138,15 @@
       <main>
         <h1>Upload asset</h1>
         <p class="subtitle">
-          Provide either an OME-Zarr archive or a TIFF stack (as one .zip or as
-          individual files) — a TIFF stack is converted to OME-Zarr on the
-          server, then the original TIFF files are deleted. A mesh file is optional.
+          Provide either an OME-Zarr archive or a TIFF stack — a TIFF stack is
+          converted to OME-Zarr on the server, then the original TIFF files
+          are deleted. A mesh file is optional.
         </p>
         <div id="error" style="display:none" class="error-box"></div>
 
         <div class="source-toggle">
           <button type="button" id="src-zarr" class="active">OME-Zarr (.zip)</button>
-          <button type="button" id="src-tiff">TIFF stack (.zip or individual files)</button>
+          <button type="button" id="src-tiff">TIFF stack (.zip of .tif files)</button>
           <button type="button" id="src-mesh">Mesh file (.stl, .obj, .ply, \u2026)</button>
           <button type="button" id="src-pointcloud">Point cloud file (.pcd, .ply, \u2026)</button>
         </div>
@@ -172,30 +172,11 @@
           </div>
 
           <div class="field" id="tiff-field" style="display:none">
-            <label>TIFF stack</label>
-            <div class="source-toggle" style="margin-bottom:0.6em">
-              <button type="button" id="tiff-mode-zip" class="active">One .zip archive</button>
-              <button type="button" id="tiff-mode-files">Individual files</button>
-            </div>
-
-            <div id="tiff-zip-box">
-              <input id="tiff_zip" type="file" accept=".zip" />
-              <div class="field-hint">A .zip of single-slice .tif/.tiff files (one per Z position).</div>
-            </div>
-
-            <div id="tiff-files-box" style="display:none">
-              <input id="tiff_files" type="file" accept=".tif,.tiff" multiple />
-              <div class="field-hint">
-                Select all slices at once (Ctrl/Cmd+A in the file dialog), or
-                <label for="tiff_folder" style="display:inline; text-decoration:underline; cursor:pointer; font-size:inherit; color:inherit; margin:0">choose a folder</label>
-                instead. Files are uploaded in batches, so thousands of slices are fine.
-              </div>
-              <input id="tiff_folder" type="file" webkitdirectory multiple style="display:none" />
-              <div class="field-hint" id="tiff-files-summary"></div>
-            </div>
-
-            <div class="field-hint" style="margin-top:0.6em">
-              Filenames are sorted to determine slice order, so name them so alphabetical order
+            <label for="tiff_zip">TIFF stack (.zip of .tif files)</label>
+            <input id="tiff_zip" type="file" accept=".zip" />
+            <div class="field-hint">
+              A flat .zip of single-slice .tif/.tiff files (one per Z position). Filenames
+              are sorted to determine slice order, so name them so alphabetical order
               matches acquisition order (e.g. slice_0001.tif, slice_0002.tif, \u2026).
               Large stacks are loaded into memory in full during conversion, so keep an
               eye on available RAM for very large scans.
@@ -253,56 +234,6 @@
         pointCloudField.style.display = source === "pointcloud" ? "" : "none";
     }
 
-    // --- TIFF stack: one .zip, or individual files ---
-    let tiffMode = "zip";
-    const tiffModeZipBtn = document.getElementById("tiff-mode-zip");
-    const tiffModeFilesBtn = document.getElementById("tiff-mode-files");
-    const tiffZipBox = document.getElementById("tiff-zip-box");
-    const tiffFilesBox = document.getElementById("tiff-files-box");
-    const tiffFilesInput = document.getElementById("tiff_files");
-    const tiffFolderInput = document.getElementById("tiff_folder");
-    const tiffSummary = document.getElementById("tiff-files-summary");
-    let tiffFiles = []; // sorted exactly like the server sorts them
-
-    function setTiffMode(next) {
-        tiffMode = next;
-        tiffModeZipBtn.classList.toggle("active", next === "zip");
-        tiffModeFilesBtn.classList.toggle("active", next === "files");
-        tiffZipBox.style.display = next === "zip" ? "" : "none";
-        tiffFilesBox.style.display = next === "files" ? "" : "none";
-    }
-    tiffModeZipBtn.addEventListener("click", () => setTiffMode("zip"));
-    tiffModeFilesBtn.addEventListener("click", () => setTiffMode("files"));
-
-    function formatBytes(n) {
-        if (n >= 1024 ** 3) return `${(n / 1024 ** 3).toFixed(2)} GB`;
-        return `${(n / 1024 ** 2).toFixed(1)} MB`;
-    }
-
-    // Keeps only .tif/.tiff, orders by file name (the server does the same,
-    // so what is shown here is the Z order the volume will get) and reports
-    // problems before anything is uploaded.
-    function setTiffFiles(fileList) {
-        const all = [...fileList];
-        tiffFiles = all
-            .filter((f) => /\.tiff?$/i.test(f.name))
-            .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
-        const skipped = all.length - tiffFiles.length;
-        const names = tiffFiles.map((f) => f.name);
-        const dupes = names.filter((n, i) => names.indexOf(n) !== i);
-        if (!tiffFiles.length) {
-            tiffSummary.textContent = all.length ? "No .tif/.tiff files in that selection." : "";
-            return;
-        }
-        const bytes = tiffFiles.reduce((n, f) => n + f.size, 0);
-        tiffSummary.textContent =
-            `${tiffFiles.length} slices, ${formatBytes(bytes)} \u2014 order: ${names[0]} \u2192 ${names[names.length - 1]}` +
-            (skipped ? ` (${skipped} non-TIFF file${skipped > 1 ? "s" : ""} ignored)` : "") +
-            (dupes.length ? ` \u2014 DUPLICATE NAMES (e.g. ${dupes[0]}): file names must be unique` : "");
-    }
-    tiffFilesInput.addEventListener("change", () => { tiffFolderInput.value = ""; setTiffFiles(tiffFilesInput.files); });
-    tiffFolderInput.addEventListener("change", () => { tiffFilesInput.value = ""; setTiffFiles(tiffFolderInput.files); });
-
     srcZarrBtn.addEventListener("click", () => setSource("zarr"));
     srcTiffBtn.addEventListener("click", () => setSource("tiff"));
     srcMeshBtn.addEventListener("click", () => setSource("mesh"));
@@ -354,19 +285,8 @@
                 errorMessage = "Choose an OME-Zarr .zip file.";
                 break;
             case "tiff":
-                if (tiffMode === "files") {
-                    sourceFile = tiffFiles.length ? tiffFiles : undefined;
-                    errorMessage = "Choose the TIFF slice files (.tif/.tiff).";
-                    const names = tiffFiles.map((f) => f.name);
-                    if (names.length !== new Set(names).size) {
-                        errorBox.textContent = "Some slice files share a name \u2014 file names must be unique.";
-                        errorBox.style.display = "block";
-                        return;
-                    }
-                } else {
-                    sourceFile = document.getElementById("tiff_zip").files[0];
-                    errorMessage = "Choose a TIFF stack .zip file.";
-                }
+                sourceFile = document.getElementById("tiff_zip").files[0];
+                errorMessage = "Choose a TIFF stack .zip file.";
                 break;
             case "mesh":
                 sourceFile = document.getElementById("mesh_file").files[0];
@@ -393,8 +313,7 @@
                 fd.append("zarr_zip", sourceFile);
                 break;
             case "tiff":
-                if (tiffMode === "files") fd.append("tiff_upload", "true");
-                else fd.append("tiff_zip", sourceFile);
+                fd.append("tiff_zip", sourceFile);
                 break;
             case "mesh":
                 fd.append("mesh_file", sourceFile);
@@ -414,24 +333,7 @@
 
         try {
             let asset;
-            if (source === "tiff" && tiffMode === "files") {
-                // The volume is created first (with the optional mesh), then the
-                // slices follow in batches; progress covers all bytes together.
-                const meshBytes = meshFile ? meshFile.size : 0;
-                const total = meshBytes + tiffFiles.reduce((n, f) => n + f.size, 0) || 1;
-                asset = await api.createVolumeWithProgress(fd, (frac) => setProgress(Math.min(0.999, (frac * meshBytes) / total)));
-                try {
-                    await api.uploadTiffFiles(asset.id, tiffFiles, (frac) => {
-                        const sliceBytes = total - meshBytes;
-                        setProgress(Math.min(0.999, (meshBytes + frac * sliceBytes) / total));
-                    });
-                    await api.completeTiffUpload(asset.id);
-                } catch (err) {
-                    // don't leave a half-uploaded volume behind
-                    try { await api.deleteVolume(asset.id); } catch (_) {}
-                    throw new Error(`${err.message} (the partial upload was discarded)`);
-                }
-            } else if (source === "zarr" || source === "tiff") {
+            if (source === "zarr" || source === "tiff") {
                 asset = await api.createVolumeWithProgress(fd, setProgress);
             } else if (source === "mesh") {
                 asset = await api.createMeshWithProgress(fd, setProgress);

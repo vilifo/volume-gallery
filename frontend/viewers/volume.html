@@ -641,7 +641,8 @@
       try {
         volume = await api.getVolume(volumeId);
       } catch (err) {
-        content.innerHTML = `<div class="error-box" style="margin:1.4em">${err.message}</div>`;
+        const safeMessage = escapeHtml(String(err?.message ?? "Failed to load volume."));
+        content.innerHTML = `<div class="error-box" style="margin:1.4em">${safeMessage}</div>`;
         return;
       }
 

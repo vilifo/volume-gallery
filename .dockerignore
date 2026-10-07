@@ -1,8 +1,20 @@
+# The image only COPYs backend/requirements.txt, backend/app and frontend (see
+# backend/Dockerfile). Everything else is kept out of the build context — above
+# all data/ and processing/, which can be hundreds of GB.
+.git
+.github
+.idea
+.venv
+.env*
 data/
-.venv/
-__pycache__/
-.idea/
-nginx/certs
-*.pyc
-.env
+processing/
+nginx/
+tools/
+README.md
+setup.sh
+docker-compose.yml
+.gitignore
+**/__pycache__
+**/*.pyc
+# the image downloads its own copy of the vendored viewer libraries
 /frontend/vendor/

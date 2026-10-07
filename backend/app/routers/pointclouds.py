@@ -13,6 +13,7 @@ from ..schemas import PointCloudRead, AssetStatusRead, AccessGrant, GrantedUserR
 from ..deps import get_current_user, require_editor
 from ..security import create_file_token, decode_token
 from ..config import settings
+from .. import workdir
 from ..helpers import convert_pointcloud
 from .volumes import SLUG_RE, _now
 
@@ -23,6 +24,12 @@ _POINTCLOUD_SOURCE_EXTS = (".las", ".laz", ".ply", ".xyz", ".ptx", ".pts", ".e57
 
 def _pointcloud_dir(slug: str) -> Path:
     return settings.POINTCLOUDS_DIR / slug
+
+
+def _work_dir(slug: str) -> Path:
+    """Where this point cloud's upload is staged and converted: its own data
+    folder, or — if VG_PROCESSING_DIR is set — a scratch folder (see workdir.py)."""
+    return workdir.work_dir_for("pointclouds", slug, _pointcloud_dir(slug))
 
 
 def _can_see_pointcloud(user: User, pc: PointCloud, session: Session) -> bool:
@@ -105,11 +112,13 @@ def create_pointcloud(
     pc_dir.mkdir(parents=True, exist_ok=False)
 
     try:
-        upload_path = pc_dir / f"_upload{source_ext}"
+        work_dir = workdir.prepare_work_dir("pointclouds", slug, pc_dir)  # == pc_dir unless VG_PROCESSING_DIR is set
+        upload_path = work_dir / f"_upload{source_ext}"
         with open(upload_path, "wb") as f:
             shutil.copyfileobj(pointcloud_file.file, f)
     except Exception as exc:  # noqa: BLE001
         shutil.rmtree(pc_dir, ignore_errors=True)
+        workdir.discard_job("pointclouds", slug)
         raise HTTPException(status_code=400, detail=f"Could not save upload: {exc}")
 
     pc = PointCloud(
@@ -140,9 +149,16 @@ def _process_pointcloud_upload(pc_id: int, pc_dir_str: str, upload_path_str: str
             session.add(pc)
             session.commit()
 
-        output_dir = pc_dir / "pointcloud"
+        # The octree is built in work_dir: pc_dir itself, or a scratch folder when
+        # VG_PROCESSING_DIR is set — then it is moved into pc_dir when finished.
+        work_dir = _work_dir(pc.slug)
+        staged = work_dir != pc_dir
+        output_dir = work_dir / "pointcloud"
         try:
             convert_pointcloud(upload_path, output_dir, log=log)
+            if staged:
+                log("Moving the finished octree into the data directory")
+                output_dir = workdir.move_into_place(output_dir, pc_dir / output_dir.name)
             pc.pc_path = output_dir.name
             pc.status = AssetStatus.ready
             log("Ready")
@@ -153,6 +169,8 @@ def _process_pointcloud_upload(pc_id: int, pc_dir_str: str, upload_path_str: str
             # Only the converted octree is kept — the original point cloud
             # upload is deleted either way (can be large: las/laz files).
             upload_path.unlink(missing_ok=True)
+            if staged:
+                workdir.discard_job("pointclouds", pc.slug)  # scratch is never kept
         session.add(pc)
         session.commit()
 
@@ -163,6 +181,7 @@ def delete_pointcloud(pc_id: int, session: Session = Depends(get_session), _edit
     if not pc:
         raise HTTPException(status_code=404, detail="Point cloud not found")
     shutil.rmtree(_pointcloud_dir(pc.slug), ignore_errors=True)
+    workdir.discard_job("pointclouds", pc.slug)
     for grant in session.exec(select(PointCloudAccess).where(PointCloudAccess.pointcloud_id == pc_id)).all():
         session.delete(grant)
     session.delete(pc)

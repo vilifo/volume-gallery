@@ -100,49 +100,11 @@ export const api = {
   // volumes
   listVolumes() { return request("/api/volumes"); },
   getVolume(id) { return request(`/api/volumes/${id}`); },
-  createVolume(formData) {
-    return request("/api/volumes", { method: "POST", body: formData });
-  },
   // XHR-based (not fetch) specifically to get real upload-progress events —
   // see _uploadWithProgress above for why.
   createVolumeWithProgress(formData, onProgress) {
     return _uploadWithProgress("/api/volumes", formData, onProgress);
   },
-  // Individual TIFF slices: the volume is created with tiff_upload=true, the
-  // files go up in batches (one request can't carry thousands of files), then
-  // completeTiffUpload() starts the conversion. onProgress gets 0..1 of the bytes.
-  async uploadTiffFiles(id, files, onProgress, { maxFiles = 100, maxBytes = 200 * 1024 * 1024, retries = 2 } = {}) {
-    const total = files.reduce((n, f) => n + f.size, 0) || 1;
-    let done = 0;
-    for (let i = 0; i < files.length; ) {
-      const batch = [];
-      let bytes = 0;
-      while (i < files.length && batch.length < maxFiles && (batch.length === 0 || bytes + files[i].size <= maxBytes)) {
-        batch.push(files[i]);
-        bytes += files[i].size;
-        i++;
-      }
-      for (let attempt = 0; ; attempt++) {
-        const fd = new FormData();
-        for (const f of batch) fd.append("tiff_files", f, f.name);
-        try {
-          await _uploadWithProgress(`/api/volumes/${id}/tiff-files`, fd, (frac) => {
-            if (onProgress) onProgress((done + frac * bytes) / total);
-          });
-          break;
-        } catch (err) {
-          // a duplicate/invalid name won't get better by retrying
-          if (attempt >= retries || /already uploaded|Duplicate|Invalid|only \.tif/.test(err.message)) throw err;
-          await new Promise((r) => setTimeout(r, 500 * (attempt + 1)));
-        }
-      }
-      done += bytes;
-    }
-  },
-  completeTiffUpload(id) {
-    return request(`/api/volumes/${id}/tiff-files/complete`, { method: "POST", body: new FormData() });
-  },
-  getVolumeStatus(id) { return request(`/api/volumes/${id}/status`); },
   deleteVolume(id) { return request(`/api/volumes/${id}`, { method: "DELETE" }); },
   uploadMesh(id, formData) {
     return request(`/api/volumes/${id}/mesh`, { method: "POST", body: formData });
@@ -169,7 +131,6 @@ export const api = {
   // meshes
   listMeshes() { return request("/api/meshes"); },
   getMesh(id) { return request(`/api/meshes/${id}`); },
-  getMeshStatus(id) { return request(`/api/meshes/${id}/status`); },
   createMeshWithProgress(formData, onProgress) {
     return _uploadWithProgress("/api/meshes", formData, onProgress);
   },
@@ -191,7 +152,6 @@ export const api = {
   // point clouds
   listPointClouds() { return request("/api/pointclouds"); },
   getPointCloud(id) { return request(`/api/pointclouds/${id}`); },
-  getPointCloudStatus(id) { return request(`/api/pointclouds/${id}/status`); },
   createPointCloudWithProgress(formData, onProgress) {
     return _uploadWithProgress("/api/pointclouds", formData, onProgress);
   },

@@ -49,6 +49,11 @@ http {
 		location / {
 			proxy_pass http://volume-gallery:8000;
 			proxy_http_version 1.1;
+
+			# Stream uploads straight through to the app. By default nginx first spools the
+			# whole request body (a multi-GB TIFF/zarr archive) into its own temp directory,
+			# inside the nginx container's writable layer, and only then forwards it.
+			proxy_request_buffering off;
 			
 			proxy_set_header Host $host:${VG_HTTPS_PORT};
 			
