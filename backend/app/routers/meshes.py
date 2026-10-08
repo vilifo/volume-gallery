@@ -186,7 +186,7 @@ def create_mesh(
     source_ext = Path(mesh_file.filename or "").suffix.lstrip(".").lower() or "bin"
     try:
         work_dir = workdir.prepare_work_dir("meshes", slug, mesh_dir)  # == mesh_dir unless VG_PROCESSING_DIR is set
-        upload_path = work_dir / f"_upload.{source_ext}"
+        upload_path = mesh_dir / f"_upload.{source_ext}"
         with open(upload_path, "wb") as f:
             shutil.copyfileobj(mesh_file.file, f)
     except Exception as exc:  # noqa: BLE001
@@ -225,13 +225,8 @@ def _process_mesh_upload(mesh_id: int, mesh_dir_str: str) -> None:
         # VG_PROCESSING_DIR is set — then the original upload (kept for downloads)
         # and the converted .nxz are moved into mesh_dir when done.
         work_dir = _work_dir(mesh.slug)
-        staged = work_dir != mesh_dir
         try:
-            nxz_path = convert_mesh_to_nxz(work_dir, log)
-            if staged:
-                log("Moving results into the data directory")
-                for produced in (work_dir / f"_upload.{mesh.file_extension}", nxz_path):
-                    workdir.move_into_place(produced, mesh_dir / produced.name)
+            nxz_path = convert_mesh_to_nxz(work_dir, mesh_dir, log)
             mesh.mesh_filename = nxz_path.name
             mesh.status = AssetStatus.ready
             log("Ready")
@@ -239,8 +234,7 @@ def _process_mesh_upload(mesh_id: int, mesh_dir_str: str) -> None:
             mesh.status = AssetStatus.failed
             log(f"Failed: {exc}")
         finally:
-            if staged:
-                workdir.discard_job("meshes", mesh.slug)  # success or failure: scratch is never kept
+            workdir.discard_job("meshes", mesh.slug)  # success or failure: scratch is never kept
         session.add(mesh)
         session.commit()
 

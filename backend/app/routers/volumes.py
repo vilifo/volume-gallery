@@ -1,7 +1,5 @@
 import json
 import shutil
-import zipfile
-from collections import deque
 from pathlib import Path
 from typing import List, Optional
 
@@ -16,15 +14,11 @@ from ..deps import get_current_user, require_editor
 from ..security import create_file_token, decode_token
 from ..config import settings
 from .. import workdir
-from ..helpers.volume import convert_tiff_stack_to_ome_zarr
+from ..helpers import extract_zarr_zip_from_path, convert_tiff_zip_from_path, ZIP_NAME, count_multiscale_levels, get_multiscales
 from ..utils import SLUG_RE, _now  # noqa: F401 - re-exported for the other asset routers
 from .meshes import attach_mesh_to_volume, delete_volume_mesh, get_volume_mesh, volume_mesh_source, volume_mesh_file
 
 router = APIRouter(prefix="/api/volumes", tags=["volumes"])
-
-TIFF_IMPORT_DIR = "_tiff_import"  # scratch folder holding the slices until they are converted
-TIFF_SUFFIXES = (".tif", ".tiff")
-ZARR_DIRNAME = "data.ome.zarr"  # the converted/extracted store, as kept in the volume's data folder
 
 
 def _volume_dir(slug: str) -> Path:
@@ -35,81 +29,6 @@ def _work_dir(slug: str) -> Path:
     """Where this volume's upload is staged and processed: its own data folder,
     or — if VG_PROCESSING_DIR is set — a scratch folder (see workdir.py)."""
     return workdir.work_dir_for("volumes", slug, _volume_dir(slug))
-
-
-def _get_multiscales(attrs: dict) -> Optional[list]:
-    """Returns the `multiscales` array from a Zarr group's attributes,
-    handling both shapes OME-NGFF metadata can take: a flat `multiscales`
-    key (v2, and plain v3/v0.4), or one namespaced under `ome` (v0.5's
-    convention for zarr-v3 group attributes). None if neither is present."""
-    if not isinstance(attrs, dict):
-        return None
-    if "multiscales" in attrs:
-        return attrs["multiscales"]
-    ome = attrs.get("ome")
-    if isinstance(ome, dict) and "multiscales" in ome:
-        return ome["multiscales"]
-    return None
-
-
-def _has_multiscales(attrs: dict) -> bool:
-    return _get_multiscales(attrs) is not None
-
-
-def _count_multiscale_levels(zarr_root: Path) -> Optional[int]:
-    """Number of resolution levels (index 0 = finest) in the multiscale
-    pyramid at zarr_root, or None if it can't be determined. Used to compute
-    the "max detail level" UI control's default (half of this)."""
-    attrs = _read_group_attrs(zarr_root)
-    if attrs is None:
-        return None
-    multiscales = _get_multiscales(attrs)
-    if not multiscales or not isinstance(multiscales, list):
-        return None
-    datasets = multiscales[0].get("datasets") if isinstance(multiscales[0], dict) else None
-    if not isinstance(datasets, list) or not datasets:
-        return None
-    return len(datasets)
-
-
-def _read_group_attrs(directory: Path) -> Optional[dict]:
-    """Reads a Zarr group's attributes regardless of v2 (.zattrs) or v3
-    (zarr.json's "attributes" key) layout. Returns None if this directory
-    isn't a Zarr group/array at all."""
-    zattrs = directory / ".zattrs"
-    if zattrs.exists():
-        try:
-            return json.loads(zattrs.read_text())
-        except (json.JSONDecodeError, OSError):
-            return None
-    zarr_json = directory / "zarr.json"
-    if zarr_json.exists():
-        try:
-            data = json.loads(zarr_json.read_text())
-        except (json.JSONDecodeError, OSError):
-            return None
-        return data.get("attributes", {})
-    return None
-
-
-def _find_ome_zarr_root(vol_dir: Path) -> Optional[Path]:
-    """Breadth-first search for the shallowest directory whose Zarr group
-    attributes actually declare OME-NGFF multiscales metadata. BFS (rather
-    than rglob, whose traversal order isn't guaranteed) guarantees we can
-    never mistake a nested per-resolution array for the real multiscale
-    group, since every array in a Zarr v3 store has its own zarr.json too."""
-    queue = deque([vol_dir])
-    while queue:
-        current = queue.popleft()
-        attrs = _read_group_attrs(current)
-        if attrs is not None and _has_multiscales(attrs):
-            return current
-        try:
-            children = sorted(p for p in current.iterdir() if p.is_dir())
-        except OSError:
-            children = []
-        queue.extend(children)
-    return None
 
 
 def _can_see_volume(user: User, volume: Volume, session: Session) -> bool:
@@ -190,7 +109,6 @@ def create_volume(
     tiff_zip: Optional[UploadFile] = File(
         None, description="Zip archive of a flat .tif/.tiff slice stack, converted to OME-Zarr on upload"
     ),
-    max_workers: int = Form(8, description="Parallel read threads for TIFF conversion"),
     mesh_file: Optional[UploadFile] = File(None),
     session: Session = Depends(get_session),
     editor: User = Depends(require_editor),
@@ -212,12 +130,9 @@ def create_volume(
     source_upload = zarr_zip if zarr_zip is not None else tiff_zip
     try:
         work_dir = workdir.prepare_work_dir("volumes", slug, vol_dir)
-        if source_upload is not None:
-            zip_path = work_dir / "_upload.zip"
-            with open(zip_path, "wb") as f:
-                shutil.copyfileobj(source_upload.file, f)
-        else:
-            (work_dir / TIFF_IMPORT_DIR).mkdir()  # slices arrive later, see upload_tiff_files()
+        zip_path = work_dir / ZIP_NAME
+        with open(zip_path, "wb") as f:
+            shutil.copyfileobj(source_upload.file, f)
     except Exception as exc:  # noqa: BLE001 - surface save errors to the caller
         shutil.rmtree(vol_dir, ignore_errors=True)
         workdir.discard_job("volumes", slug)
@@ -254,12 +169,12 @@ def create_volume(
             raise
 
     if source_kind != "tiff-files":
-        background_tasks.add_task(_process_upload, volume.id, str(vol_dir), source_kind, max_workers)
+        background_tasks.add_task(_process_upload, volume.id, str(vol_dir), source_kind)
 
     return _volume_read(volume, mesh)
 
 
-def _process_upload(volume_id: int, vol_dir_str: str, source_kind: str, max_workers: int) -> None:
+def _process_upload(volume_id: int, vol_dir_str: str, source_kind: str) -> None:
     """Runs after create_volume's response has already been sent. Opens its
     own DB session — the request-scoped one from create_volume is closed by
     the time this runs."""
@@ -276,122 +191,24 @@ def _process_upload(volume_id: int, vol_dir_str: str, source_kind: str, max_work
             session.commit()
 
         work_dir = _work_dir(volume.slug)
-        staged = work_dir != vol_dir
         try:
-            zip_path = work_dir / "_upload.zip"
+            zip_path = work_dir / ZIP_NAME
             if source_kind == "zarr":
                 log("Extracting OME-Zarr archive")
-                zarr_root = _extract_zarr_zip_from_path(zip_path, work_dir)
-            elif source_kind == "tiff-files":
-                zarr_root = _convert_tiff_scratch_dir(work_dir / TIFF_IMPORT_DIR, work_dir, log)
+                zarr_root = extract_zarr_zip_from_path(zip_path, vol_dir)
             else:
-                zarr_root = _convert_tiff_zip_from_path(zip_path, work_dir, max_workers, log)
-            if staged:
-                log("Moving the finished OME-Zarr store into the data directory")
-                zarr_root = workdir.move_into_place(zarr_root, vol_dir / ZARR_DIRNAME)
+                zarr_root = convert_tiff_zip_from_path(zip_path, work_dir, vol_dir, log)
             volume.zarr_path = str(zarr_root.relative_to(vol_dir))
-            volume.num_lod_levels = _count_multiscale_levels(zarr_root)
+            volume.num_lod_levels = count_multiscale_levels(zarr_root)
             volume.status = AssetStatus.ready
             log("Ready")
         except Exception as exc:  # noqa: BLE001 - the failure message IS the point, shown to the user
             volume.status = AssetStatus.failed
             log(f"Failed: {exc}")
         finally:
-            if staged:
-                workdir.discard_job("volumes", volume.slug)  # success or failure: scratch is never kept
+            workdir.discard_job("volumes", volume.slug)  # success or failure: scratch is never kept
         session.add(volume)
         session.commit()
-
-
-def _extract_zarr_zip_from_path(zip_path: Path, vol_dir: Path) -> Path:
-    """Extracts an OME-Zarr .zip already saved at zip_path into vol_dir and
-    locates its multiscale group root (see _find_ome_zarr_root for why
-    presence of a zarr.json/.zattrs file alone isn't sufficient)."""
-    try:
-        with zipfile.ZipFile(zip_path) as zf:
-            zf.extractall(vol_dir)
-    except zipfile.BadZipFile:
-        raise ValueError("zarr_zip is not a valid zip file")
-    finally:
-        zip_path.unlink(missing_ok=True)
-
-    zarr_root = _find_ome_zarr_root(vol_dir)
-    if zarr_root is None:
-        raise ValueError(
-            "No OME-NGFF multiscales metadata found anywhere in the archive. "
-            "Every zarr.json/.zattrs found lacks a multiscales entry — check "
-            "that the archive contains the multiscale group (not just an "
-            "individual resolution-level array), and that it was written "
-            "with OME-NGFF metadata (attributes.multiscales for v2/plain v3, "
-            "or attributes.ome.multiscales for NGFF v0.5)."
-        )
-    return zarr_root
-
-
-def _convert_tiff_zip_from_path(zip_path: Path, vol_dir: Path, max_workers: int, log) -> Path:
-    """Extracts a TIFF-stack .zip already saved at zip_path into a scratch
-    directory, converts it to OME-Zarr under vol_dir, then deletes the
-    extracted TIFF files — only the converted OME-Zarr store is kept on disk
-    afterward. `log` is called with progress messages as conversion runs."""
-    log("Extracting TIFF archive")
-    scratch_dir = vol_dir / TIFF_IMPORT_DIR
-    scratch_dir.mkdir(exist_ok=True)
-    try:
-        with zipfile.ZipFile(zip_path) as zf:
-            zf.extractall(scratch_dir)
-    except zipfile.BadZipFile:
-        raise ValueError("tiff_zip is not a valid zip file")
-    finally:
-        zip_path.unlink(missing_ok=True)
-
-    return _convert_tiff_scratch_dir(scratch_dir, vol_dir, log)
-
-
-def _convert_tiff_scratch_dir(scratch_dir: Path, vol_dir: Path, log) -> Path:
-    """Converts the TIFF slices under `scratch_dir` (extracted from a zip, or
-    uploaded one by one) to OME-Zarr under vol_dir and deletes `scratch_dir`
-    afterwards. Returns the OME-Zarr root."""
-    # Slices may be nested in a subfolder inside the zip rather than at its
-    # top level (e.g. a zip of "scan/slice_0001.tif" instead of
-    # "slice_0001.tif") — search shallowest-first for the folder that
-    # actually contains the .tif files, same rationale as _find_ome_zarr_root.
-    tiff_source_dir = _find_tiff_dir(scratch_dir)
-    if tiff_source_dir is None:
-        shutil.rmtree(scratch_dir, ignore_errors=True)
-        raise ValueError("No .tif/.tiff files found")
-
-    n_files = sum(
-        1 for p in tiff_source_dir.iterdir() if p.is_file() and p.suffix.lower() in (".tif", ".tiff")
-    )
-    log(f"Converting {n_files} TIFF slices to OME-Zarr (this can take a while for large stacks)")
-
-    zarr_dir = vol_dir / ZARR_DIRNAME
-    try:
-        convert_tiff_stack_to_ome_zarr(tiff_source_dir, zarr_dir)
-    finally:
-        shutil.rmtree(scratch_dir, ignore_errors=True)
-
-    log("Locating OME-Zarr metadata")
-    zarr_root = _find_ome_zarr_root(vol_dir)
-    if zarr_root is None:
-        raise ValueError("TIFF conversion completed but produced no readable OME-NGFF metadata")
-    return zarr_root
-
-
-def _find_tiff_dir(scratch_dir: Path) -> Optional[Path]:
-    """Breadth-first search for the shallowest directory containing at least
-    one .tif/.tiff file."""
-    queue = deque([scratch_dir])
-    while queue:
-        current = queue.popleft()
-        try:
-            entries = list(current.iterdir())
-        except OSError:
-            continue
-        if any(p.is_file() and p.suffix.lower() in (".tif", ".tiff") for p in entries):
-            return current
-        queue.extend(sorted(p for p in entries if p.is_dir()))
-    return None
 
 
 @router.post("/{volume_id}/mesh", response_model=VolumeRead)
@@ -644,7 +461,7 @@ def _truncate_multiscales_json(raw: bytes, min_lod: int) -> Optional[bytes]:
     # v3 (zarr.json): it's nested under "attributes" (and possibly "ome").
     is_v3 = "attributes" in data and isinstance(data.get("attributes"), dict)
     attrs = data["attributes"] if is_v3 else data
-    multiscales = _get_multiscales(attrs)
+    multiscales = get_multiscales(attrs)
     if not multiscales or not isinstance(multiscales, list):
         return None
 

@@ -4,6 +4,7 @@ services:
       context: .
       dockerfile: backend/Dockerfile
     image: ${VG_IMAGE:-volume-gallery:latest}
+    shm_size: '1gb'
     container_name: volume-gallery
     restart: unless-stopped
     init: true
@@ -48,5 +49,7 @@ services:
     environment:
       VG_HTTPS_PORT: ${VG_HTTPS_PORT:-8443}
       NGINX_ENVSUBST_OUTPUT_DIR: /etc/nginx
+      VG_NGINX_REQUEST_BUFFERING: ${VG_NGINX_REQUEST_BUFFERING:-off}
     volumes:
       - ${VG_CERT_DIR:-./nginx/certs}:/etc/nginx/certs:ro
+      - ${VG_HOST_PROCESSING_DIR:-./processing}:/processing

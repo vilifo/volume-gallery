@@ -72,7 +72,7 @@ class AccessGrant(BaseModel):
 class GrantedUserRead(BaseModel):
     id: int
     username: str
-    can_download: bool
+    can_download: bool = False
 
 
 class FileAccessUrl(BaseModel):

@@ -23,12 +23,25 @@ RUN git clone https://github.com/potree/PotreeConverter.git /opt/PotreeConverter
 
 RUN mkdir -p /opt/PotreeConverter/dist_libs && \
     find /opt/PotreeConverter/build -name "*.so*" -exec cp {} /opt/PotreeConverter/dist_libs/ \;
-# Build from the repository root:
-#   docker build -f backend/Dockerfile -t volume-gallery .
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    qtbase5-dev \
+    && rm -rf /var/lib/apt/lists/*
+COPY backend/nexus-patches /tmp/nexus-patches
+RUN git clone --depth 1 --branch 2025.07 https://github.com/cnr-isti-vclab/vcglib.git /opt/vcglib \
+    && git clone --depth 1 --branch v2025.05 --recurse-submodules --shallow-submodules \
+       https://github.com/cnr-isti-vclab/nexus.git /opt/nexus-src \
+    && cd /opt/nexus-src \
+    && git apply --ignore-whitespace /tmp/nexus-patches/*.patch \
+    && cmake -S . -B build -DVCGDIR=/opt/vcglib -DBUILD_NXS_VIEW=OFF -DCMAKE_BUILD_TYPE=Release \
+    && cmake --build build --target nxsbuild nxscompress -j"$(nproc)" \
+    && mkdir -p /opt/nexus/bin /opt/nexus/lib \
+    && cp build/src/nxsbuild/nxsbuild build/src/nxsedit/nxscompress /opt/nexus/bin/ \
+    && ldd /opt/nexus/bin/nxsbuild /opt/nexus/bin/nxscompress | awk '/=> \//{print $3}' \
+       | grep -v -E '/lib(c|m)\.so' | sort -u | xargs -I{} cp -L {} /opt/nexus/lib/
+
 FROM python:3.12-slim
 
-# Unbuffered stdout/stderr so the per-job progress lines the app prints show up in
-# `docker logs` as they happen; no .pyc files written into the image layers/mounts.
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1
 
@@ -40,6 +53,7 @@ RUN apt-get update && apt-get install -y \
     unzip \
     libtbb12 \
     libgl1 \
+    unzip \
     && rm -rf /var/lib/apt/lists/*
 
 # Create a dedicated directory for PotreeConverter
@@ -57,14 +71,12 @@ RUN ldconfig
 
 WORKDIR /opt
 
-RUN ARCH=$(uname -m) && \
-    wget "https://github.com/cnr-isti-vclab/nexus/releases/download/v2025.05/nexus-linux-${ARCH}.tar.gz" -O nexus_release.tar.gz \
-    && mkdir -p /tmp/nexus \
-    && tar -xzf nexus_release.tar.gz -C /tmp/nexus \
-    && cp -rn /tmp/nexus/usr/* /usr/ \
-    && ldconfig \
-    && chmod +x /usr/bin/nxsbuild /usr/bin/nxscompress \
-    && rm -rf nexus_release.tar.gz /tmp/nexus
+# Nexus tools built in the builder stage (see there); their Qt/ICU/... libraries live in
+# /opt/nexus/lib so they cannot clash with anything else in the image.
+COPY --from=builder /opt/nexus/bin/ /usr/local/bin/
+COPY --from=builder /opt/nexus/lib/ /opt/nexus/lib/
+RUN echo /opt/nexus/lib > /etc/ld.so.conf.d/nexus.conf && ldconfig \
+    && ldd /usr/local/bin/nxsbuild /usr/local/bin/nxscompress | (! grep "not found")
 
 # Create the vendor directories first
 RUN mkdir -p /frontend/vendor/3dhop \

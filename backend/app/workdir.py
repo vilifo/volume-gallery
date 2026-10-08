@@ -26,10 +26,6 @@ from .config import settings
 KINDS = ("volumes", "meshes", "pointclouds")
 
 
-def enabled() -> bool:
-    return settings.PROCESSING_DIR is not None
-
-
 def job_dir(kind: str, slug: str) -> Path:
     """The scratch folder of one asset. Only valid when enabled()."""
     return settings.PROCESSING_DIR / kind / slug
@@ -38,7 +34,7 @@ def job_dir(kind: str, slug: str) -> Path:
 def work_dir_for(kind: str, slug: str, final_dir: Path) -> Path:
     """Where this asset's upload is staged and processed: its scratch folder if
     a processing directory is configured, otherwise `final_dir` itself."""
-    return job_dir(kind, slug) if enabled() else final_dir
+    return job_dir(kind, slug)
 
 
 def prepare_work_dir(kind: str, slug: str, final_dir: Path) -> Path:
@@ -54,8 +50,7 @@ def prepare_work_dir(kind: str, slug: str, final_dir: Path) -> Path:
 
 def discard_job(kind: str, slug: str) -> None:
     """Deletes an asset's scratch folder, if there is one."""
-    if enabled():
-        shutil.rmtree(job_dir(kind, slug), ignore_errors=True)
+    shutil.rmtree(job_dir(kind, slug), ignore_errors=True)
 
 
 def move_into_place(src: Path, dst: Path) -> Path:
@@ -103,8 +98,6 @@ def clear_stale(keep: set) -> None:
     `keep` ((kind, slug) pairs — assets still waiting for their TIFF slices),
     plus the temp files of any previous run. Nothing is processing at startup,
     so everything else is left over from a crash or restart."""
-    if not enabled():
-        return
     for kind in KINDS:
         base = settings.PROCESSING_DIR / kind
         if not base.is_dir():

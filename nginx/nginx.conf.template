@@ -9,14 +9,18 @@ http {
  
     # OME-Zarr/TIFF-stack archives can be large — don't cap upload size.
     client_max_body_size 0;
- 
-    # TIFF-stack conversion (see backend/app/tiff_convert.py) runs
-    # synchronously inside the upload request and can take a while for
-    # large stacks, so give it generous timeouts rather than nginx's
-    # 60s defaults.
-    proxy_read_timeout 600s;
-    proxy_send_timeout 600s;
-    client_body_timeout 600s;
+
+    # Anything nginx has to spool to disk goes into the processing directory (mounted
+    # into this container at /processing, see docker-compose.yml), never into the
+    # container's writable layer. That covers an upload body when request buffering is
+    # on (see proxy_request_buffering below) and large proxied responses. nginx creates
+    # these directories itself at startup, so the parent (/processing) must be writable.
+    client_body_temp_path /processing/.nginx_client_body 1 2;
+    proxy_temp_path       /processing/.nginx_proxy 1 2;
+
+    proxy_read_timeout 1200s;
+    proxy_send_timeout 1200s;
+    client_body_timeout 1200s;
  
     # Plain HTTP just redirects to HTTPS. WebGPU (needed by the volume
     # viewer) refuses to run outside a secure context, so there's no
@@ -50,10 +54,13 @@ http {
 			proxy_pass http://volume-gallery:8000;
 			proxy_http_version 1.1;
 
-			# Stream uploads straight through to the app. By default nginx first spools the
-			# whole request body (a multi-GB TIFF/zarr archive) into its own temp directory,
-			# inside the nginx container's writable layer, and only then forwards it.
-			proxy_request_buffering off;
+			# off: stream the upload straight through to the app; nginx writes nothing to
+			#      disk, and the app spools it into the processing directory itself.
+			# on:  nginx first receives the whole upload into
+			#      /processing/.nginx_client_body (see client_body_temp_path above) and only
+			#      then forwards it, so the app never waits on a slow client.
+			# Set with VG_NGINX_REQUEST_BUFFERING in .env (default: off).
+			proxy_request_buffering ${VG_NGINX_REQUEST_BUFFERING};
 			
 			proxy_set_header Host $host:${VG_HTTPS_PORT};
 			
