@@ -18,7 +18,10 @@ from ..config import settings
 def convert_pointcloud(source_path: Path, output_dir: Path, log=None) -> None:
     """source_path: the uploaded point cloud file (las/laz/ply/xyz/ptx —
     whatever the PotreeConverter build on your system supports).
-    output_dir: where PotreeConverter writes its octree + metadata.json."""
+    output_dir: where PotreeConverter writes its octree + metadata.json — the
+    point cloud's folder in the data directory, so nothing is copied afterwards.
+    The source file (in the scratch folder) is deleted when done; a partial
+    octree is removed if the conversion fails."""
     def _log(msg: str) -> None:
         if log:
             log(msg)
@@ -30,9 +33,10 @@ def convert_pointcloud(source_path: Path, output_dir: Path, log=None) -> None:
         subprocess.run(cmd, check=True)
         _log(f"Successfully generated potree folder: {output_dir}")
     except subprocess.CalledProcessError as e:
+        shutil.rmtree(output_dir, ignore_errors=True)
         raise ValueError(f"Error during Potree conversion: {e}")
     finally:
-        shutil.rmtree(str(source_path), ignore_errors=True)
+        source_path.unlink(missing_ok=True)  # was rmtree(), a silent no-op on a file
 
     metadata_path = output_dir / "metadata.json"
     if not metadata_path.exists():

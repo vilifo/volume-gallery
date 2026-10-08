@@ -26,8 +26,9 @@ def _volume_dir(slug: str) -> Path:
 
 
 def _work_dir(slug: str) -> Path:
-    """Where this volume's upload is staged and processed: its own data folder,
-    or — if VG_PROCESSING_DIR is set — a scratch folder (see workdir.py)."""
+    """The volume's scratch folder under VG_PROCESSING_DIR: holds the uploaded
+    .zip (and extracted TIFF slices); the result is written straight into the
+    volume's data folder (see workdir.py)."""
     return workdir.work_dir_for("volumes", slug, _volume_dir(slug))
 
 
@@ -129,10 +130,10 @@ def create_volume(
     source_kind = "zarr" if zarr_zip is not None else "tiff" if tiff_zip is not None else "tiff-files"
     source_upload = zarr_zip if zarr_zip is not None else tiff_zip
     try:
-        work_dir = workdir.prepare_work_dir("volumes", slug, vol_dir)
-        zip_path = work_dir / ZIP_NAME
-        with open(zip_path, "wb") as f:
-            shutil.copyfileobj(source_upload.file, f)
+        workdir.prepare_work_dir("volumes", slug, vol_dir)
+        # The upload is copied into the scratch folder by the background task, so
+        # the response isn't held up by it (see workdir.detach_upload).
+        upload_fd = workdir.detach_upload(source_upload)
     except Exception as exc:  # noqa: BLE001 - surface save errors to the caller
         shutil.rmtree(vol_dir, ignore_errors=True)
         workdir.discard_job("volumes", slug)
@@ -162,6 +163,7 @@ def create_volume(
         try:
             mesh = attach_mesh_to_volume(session, volume, mesh_file, editor, background_tasks)
         except Exception:
+            workdir.close_detached(upload_fd)
             shutil.rmtree(vol_dir, ignore_errors=True)
             workdir.discard_job("volumes", slug)
             session.delete(volume)
@@ -169,12 +171,14 @@ def create_volume(
             raise
 
     if source_kind != "tiff-files":
-        background_tasks.add_task(_process_upload, volume.id, str(vol_dir), source_kind)
+        background_tasks.add_task(_process_upload, volume.id, str(vol_dir), source_kind, upload_fd)
+    else:
+        workdir.close_detached(upload_fd)
 
     return _volume_read(volume, mesh)
 
 
-def _process_upload(volume_id: int, vol_dir_str: str, source_kind: str) -> None:
+def _process_upload(volume_id: int, vol_dir_str: str, source_kind: str, upload_fd: int) -> None:
     """Runs after create_volume's response has already been sent. Opens its
     own DB session — the request-scoped one from create_volume is closed by
     the time this runs."""
@@ -182,6 +186,7 @@ def _process_upload(volume_id: int, vol_dir_str: str, source_kind: str) -> None:
     with Session(engine) as session:
         volume = session.get(Volume, volume_id)
         if volume is None:
+            workdir.close_detached(upload_fd)
             return
 
         def log(message: str) -> None:
@@ -193,6 +198,8 @@ def _process_upload(volume_id: int, vol_dir_str: str, source_kind: str) -> None:
         work_dir = _work_dir(volume.slug)
         try:
             zip_path = work_dir / ZIP_NAME
+            log("Saving upload")
+            workdir.save_detached(upload_fd, zip_path)
             if source_kind == "zarr":
                 log("Extracting OME-Zarr archive")
                 zarr_root = extract_zarr_zip_from_path(zip_path, vol_dir)

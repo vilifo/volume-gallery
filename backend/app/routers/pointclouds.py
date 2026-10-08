@@ -27,8 +27,8 @@ def _pointcloud_dir(slug: str) -> Path:
 
 
 def _work_dir(slug: str) -> Path:
-    """Where this point cloud's upload is staged and converted: its own data
-    folder, or — if VG_PROCESSING_DIR is set — a scratch folder (see workdir.py)."""
+    """The point cloud's scratch folder under VG_PROCESSING_DIR: holds the
+    uploaded file; the octree is exported straight into the data folder."""
     return workdir.work_dir_for("pointclouds", slug, _pointcloud_dir(slug))
 
 
@@ -104,9 +104,8 @@ def create_pointcloud(
 
     try:
         work_dir = workdir.prepare_work_dir("pointclouds", slug, pc_dir)
-        upload_path = work_dir / f"_upload{source_ext}"
-        with open(upload_path, "wb") as f:
-            shutil.copyfileobj(pointcloud_file.file, f)
+        upload_path = work_dir / f"_upload{source_ext}"  # upload stays in scratch; never copied into data
+        upload_fd = workdir.detach_upload(pointcloud_file)  # copied to upload_path by the background task
     except Exception as exc:  # noqa: BLE001
         shutil.rmtree(pc_dir, ignore_errors=True)
         workdir.discard_job("pointclouds", slug)
@@ -121,17 +120,18 @@ def create_pointcloud(
     session.commit()
     session.refresh(pc)
 
-    background_tasks.add_task(_process_pointcloud_upload, pc.id, str(pc_dir), str(upload_path))
+    background_tasks.add_task(_process_pointcloud_upload, pc.id, str(pc_dir), str(upload_path), upload_fd)
 
     return _pointcloud_read(pc)
 
 
-def _process_pointcloud_upload(pc_id: int, pc_dir_str: str, upload_path_str: str) -> None:
+def _process_pointcloud_upload(pc_id: int, pc_dir_str: str, upload_path_str: str, upload_fd: int) -> None:
     pc_dir = Path(pc_dir_str)
     upload_path = Path(upload_path_str)
     with Session(engine) as session:
         pc = session.get(PointCloud, pc_id)
         if pc is None:
+            workdir.close_detached(upload_fd)
             return
 
         def log(message: str) -> None:
@@ -142,6 +142,8 @@ def _process_pointcloud_upload(pc_id: int, pc_dir_str: str, upload_path_str: str
 
         output_dir = pc_dir / "pointcloud"
         try:
+            log("Saving upload")
+            workdir.save_detached(upload_fd, upload_path)
             convert_pointcloud(upload_path, output_dir, log=log)
             pc.pc_path = output_dir.name
             pc.status = AssetStatus.ready

@@ -1,7 +1,7 @@
 import os
 import tempfile
 from pathlib import Path  # noqa: E402
-from typing import Optional
+
 
 class Settings:
     # --- Security ---
@@ -19,7 +19,7 @@ class Settings:
     POINTCLOUDS_DIR: Path = DATA_DIR / "pointclouds"
     DB_PATH: Path = DATA_DIR / "gallery.db"
 
-    PROCESSING_DIR: Optional[Path] = Path(os.environ.get("VG_PROCESSING_DIR", "/processing"))
+    PROCESSING_DIR: Path = Path(os.environ.get("VG_PROCESSING_DIR") or "/processing")  # "" (unset in compose) -> default
 
     # --- External processing tools ---
     # These binaries are NOT bundled with this app — see README's "Meshes and

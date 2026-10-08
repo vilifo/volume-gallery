@@ -24,8 +24,8 @@ def _mesh_dir(slug: str) -> Path:
 
 
 def _work_dir(slug: str) -> Path:
-    """Where this mesh's upload is staged and converted: its own data folder,
-    or — if VG_PROCESSING_DIR is set — a scratch folder (see workdir.py)."""
+    """The mesh's scratch folder under VG_PROCESSING_DIR: only temp files of the
+    conversion live here; the upload and the result are in the data folder."""
     return workdir.work_dir_for("meshes", slug, _mesh_dir(slug))
 
 
@@ -104,9 +104,8 @@ def attach_mesh_to_volume(session: Session, volume, mesh_file: UploadFile, edito
     mesh_dir = _mesh_dir(slug)
     mesh_dir.mkdir(parents=True, exist_ok=False)
     try:
-        work_dir = workdir.prepare_work_dir("meshes", slug, mesh_dir)  # == mesh_dir unless VG_PROCESSING_DIR is set
-        with open(work_dir / f"_upload.{source_ext}", "wb") as f:
-            shutil.copyfileobj(mesh_file.file, f)
+        workdir.prepare_work_dir("meshes", slug, mesh_dir)  # scratch for the conversion's temp files
+        upload_fd = workdir.detach_upload(mesh_file)  # copied into the data folder by the background task
     except Exception as exc:  # noqa: BLE001
         shutil.rmtree(mesh_dir, ignore_errors=True)
         workdir.discard_job("meshes", slug)
@@ -123,7 +122,7 @@ def attach_mesh_to_volume(session: Session, volume, mesh_file: UploadFile, edito
     session.add(volume)
     session.commit()
     session.refresh(mesh)
-    background_tasks.add_task(_process_mesh_upload, mesh.id, str(mesh_dir))
+    background_tasks.add_task(_process_mesh_upload, mesh.id, str(mesh_dir), upload_fd)
     return mesh
 
 
@@ -185,10 +184,8 @@ def create_mesh(
 
     source_ext = Path(mesh_file.filename or "").suffix.lstrip(".").lower() or "bin"
     try:
-        work_dir = workdir.prepare_work_dir("meshes", slug, mesh_dir)  # == mesh_dir unless VG_PROCESSING_DIR is set
-        upload_path = mesh_dir / f"_upload.{source_ext}"
-        with open(upload_path, "wb") as f:
-            shutil.copyfileobj(mesh_file.file, f)
+        workdir.prepare_work_dir("meshes", slug, mesh_dir)  # scratch for the conversion's temp files
+        upload_fd = workdir.detach_upload(mesh_file)  # copied into the data folder by the background task
     except Exception as exc:  # noqa: BLE001
         shutil.rmtree(mesh_dir, ignore_errors=True)
         workdir.discard_job("meshes", slug)
@@ -203,16 +200,17 @@ def create_mesh(
     session.commit()
     session.refresh(mesh)
 
-    background_tasks.add_task(_process_mesh_upload, mesh.id, str(mesh_dir))
+    background_tasks.add_task(_process_mesh_upload, mesh.id, str(mesh_dir), upload_fd)
 
     return _mesh_read(mesh, can_download=True)
 
 
-def _process_mesh_upload(mesh_id: int, mesh_dir_str: str) -> None:
+def _process_mesh_upload(mesh_id: int, mesh_dir_str: str, upload_fd: int) -> None:
     mesh_dir = Path(mesh_dir_str)
     with Session(engine) as session:
         mesh = session.get(Mesh, mesh_id)
         if mesh is None:
+            workdir.close_detached(upload_fd)
             return
 
         def log(message: str) -> None:
@@ -221,11 +219,13 @@ def _process_mesh_upload(mesh_id: int, mesh_dir_str: str) -> None:
             session.add(mesh)
             session.commit()
 
-        # Conversion runs in work_dir: mesh_dir itself, or a scratch folder when
-        # VG_PROCESSING_DIR is set — then the original upload (kept for downloads)
-        # and the converted .nxz are moved into mesh_dir when done.
+        # The original upload (kept for downloads) already sits in mesh_dir and the
+        # .nxz is compressed straight into it; only the intermediate .ply/.nxs
+        # files go to work_dir (the scratch folder, discarded afterwards).
         work_dir = _work_dir(mesh.slug)
         try:
+            log("Saving upload")
+            workdir.save_detached(upload_fd, mesh_dir / f"_upload.{mesh.file_extension}")
             nxz_path = convert_mesh_to_nxz(work_dir, mesh_dir, log)
             mesh.mesh_filename = nxz_path.name
             mesh.status = AssetStatus.ready

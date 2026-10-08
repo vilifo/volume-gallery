@@ -23,7 +23,8 @@ import subprocess
 
 TIFF_EXTENSIONS = (".tif", ".tiff")
 ZARR_DIRNAME = "data.ome.zarr"  # the converted/extracted store, as kept in the volume's data folder
-ZIP_NAME = "_upload.zip"  # the uploaded .zip, as saved in the volume's data folder
+ZIP_NAME = "_upload.zip"  # the uploaded .zip, as saved in the volume's processing (scratch) folder
+TIFF_IMPORT_DIR = "_tiff_import"  # temporary folder (inside the scratch folder) for extracted TIFFs
 
 
 def convert_tiff_stack_to_ome_zarr(tiff_dir: Path, zarr_dir: Path) -> None:
@@ -161,17 +162,19 @@ def find_ome_zarr_root(vol_dir: Path) -> Optional[Path]:
 
 
 def extract_zarr_zip_from_path(zip_path: Path, vol_dir: Path) -> Path:
-    """Extracts an OME-Zarr .zip already saved at zip_path into vol_dir and
-    locates its multiscale group root (see _find_ome_zarr_root for why
-    presence of a zarr.json/.zattrs file alone isn't sufficient)."""
-    if not zip_path:
-        raise ValueError("vol_dir must contain exactly one .zip file")
-    zip_path = vol_dir / zip_path[0]
+    """Extracts an OME-Zarr .zip saved at zip_path (in the processing folder)
+    straight into vol_dir (in the data folder) and locates its multiscale group
+    root (see _find_ome_zarr_root for why presence of a zarr.json/.zattrs file
+    alone isn't sufficient). The zip itself is never copied into vol_dir."""
+    if not zip_path or not Path(zip_path).is_file():
+        raise ValueError(f"Uploaded archive not found: {zip_path}")
     extract_zip_parallel(zip_path, vol_dir)
 
     zarr_root = find_ome_zarr_root(vol_dir)
     if zarr_root is None:
-        shutil.rmtree(vol_dir)
+        # Drop what was extracted, but keep the (empty) folder: it claims the slug.
+        shutil.rmtree(vol_dir, ignore_errors=True)
+        vol_dir.mkdir(parents=True, exist_ok=True)
         raise ValueError(
             "No OME-NGFF multiscales metadata found anywhere in the archive. "
             "Every zarr.json/.zattrs found lacks a multiscales entry — check "
@@ -251,10 +254,11 @@ def _find_tiff_dir(scratch_dir: Path) -> Optional[Path]:
 
 
 def convert_tiff_zip_from_path(zip_path: Path, work_dir: Path, vol_dir: Path, log) -> Path:
-    """Extracts a TIFF-stack .zip already saved at zip_path into a scratch
-    directory, converts it to OME-Zarr under vol_dir, then deletes the
-    extracted TIFF files — only the converted OME-Zarr store is kept on disk
-    afterward. `log` is called with progress messages as conversion runs."""
+    """Extracts a TIFF-stack .zip saved at zip_path into a folder inside
+    work_dir (the processing folder), writes the OME-Zarr store directly under
+    vol_dir (the data folder), then deletes the extracted TIFF files — only the
+    converted store ends up in the data folder. A partial store is removed if
+    the conversion fails. `log` is called with progress messages."""
     log("Extracting TIFF archive")
     scratch_dir = work_dir / TIFF_IMPORT_DIR
     scratch_dir.mkdir(exist_ok=True)
@@ -271,6 +275,9 @@ def convert_tiff_zip_from_path(zip_path: Path, work_dir: Path, vol_dir: Path, lo
     zarr_dir = vol_dir / ZARR_DIRNAME
     try:
         convert_tiff_stack_to_ome_zarr(tiff_source_dir, zarr_dir)
+    except BaseException:
+        shutil.rmtree(zarr_dir, ignore_errors=True)
+        raise
     finally:
         shutil.rmtree(scratch_dir, ignore_errors=True)
 

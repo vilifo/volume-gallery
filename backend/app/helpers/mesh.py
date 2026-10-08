@@ -13,6 +13,9 @@ OUTPUT_FILE = "mesh.nxz"
 
 
 def convert_mesh_to_nxz(work_dir: Path, mesh_dir: Path, log) -> Path:
+    """Reads mesh_dir/_upload.* (data folder), keeps the intermediate .ply/.nxs
+    in work_dir (scratch folder) and compresses the result directly to
+    mesh_dir/mesh.nxz (data folder)."""
     files = os.listdir(mesh_dir)
     file = None
     for f in files:
@@ -51,6 +54,7 @@ def convert_mesh_to_nxz(work_dir: Path, mesh_dir: Path, log) -> Path:
         subprocess.run(cmd, check=True)
         log(f"Successfully compressed Nexus file: {output_file}")
     except subprocess.CalledProcessError as e:
+        output_file.unlink(missing_ok=True)  # written straight into the data folder: drop the partial file
         raise ValueError(f"Error during Nexus compilation: {e}")
     finally:
         if os.path.exists(temp_nexus_file):
