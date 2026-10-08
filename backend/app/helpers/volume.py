@@ -15,12 +15,16 @@ import dask.array as da
 import tifffile
 import zarr
 from ome_zarr.writer import write_image
-import zipfile
 import shutil
 from collections import deque
 from typing import Optional
+import multiprocessing
+import subprocess
 
 TIFF_EXTENSIONS = (".tif", ".tiff")
+ZARR_DIRNAME = "data.ome.zarr"  # the converted/extracted store, as kept in the volume's data folder
+ZIP_NAME = "_upload.zip"  # the uploaded .zip, as saved in the volume's processing (scratch) folder
+TIFF_IMPORT_DIR = "_tiff_import"  # temporary folder (inside the scratch folder) for extracted TIFFs
 
 
 def convert_tiff_stack_to_ome_zarr(tiff_dir: Path, zarr_dir: Path) -> None:
@@ -80,6 +84,30 @@ def convert_tiff_stack_to_ome_zarr(tiff_dir: Path, zarr_dir: Path) -> None:
     )
 
 
+def extract_zip_parallel(zip_path, extract_to):
+    os.makedirs(extract_to, exist_ok=True)
+    cores = str(max(1, multiprocessing.cpu_count() - 1))
+
+    print(f"Starting parallel extraction on {cores} cores...")
+
+    list_cmd = ["unzip", "-Z", "-1", zip_path]
+    try:
+        files = subprocess.run(list_cmd, capture_output=True, text=True, check=True)
+    except subprocess.CalledProcessError as e:
+        print(f"Failed to read zip. Is 'unzip' installed? {e}")
+        return
+
+    extract_cmd = [
+        "xargs", "-d", "\n", "-P", cores, "-I", "{}",
+        "unzip", "-o", "-q", zip_path, "{}", "-d", extract_to
+    ]
+
+    try:
+        subprocess.run(extract_cmd, input=files.stdout, text=True, check=True)
+    except subprocess.CalledProcessError as e:
+        print(f"Extraction failed: {e}")
+
+
 def _has_multiscales(attrs: dict) -> bool:
     """Checks the two shapes OME-NGFF metadata can take: a flat
     `multiscales` key (v2, and plain v3/v0.4), or one namespaced under
@@ -133,26 +161,20 @@ def find_ome_zarr_root(vol_dir: Path) -> Optional[Path]:
     return None
 
 
-def extract_zarr_zip_from_path(vol_dir: Path) -> Path:
-    """Extracts an OME-Zarr .zip already saved at zip_path into vol_dir and
-    locates its multiscale group root (see _find_ome_zarr_root for why
-    presence of a zarr.json/.zattrs file alone isn't sufficient)."""
-    files = os.listdir(vol_dir)
-    zip_path = [f for f in files if f.endswith(".zip")]
-    if not zip_path:
-        raise ValueError("vol_dir must contain exactly one .zip file")
-    zip_path = vol_dir / zip_path[0]
-    try:
-        with zipfile.ZipFile(zip_path) as zf:
-            zf.extractall(vol_dir)
-    except zipfile.BadZipFile:
-        raise ValueError("zarr_zip is not a valid zip file")
-    finally:
-        zip_path.unlink(missing_ok=True)
+def extract_zarr_zip_from_path(zip_path: Path, vol_dir: Path) -> Path:
+    """Extracts an OME-Zarr .zip saved at zip_path (in the processing folder)
+    straight into vol_dir (in the data folder) and locates its multiscale group
+    root (see _find_ome_zarr_root for why presence of a zarr.json/.zattrs file
+    alone isn't sufficient). The zip itself is never copied into vol_dir."""
+    if not zip_path or not Path(zip_path).is_file():
+        raise ValueError(f"Uploaded archive not found: {zip_path}")
+    extract_zip_parallel(zip_path, vol_dir)
 
     zarr_root = find_ome_zarr_root(vol_dir)
     if zarr_root is None:
-        shutil.rmtree(vol_dir)
+        # Drop what was extracted, but keep the (empty) folder: it claims the slug.
+        shutil.rmtree(vol_dir, ignore_errors=True)
+        vol_dir.mkdir(parents=True, exist_ok=True)
         raise ValueError(
             "No OME-NGFF multiscales metadata found anywhere in the archive. "
             "Every zarr.json/.zattrs found lacks a multiscales entry — check "
@@ -164,31 +186,83 @@ def extract_zarr_zip_from_path(vol_dir: Path) -> Path:
     return zarr_root
 
 
-def convert_tiff_zip_from_path(vol_dir: Path, log) -> Path:
-    """Extracts a TIFF-stack .zip already saved at zip_path into a scratch
-    directory, converts it to OME-Zarr under vol_dir, then deletes the
-    extracted TIFF files — only the converted OME-Zarr store is kept on disk
-    afterward. `log` is called with progress messages as conversion runs."""
-    files = os.listdir(vol_dir)
-    zip_path = [f for f in files if f.endswith(".zip")]
-    if not zip_path:
-        raise ValueError("vol_dir must contain exactly one .zip file")
-    zip_path = vol_dir / zip_path[0]
-    log("Extracting TIFF archive")
-    scratch_dir = vol_dir / "_tiff_import"
-    scratch_dir.mkdir(exist_ok=True)
-    try:
-        with zipfile.ZipFile(zip_path) as zf:
-            zf.extractall(scratch_dir)
-    except zipfile.BadZipFile:
-        raise ValueError("tiff_zip is not a valid zip file")
-    finally:
-        zip_path.unlink(missing_ok=True)
+def _find_ome_zarr_root(vol_dir: Path) -> Optional[Path]:
+    """Breadth-first search for the shallowest directory whose Zarr group
+    attributes actually declare OME-NGFF multiscales metadata. BFS (rather
+    than rglob, whose traversal order isn't guaranteed) guarantees we can
+    never mistake a nested per-resolution array for the real multiscale
+    group, since every array in a Zarr v3 store has its own zarr.json too."""
+    queue = deque([vol_dir])
+    while queue:
+        current = queue.popleft()
+        attrs = _read_group_attrs(current)
+        if attrs is not None and _has_multiscales(attrs):
+            return current
+        try:
+            children = sorted(p for p in current.iterdir() if p.is_dir())
+        except OSError:
+            children = []
+        queue.extend(children)
+    return None
 
+
+def convert_tiff_scratch_dir(scratch_dir: Path, vol_dir: Path, log) -> Path:
+    """Converts the TIFF slices under `scratch_dir` (extracted from a zip, or
+    uploaded one by one) to OME-Zarr under vol_dir and deletes `scratch_dir`
+    afterward. Returns the OME-Zarr root."""
     # Slices may be nested in a subfolder inside the zip rather than at its
     # top level (e.g. a zip of "scan/slice_0001.tif" instead of
     # "slice_0001.tif") — search shallowest-first for the folder that
     # actually contains the .tif files, same rationale as _find_ome_zarr_root.
+    tiff_source_dir = _find_tiff_dir(scratch_dir)
+    if tiff_source_dir is None:
+        shutil.rmtree(scratch_dir, ignore_errors=True)
+        raise ValueError("No .tif/.tiff files found")
+
+    n_files = sum(
+        1 for p in tiff_source_dir.iterdir() if p.is_file() and p.suffix.lower() in (".tif", ".tiff")
+    )
+    log(f"Converting {n_files} TIFF slices to OME-Zarr (this can take a while for large stacks)")
+
+    zarr_dir = vol_dir / ZARR_DIRNAME
+    try:
+        convert_tiff_stack_to_ome_zarr(tiff_source_dir, zarr_dir)
+    finally:
+        shutil.rmtree(scratch_dir, ignore_errors=True)
+
+    log("Locating OME-Zarr metadata")
+    zarr_root = _find_ome_zarr_root(vol_dir)
+    if zarr_root is None:
+        raise ValueError("TIFF conversion completed but produced no readable OME-NGFF metadata")
+    return zarr_root
+
+
+def _find_tiff_dir(scratch_dir: Path) -> Optional[Path]:
+    """Breadth-first search for the shallowest directory containing at least
+    one .tif/.tiff file."""
+    queue = deque([scratch_dir])
+    while queue:
+        current = queue.popleft()
+        try:
+            entries = list(current.iterdir())
+        except OSError:
+            continue
+        if any(p.is_file() and p.suffix.lower() in (".tif", ".tiff") for p in entries):
+            return current
+        queue.extend(sorted(p for p in entries if p.is_dir()))
+    return None
+
+
+def convert_tiff_zip_from_path(zip_path: Path, work_dir: Path, vol_dir: Path, log) -> Path:
+    """Extracts a TIFF-stack .zip saved at zip_path into a folder inside
+    work_dir (the processing folder), writes the OME-Zarr store directly under
+    vol_dir (the data folder), then deletes the extracted TIFF files — only the
+    converted store ends up in the data folder. A partial store is removed if
+    the conversion fails. `log` is called with progress messages."""
+    log("Extracting TIFF archive")
+    scratch_dir = work_dir / TIFF_IMPORT_DIR
+    scratch_dir.mkdir(exist_ok=True)
+    extract_zip_parallel(zip_path, scratch_dir)
     tiff_source_dir = find_tiff_dir(scratch_dir)
     if tiff_source_dir is None:
         raise ValueError("No .tif/.tiff files found in tiff_zip")
@@ -198,12 +272,13 @@ def convert_tiff_zip_from_path(vol_dir: Path, log) -> Path:
     )
     log(f"Converting {n_files} TIFF slices to OME-Zarr (this can take a while for large stacks)")
 
-    zarr_dir = vol_dir / "data.ome.zarr"
+    zarr_dir = vol_dir / ZARR_DIRNAME
     try:
         convert_tiff_stack_to_ome_zarr(tiff_source_dir, zarr_dir)
+    except BaseException:
+        shutil.rmtree(zarr_dir, ignore_errors=True)
+        raise
     finally:
-        # Only the converted OME-Zarr store is kept — the source TIFFs are
-        # deleted whether conversion succeeded or failed.
         shutil.rmtree(scratch_dir, ignore_errors=True)
 
     log("Locating OME-Zarr metadata")
@@ -231,7 +306,7 @@ def find_tiff_dir(scratch_dir: Path) -> Optional[Path]:
     return None
 
 
-def _get_multiscales(attrs: dict) -> Optional[list]:
+def get_multiscales(attrs: dict) -> Optional[list]:
     """Returns the `multiscales` array from a Zarr group's attributes,
     handling both shapes OME-NGFF metadata can take: a flat `multiscales`
     key (v2, and plain v3/v0.4), or one namespaced under `ome` (v0.5's
@@ -253,7 +328,7 @@ def count_multiscale_levels(zarr_root: Path) -> Optional[int]:
     attrs = _read_group_attrs(zarr_root)
     if attrs is None:
         return None
-    multiscales = _get_multiscales(attrs)
+    multiscales = get_multiscales(attrs)
     if not multiscales or not isinstance(multiscales, list):
         return None
     datasets = multiscales[0].get("datasets") if isinstance(multiscales[0], dict) else None
@@ -278,7 +353,7 @@ def truncate_multiscales_json(raw: bytes, min_lod: int) -> Optional[bytes]:
     # v3 (zarr.json): it's nested under "attributes" (and possibly "ome").
     is_v3 = "attributes" in data and isinstance(data.get("attributes"), dict)
     attrs = data["attributes"] if is_v3 else data
-    multiscales = _get_multiscales(attrs)
+    multiscales = get_multiscales(attrs)
     if not multiscales or not isinstance(multiscales, list):
         return None
 

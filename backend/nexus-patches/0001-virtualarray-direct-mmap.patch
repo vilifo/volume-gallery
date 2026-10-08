@@ -1,0 +1,83 @@
+diff --git a/src/common/virtualarray.cpp b/src/common/virtualarray.cpp
+index 4202e19..c689e37 100644
+--- a/src/common/virtualarray.cpp
++++ b/src/common/virtualarray.cpp
+@@ -21,6 +21,13 @@ for more details.
+ 
+ #include <QDir>
+ 
++#ifndef WIN32
++#include <errno.h>
++#include <string.h>
++#include <unistd.h>
++#include <sys/mman.h>
++#endif
++
+ using namespace std;
+ 
+ VirtualMemory::VirtualMemory(QString prefix):
+@@ -112,7 +119,26 @@ uchar *VirtualMemory::mapBlock(quint64 block) {
+ 	quint64 offset = blockOffset(block);
+ 	quint64 length = blockSize(block);
+ 	assert(offset + length <= (quint64)QFile::size());
++#ifndef WIN32
++	// QFile::map() compares the range with a file size that Qt cached when the
++	// temporary file was opened (0) and never refreshes after QFile::resize(), so it
++	// warns "Mapping a file beyond its size is not portable" for blocks that lie well
++	// inside the already-extended file. Map the descriptor directly instead (the offset
++	// has to be page aligned, which QFile::map() used to do for us).
++	static const quint64 page = (quint64)sysconf(_SC_PAGESIZE);
++	quint64 aligned = offset & ~(page - 1);
++	quint64 delta = offset - aligned;
++	void *base = ::mmap(NULL, length + delta, PROT_READ | PROT_WRITE, MAP_SHARED, handle(), aligned);
++	if(base == MAP_FAILED) {
++		setErrorString(QString("mmap failed: ") + strerror(errno));
++		cache[block] = NULL;
++	} else {
++		cache[block] = (uchar *)base + delta;
++		mmaps[cache[block]] = std::make_pair(base, (size_t)(length + delta));
++	}
++#else
+ 	cache[block] = map(offset, length);
++#endif
+ 	used_memory += length;
+ 	return cache[block];
+ }
+@@ -120,7 +146,14 @@ uchar *VirtualMemory::mapBlock(quint64 block) {
+ void VirtualMemory::unmapBlock(quint64 block) {
+ 	assert(block < cache.size());
+ 	assert(cache[block]);
++#ifndef WIN32
++	std::map<uchar *, std::pair<void *, size_t> >::iterator it = mmaps.find(cache[block]);
++	assert(it != mmaps.end());
++	::munmap(it->second.first, it->second.second);
++	mmaps.erase(it);
++#else
+ 	unmap(cache[block]);
++#endif
+ 	cache[block] = NULL;
+ 	used_memory -= blockSize(block);
+ }
+diff --git a/src/common/virtualarray.h b/src/common/virtualarray.h
+index af10826..b2d5414 100644
+--- a/src/common/virtualarray.h
++++ b/src/common/virtualarray.h
+@@ -24,6 +24,8 @@ for more details.
+ 
+ #include <vector>
+ #include <deque>
++#include <map>
++#include <utility>
+ #include <iostream>
+ 
+ /*
+@@ -62,6 +64,9 @@ private:
+ 	quint64 max_memory;
+ 	std::vector<uchar *> cache;   //1 pointer per block Nu
+ 	std::deque<quint64> mapped;
++#ifndef WIN32
++	std::map<uchar *, std::pair<void *, size_t> > mmaps; //block pointer -> page aligned mapping (see mapBlock)
++#endif
+ };
+ 
+ 

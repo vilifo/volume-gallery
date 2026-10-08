@@ -12,7 +12,10 @@ TEMP_NEXUS_FILE = "temp.nxs"
 OUTPUT_FILE = "mesh.nxz"
 
 
-def convert_mesh_to_nxz(mesh_dir: Path, log) -> Path:
+def convert_mesh_to_nxz(work_dir: Path, mesh_dir: Path, log) -> Path:
+    """Reads mesh_dir/_upload.* (data folder), keeps the intermediate .ply/.nxs
+    in work_dir (scratch folder) and compresses the result directly to
+    mesh_dir/mesh.nxz (data folder)."""
     files = os.listdir(mesh_dir)
     file = None
     for f in files:
@@ -22,8 +25,8 @@ def convert_mesh_to_nxz(mesh_dir: Path, log) -> Path:
     if file is None:
         raise ValueError(f"The _upload file not found in {mesh_dir}.")
     input_file = mesh_dir / file
-    temp_mesh_file = mesh_dir / TEMP_MESH_FILE
-    temp_nexus_file = mesh_dir / TEMP_NEXUS_FILE
+    temp_mesh_file = work_dir / TEMP_MESH_FILE
+    temp_nexus_file = work_dir / TEMP_NEXUS_FILE
     output_file = mesh_dir / OUTPUT_FILE
 
     # nxsbuild favors PLY. For 3MF and STL, we route through trimesh first.
@@ -51,6 +54,7 @@ def convert_mesh_to_nxz(mesh_dir: Path, log) -> Path:
         subprocess.run(cmd, check=True)
         log(f"Successfully compressed Nexus file: {output_file}")
     except subprocess.CalledProcessError as e:
+        output_file.unlink(missing_ok=True)  # written straight into the data folder: drop the partial file
         raise ValueError(f"Error during Nexus compilation: {e}")
     finally:
         if os.path.exists(temp_nexus_file):

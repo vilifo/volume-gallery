@@ -27,8 +27,8 @@ def _pointcloud_dir(slug: str) -> Path:
 
 
 def _work_dir(slug: str) -> Path:
-    """Where this point cloud's upload is staged and converted: its own data
-    folder, or — if VG_PROCESSING_DIR is set — a scratch folder (see workdir.py)."""
+    """The point cloud's scratch folder under VG_PROCESSING_DIR: holds the
+    uploaded file; the octree is exported straight into the data folder."""
     return workdir.work_dir_for("pointclouds", slug, _pointcloud_dir(slug))
 
 
@@ -41,20 +41,11 @@ def _can_see_pointcloud(user: User, pc: PointCloud, session: Session) -> bool:
     return grant is not None
 
 
-def _can_download_pointcloud(user: User, pc: PointCloud, session: Session) -> bool:
-    if user.role in (Role.admin, Role.editor):
-        return True
-    grant = session.exec(
-        select(PointCloudAccess).where(PointCloudAccess.user_id == user.id, PointCloudAccess.pointcloud_id == pc.id)
-    ).first()
-    return grant is not None and grant.can_download
-
-
-def _pointcloud_read(pc: PointCloud, can_download: bool = False) -> PointCloudRead:
+def _pointcloud_read(pc: PointCloud) -> PointCloudRead:
     log_lines = [line for line in (pc.status_log or "").split("\n") if line]
     return PointCloudRead(
         id=pc.id, slug=pc.slug, title=pc.title, description=pc.description, created_at=pc.created_at.isoformat(),
-        status=pc.status, status_log=log_lines, can_download=can_download,
+        status=pc.status, status_log=log_lines
     )
 
 
@@ -64,7 +55,7 @@ def _pointcloud_read(pc: PointCloud, can_download: bool = False) -> PointCloudRe
 def list_pointclouds(session: Session = Depends(get_session), user: User = Depends(get_current_user)):
     pcs = session.exec(select(PointCloud)).all()
     visible = [pc for pc in pcs if _can_see_pointcloud(user, pc, session)]
-    return [_pointcloud_read(pc, _can_download_pointcloud(user, pc, session)) for pc in visible]
+    return [_pointcloud_read(pc) for pc in visible]
 
 
 @router.get("/{pc_id}", response_model=PointCloudRead)
@@ -72,7 +63,7 @@ def get_pointcloud(pc_id: int, session: Session = Depends(get_session), user: Us
     pc = session.get(PointCloud, pc_id)
     if not pc or not _can_see_pointcloud(user, pc, session):
         raise HTTPException(status_code=404, detail="Point cloud not found")
-    return _pointcloud_read(pc, _can_download_pointcloud(user, pc, session))
+    return _pointcloud_read(pc)
 
 
 @router.get("/{pc_id}/status", response_model=AssetStatusRead)
@@ -112,10 +103,9 @@ def create_pointcloud(
     pc_dir.mkdir(parents=True, exist_ok=False)
 
     try:
-        work_dir = workdir.prepare_work_dir("pointclouds", slug, pc_dir)  # == pc_dir unless VG_PROCESSING_DIR is set
-        upload_path = work_dir / f"_upload{source_ext}"
-        with open(upload_path, "wb") as f:
-            shutil.copyfileobj(pointcloud_file.file, f)
+        work_dir = workdir.prepare_work_dir("pointclouds", slug, pc_dir)
+        upload_path = work_dir / f"_upload{source_ext}"  # upload stays in scratch; never copied into data
+        upload_fd = workdir.detach_upload(pointcloud_file)  # copied to upload_path by the background task
     except Exception as exc:  # noqa: BLE001
         shutil.rmtree(pc_dir, ignore_errors=True)
         workdir.discard_job("pointclouds", slug)
@@ -130,17 +120,18 @@ def create_pointcloud(
     session.commit()
     session.refresh(pc)
 
-    background_tasks.add_task(_process_pointcloud_upload, pc.id, str(pc_dir), str(upload_path))
+    background_tasks.add_task(_process_pointcloud_upload, pc.id, str(pc_dir), str(upload_path), upload_fd)
 
-    return _pointcloud_read(pc, can_download=True)
+    return _pointcloud_read(pc)
 
 
-def _process_pointcloud_upload(pc_id: int, pc_dir_str: str, upload_path_str: str) -> None:
+def _process_pointcloud_upload(pc_id: int, pc_dir_str: str, upload_path_str: str, upload_fd: int) -> None:
     pc_dir = Path(pc_dir_str)
     upload_path = Path(upload_path_str)
     with Session(engine) as session:
         pc = session.get(PointCloud, pc_id)
         if pc is None:
+            workdir.close_detached(upload_fd)
             return
 
         def log(message: str) -> None:
@@ -149,16 +140,11 @@ def _process_pointcloud_upload(pc_id: int, pc_dir_str: str, upload_path_str: str
             session.add(pc)
             session.commit()
 
-        # The octree is built in work_dir: pc_dir itself, or a scratch folder when
-        # VG_PROCESSING_DIR is set — then it is moved into pc_dir when finished.
-        work_dir = _work_dir(pc.slug)
-        staged = work_dir != pc_dir
-        output_dir = work_dir / "pointcloud"
+        output_dir = pc_dir / "pointcloud"
         try:
+            log("Saving upload")
+            workdir.save_detached(upload_fd, upload_path)
             convert_pointcloud(upload_path, output_dir, log=log)
-            if staged:
-                log("Moving the finished octree into the data directory")
-                output_dir = workdir.move_into_place(output_dir, pc_dir / output_dir.name)
             pc.pc_path = output_dir.name
             pc.status = AssetStatus.ready
             log("Ready")
@@ -169,8 +155,7 @@ def _process_pointcloud_upload(pc_id: int, pc_dir_str: str, upload_path_str: str
             # Only the converted octree is kept — the original point cloud
             # upload is deleted either way (can be large: las/laz files).
             upload_path.unlink(missing_ok=True)
-            if staged:
-                workdir.discard_job("pointclouds", pc.slug)  # scratch is never kept
+            workdir.discard_job("pointclouds", pc.slug)  # scratch is never kept
         session.add(pc)
         session.commit()
 
@@ -198,7 +183,7 @@ def list_access(pc_id: int, session: Session = Depends(get_session), _editor: Us
     for g in grants:
         u = session.get(User, g.user_id)
         if u:
-            result.append(GrantedUserRead(id=u.id, username=u.username, can_download=g.can_download))
+            result.append(GrantedUserRead(id=u.id, username=u.username))
     return result
 
 
@@ -214,12 +199,11 @@ def grant_access(
         select(PointCloudAccess).where(PointCloudAccess.pointcloud_id == pc_id, PointCloudAccess.user_id == payload.user_id)
     ).first()
     if existing:
-        existing.can_download = payload.can_download
         session.add(existing)
         session.commit()
         return {"ok": True}
     session.add(PointCloudAccess(
-        user_id=payload.user_id, pointcloud_id=pc_id, granted_by=editor.id, can_download=payload.can_download
+        user_id=payload.user_id, pointcloud_id=pc_id, granted_by=editor.id
     ))
     session.commit()
     return {"ok": True}
@@ -267,8 +251,6 @@ def pointcloud_download_access_url(
     pc = session.get(PointCloud, pc_id)
     if not pc or not _can_see_pointcloud(user, pc, session):
         raise HTTPException(status_code=404, detail="Point cloud not found")
-    if not _can_download_pointcloud(user, pc, session):
-        raise HTTPException(status_code=403, detail="You don't have permission to download this point cloud")
     if pc.status != AssetStatus.ready:
         raise HTTPException(status_code=409, detail="Point cloud is still processing")
     token = create_file_token(subject=user.username, asset_id=pc_id, kind="pc-download")

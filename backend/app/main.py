@@ -66,8 +66,7 @@ async def lifespan(app: FastAPI):
     init_db()
     _bootstrap_admin()
     _recover_interrupted_jobs()
-    if workdir.enabled():
-        print(f"[volume-gallery] Processing uploads in {settings.PROCESSING_DIR}; results are stored in {settings.DATA_DIR}.")
+    print(f"[volume-gallery] Processing uploads in {settings.PROCESSING_DIR}; results are stored in {settings.DATA_DIR}.")
     yield
 
 
