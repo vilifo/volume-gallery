@@ -24,32 +24,112 @@
   .icon-btn { display: inline-flex; align-items: center; gap: 0.5em; padding: 0.5em 0.9em; white-space: nowrap; }
   .icon-btn svg { width: 14px; height: 14px; flex-shrink: 0; }
 
-  .mesh-render-area { flex: 1; min-height: 0; position: relative; background: #000; }
-  /* 3DHOP's own #3dhop/#draw-canvas fill whatever box they're placed in. */
-  #3dhop, #draw-canvas { width: 100%; height: 100%; }
+  .mesh-render-area { flex: 1; min-height: 0; position: relative; background: #000; overflow: hidden; }
+  /* 3DHOP's own container and canvas fill whatever box they're placed in.
+     (The container is addressed by class: "#3dhop" is not a valid CSS selector.) */
+  .tdhop, #draw-canvas { width: 100%; height: 100%; }
+  #draw-canvas { display: block; }
   #tdhlg { position: absolute; z-index: 2; top: 50%; left: 50%; transform: translate(-50%, -50%); }
 
+  /* ---- toolbar (right edge) ---- */
   .mesh-toolbar {
     position: absolute; top: 12px; right: 12px; z-index: 5;
-    display: flex; flex-direction: column; gap: 6px;
+    display: flex; flex-direction: column; gap: 4px;
+    max-height: calc(100% - 24px); overflow-y: auto;
     background: rgba(26, 29, 35, 0.92);
     backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
     border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 10px;
     padding: 6px;
     box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
+    scrollbar-width: none;
   }
+  .mesh-toolbar::-webkit-scrollbar { display: none; }
   .mesh-toolbar button {
-    width: 30px; height: 30px; display: flex; align-items: center; justify-content: center;
-    background: transparent; border: none; border-radius: 6px; color: var(--text-dim); cursor: pointer;
+    width: 30px; height: 30px; flex-shrink: 0; display: flex; align-items: center; justify-content: center;
+    padding: 0; background: transparent; border: none; border-radius: 6px; color: var(--text-dim); cursor: pointer;
   }
-  .mesh-toolbar button:hover { background: rgba(255, 255, 255, 0.08); color: var(--text); }
-  .mesh-toolbar button.active { color: var(--accent); }
+  .mesh-toolbar button:hover:not(:disabled) { background: rgba(255, 255, 255, 0.08); color: var(--text); border: none; }
+  .mesh-toolbar button.active { color: var(--accent); background: rgba(232, 163, 61, 0.14); }
+  .mesh-toolbar button:disabled { opacity: 0.35; cursor: not-allowed; }
   .mesh-toolbar svg { width: 16px; height: 16px; }
+  .mesh-toolbar .tb-sep { height: 1px; flex-shrink: 0; margin: 2px 4px; background: rgba(255, 255, 255, 0.1); }
+
+  /* ---- tool panels (left edge) ---- */
+  .mesh-panels {
+    position: absolute; top: 12px; left: 12px; z-index: 5; width: 270px; max-width: calc(100% - 80px);
+    max-height: calc(100% - 24px); overflow-y: auto; pointer-events: none;
+    display: flex; flex-direction: column; gap: 8px; scrollbar-width: thin;
+  }
+  .mesh-panel {
+    pointer-events: auto; color: var(--text); font-size: 0.82em;
+    background: rgba(26, 29, 35, 0.92);
+    backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+    border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 10px;
+    padding: 10px 12px 12px; box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
+  }
+  .mesh-panel[hidden] { display: none; }
+  .mesh-panel h2 {
+    margin: 0 0 8px; font-size: 0.95em; font-weight: 600; letter-spacing: 0.02em; color: var(--text);
+    display: flex; justify-content: space-between; align-items: center;
+  }
+  .mesh-panel .hint { color: var(--text-dim); font-size: 0.92em; line-height: 1.4; margin: 0 0 8px; }
+  .mesh-panel .readout {
+    font-family: var(--mono); font-size: 1.15em; color: var(--accent); margin: 2px 0 4px; word-break: break-all;
+  }
+  .mesh-panel .readout-sub { font-family: var(--mono); font-size: 0.92em; color: var(--text-dim); margin-bottom: 8px; }
+  .mesh-panel .row { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+  .mesh-panel .row > label { color: var(--text-dim); flex: 0 0 auto; min-width: 4.5em; }
+  .mesh-panel .row > .grow { flex: 1; min-width: 0; }
+  .mesh-panel select, .mesh-panel button.small {
+    background: var(--panel-raised); color: var(--text); border: 1px solid var(--line);
+    border-radius: var(--radius); padding: 0.25em 0.6em; font-size: 1em;
+  }
+  .mesh-panel button.small:hover { border-color: var(--accent-dim); }
+  .mesh-panel input[type="range"] { width: 100%; accent-color: var(--accent); }
+  .mesh-panel input[type="color"] { width: 34px; height: 24px; padding: 0; border: 1px solid var(--line); background: none; border-radius: var(--radius); }
+  .mesh-panel input[type="checkbox"] { accent-color: var(--accent); }
+  .mesh-panel .checks { display: flex; gap: 16px; margin-top: 10px; }
+  .mesh-panel .checks label { display: inline-flex; gap: 6px; align-items: center; cursor: pointer; }
+  .mesh-panel .actions { display: flex; gap: 8px; margin-top: 10px; }
+
+  .sec-row { display: grid; grid-template-columns: 28px 1fr 22px; gap: 8px; align-items: center; margin-top: 8px; }
+  .sec-row button.axis {
+    width: 28px; height: 24px; padding: 0; font-family: var(--mono); font-weight: 600;
+    background: var(--panel-raised); color: var(--text-dim); border: 1px solid var(--line); border-radius: var(--radius);
+  }
+  .sec-row button.axis[aria-pressed="true"] { color: var(--on-accent); background: var(--accent); border-color: var(--accent); }
+  .sec-row .flip-cell { display: flex; justify-content: center; }
+  .sec-head { display: grid; grid-template-columns: 28px 1fr 22px; gap: 8px; color: var(--text-dim); font-size: 0.9em; }
+  .sec-head span:last-child { text-align: center; }
+
+  .bg-swatches { display: flex; gap: 8px; }
+  .bg-swatches button {
+    width: 34px; height: 24px; padding: 0; border-radius: var(--radius); border: 2px solid var(--line); cursor: pointer;
+  }
+  .bg-swatches button[aria-pressed="true"] { border-color: var(--accent); }
+
+  /* ---- help ---- */
+  .mesh-help {
+    position: absolute; inset: 0; z-index: 8; display: flex; align-items: center; justify-content: center;
+    background: rgba(0, 0, 0, 0.55);
+  }
+  .mesh-help[hidden] { display: none; }
+  .mesh-help .card {
+    --text: #e7e5e0; --text-dim: #8b919b; --accent: #e8a33d; --line: #2b3038;
+    background: #1c2026; color: var(--text); border: 1px solid var(--line); border-radius: 10px;
+    padding: 18px 22px; max-width: 460px; width: calc(100% - 40px); font-size: 0.88em; line-height: 1.5;
+    box-shadow: 0 20px 48px rgba(0, 0, 0, 0.6);
+  }
+  .mesh-help h2 { margin: 0 0 10px; font-size: 1.05em; }
+  .mesh-help dl { display: grid; grid-template-columns: max-content 1fr; gap: 6px 16px; margin: 0; }
+  .mesh-help dt { color: var(--accent); font-family: var(--mono); font-size: 0.95em; }
+  .mesh-help dd { margin: 0; color: var(--text); }
+  .mesh-help .close-hint { margin-top: 12px; color: var(--text-dim); font-size: 0.92em; }
 
   .viewer-status {
     position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
     color: var(--text-dim); font-family: var(--mono); font-size: 0.85em;
-    background: rgba(0, 0, 0, 0.6); padding: 1.5em; text-align: left; line-height: 1.5;
+    background: rgba(0, 0, 0, 0.6); padding: 1.5em; text-align: left; line-height: 1.5; z-index: 9;
   }
 </style>
 </head>
@@ -61,7 +141,10 @@
   <script src="/vendor/3dhop/js/jquery.js"></script>
   <script src="/vendor/3dhop/js/presenter.js"></script>
   <script src="/vendor/3dhop/js/nexus.js"></script>
+  <!-- presenter.js uses TurnTableTrackball as its default trackball type, so it must be loaded
+       even though the scene below asks for the pan variant. -->
   <script src="/vendor/3dhop/js/trackball_turntable.js"></script>
+  <script src="/vendor/3dhop/js/trackball_turntable_pan.js"></script>
 
   <script type="module">
     import { api, requireLogin, getRole, getUsername, renderShell, wireLogout } from "/js/api.js?v=theme2";
@@ -72,13 +155,41 @@
     const meshId = params.get("id");
     const volumeId = params.get("volume");
 
-    const HOME_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12l9-9 9 9M5 10v10h14V10"/></svg>`;
-    const ZOOM_IN_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.35-4.35M11 8v6M8 11h6"/></svg>`;
-    const ZOOM_OUT_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.35-4.35M8 11h6"/></svg>`;
-    const LIGHT_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>`;
-    const DOWNLOAD_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0-4-4m4 4 4-4M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>`;
-    const BACK_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5m0 0 6-6m-6 6 6 6"/></svg>`;
-    const EXPAND_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M21 16v3a2 2 0 0 1-2 2h-3M3 16v3a2 2 0 0 0 2 2h3"/></svg>`;
+    const svg = (inner) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${inner}</svg>`;
+    const ICON = {
+      home: svg(`<path d="M3 12l9-9 9 9M5 10v10h14V10"/>`),
+      zoomIn: svg(`<circle cx="11" cy="11" r="7"/><path d="M21 21l-4.35-4.35M11 8v6M8 11h6"/>`),
+      zoomOut: svg(`<circle cx="11" cy="11" r="7"/><path d="M21 21l-4.35-4.35M8 11h6"/>`),
+      perspective: svg(`<path d="M21 16V8a2 2 0 0 0-1-1.7l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.7l7 4a2 2 0 0 0 2 0l7-4a2 2 0 0 0 1-1.7z"/><path d="M3.3 7 12 12l8.7-5M12 22V12"/>`),
+      ortho: svg(`<rect x="4" y="4" width="16" height="16" rx="1"/><rect x="9" y="9" width="6" height="6"/><path d="M4 4l5 5M20 4l-5 5M4 20l5-5M20 20l-5-5"/>`),
+      lighting: svg(`<path d="M9 18h6M10 22h4M12 2a7 7 0 0 0-4 12.7c.6.5 1 1.3 1 2.3h6c0-1 .4-1.8 1-2.3A7 7 0 0 0 12 2z"/>`),
+      light: svg(`<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>`),
+      measure: svg(`<path d="M21.3 8.7 8.7 21.3a1 1 0 0 1-1.4 0L2.7 16.7a1 1 0 0 1 0-1.4L15.3 2.7a1 1 0 0 1 1.4 0l4.6 4.6a1 1 0 0 1 0 1.4z"/><path d="m7.5 10.5 2 2M10.5 7.5l2 2M13.5 4.5l2 2M4.5 13.5l2 2"/>`),
+      pick: svg(`<circle cx="12" cy="12" r="8"/><path d="M12 2v5M12 17v5M2 12h5M17 12h5"/>`),
+      sections: svg(`<path d="M12 2 2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5M2 12l10 5 10-5"/>`),
+      appearance: svg(`<path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6"/>`),
+      camera: svg(`<path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/>`),
+      help: svg(`<circle cx="12" cy="12" r="10"/><path d="M9.1 9a3 3 0 0 1 5.8 1c0 2-3 3-3 3M12 17h.01"/>`),
+      close: svg(`<path d="M18 6 6 18M6 6l12 12"/>`),
+      download: svg(`<path d="M12 3v12m0 0-4-4m4 4 4-4M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/>`),
+      back: svg(`<path d="M19 12H5m0 0 6-6m-6 6 6 6"/>`),
+      expand: svg(`<path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M21 16v3a2 2 0 0 1-2 2h-3M3 16v3a2 2 0 0 0 2 2h3"/>`),
+    };
+
+    // Background choices. The canvas is transparent; the page paints one of these behind it
+    // (and the screenshot tool paints the same one behind the exported image).
+    const BACKGROUNDS = [
+      { id: "gradient", label: "Dark gradient", top: "#3a4150", bottom: "#12151a" },
+      { id: "black",    label: "Black",         top: "#000000", bottom: "#000000" },
+      { id: "grey",     label: "Grey",          top: "#7b8089", bottom: "#7b8089" },
+      { id: "light",    label: "Light",         top: "#ffffff", bottom: "#c5c9cf" },
+    ];
+    const UNITS = ["units", "\u00b5m", "mm", "cm", "m", "km", "in"];
+
+    const store = {
+      get(key, fallback) { try { return localStorage.getItem(key) ?? fallback; } catch { return fallback; } },
+      set(key, value) { try { localStorage.setItem(key, value); } catch { /* storage unavailable */ } },
+    };
 
     document.getElementById("shell").innerHTML = `
       ${renderShell("gallery", role, getUsername())}
@@ -94,6 +205,10 @@
       return d.innerHTML;
     }
 
+    const $ = (id) => document.getElementById(id);
+    const tool = (id, title, icon) =>
+      `<button type="button" id="${id}" title="${title}" aria-label="${title}" aria-pressed="false">${icon}</button>`;
+
     async function init() {
       if (!meshId && !volumeId) {
         content.innerHTML = `<div class="error-box" style="margin:1.4em">No mesh specified.</div>`;
@@ -101,7 +216,7 @@
       }
       let mesh;
       try {
-         if (volumeId) {
+        if (volumeId) {
           const volume = await api.getVolume(volumeId);
           if (!volume.has_mesh) throw new Error("This volume has no mesh.");
           mesh = {
@@ -125,32 +240,118 @@
             ${mesh.description ? `<div class="viewer-desc">${escapeHtml(mesh.description)}</div>` : ""}
           </div>
           <div class="viewer-topbar-actions">
-            ${volumeId ? `<a href="/viewers/volume.html?id=${encodeURIComponent(volumeId)}"><button type="button" class="icon-btn">${BACK_ICON}<span>Back to volume</span></button></a>` : ""}
-            ${mesh.can_download ? `<button id="download-btn" class="icon-btn">${DOWNLOAD_ICON}<span>Download</span></button>` : ""}
-            <button id="fullscreen-btn" class="icon-btn primary">${EXPAND_ICON}<span>Fullscreen</span></button>
+            ${volumeId ? `<a href="/viewers/volume.html?id=${encodeURIComponent(volumeId)}"><button type="button" class="icon-btn">${ICON.back}<span>Back to volume</span></button></a>` : ""}
+            ${mesh.can_download ? `<button id="download-btn" class="icon-btn">${ICON.download}<span>Download</span></button>` : ""}
+            <button id="fullscreen-btn" class="icon-btn primary">${ICON.expand}<span>Fullscreen</span></button>
           </div>
         </div>
         <div class="mesh-render-area" id="render-area">
           <div id="3dhop" class="tdhop"><div id="tdhlg"></div><canvas id="draw-canvas"></canvas></div>
-          <div class="mesh-toolbar">
-            <button type="button" id="home-btn" title="Reset view">${HOME_ICON}</button>
-            <button type="button" id="zoomin-btn" title="Zoom in">${ZOOM_IN_ICON}</button>
-            <button type="button" id="zoomout-btn" title="Zoom out">${ZOOM_OUT_ICON}</button>
-            <button type="button" id="light-btn" title="Move light instead of camera">${LIGHT_ICON}</button>
+
+          <div class="mesh-panels">
+            <section class="mesh-panel" id="panel-measure" hidden>
+              <h2>Measure <button type="button" class="small" data-close="measure" title="Close" aria-label="Close">${ICON.close}</button></h2>
+              <p class="hint">Click two points on the model to measure the distance between them.</p>
+              <div class="readout" id="measure-value">\u2014</div>
+              <div class="readout-sub" id="measure-delta">&nbsp;</div>
+              <div class="row"><label for="measure-unit">Unit label</label>
+                <select id="measure-unit" class="grow">${UNITS.map((u) => `<option value="${u}">${u}</option>`).join("")}</select></div>
+              <p class="hint" style="margin-top:8px">The value is in the mesh's own coordinate units; the label is not a conversion.</p>
+            </section>
+
+            <section class="mesh-panel" id="panel-pick" hidden>
+              <h2>Pick point <button type="button" class="small" data-close="pick" title="Close" aria-label="Close">${ICON.close}</button></h2>
+              <p class="hint">Click the model to read the XYZ coordinates of that point.</p>
+              <div class="readout" id="pick-value">\u2014</div>
+              <div class="actions"><button type="button" class="small" id="pick-copy" disabled>Copy</button></div>
+            </section>
+
+            <section class="mesh-panel" id="panel-sections" hidden>
+              <h2>Plane sections <button type="button" class="small" data-close="sections" title="Close" aria-label="Close">${ICON.close}</button></h2>
+              <div class="sec-head"><span>Plane</span><span>Position</span><span title="Flip direction">Flip</span></div>
+              ${["x", "y", "z"].map((a) => `
+                <div class="sec-row">
+                  <button type="button" class="axis" id="sec-${a}" aria-pressed="false" title="Enable ${a.toUpperCase()} axis section">${a.toUpperCase()}</button>
+                  <input type="range" id="sec-${a}-pos" min="0" max="1" step="0.01" value="0.5" title="Move ${a.toUpperCase()} section" />
+                  <span class="flip-cell"><input type="checkbox" id="sec-${a}-flip" title="Flip ${a.toUpperCase()} section direction" /></span>
+                </div>`).join("")}
+              <div class="checks">
+                <label><input type="checkbox" id="sec-planes" checked /> Show planes</label>
+                <label><input type="checkbox" id="sec-edges" /> Show edges</label>
+              </div>
+              <div class="actions"><button type="button" class="small" id="sec-reset">Reset</button></div>
+            </section>
+
+            <section class="mesh-panel" id="panel-appearance" hidden>
+              <h2>Appearance <button type="button" class="small" data-close="appearance" title="Close" aria-label="Close">${ICON.close}</button></h2>
+              <div class="bg-swatches" id="bg-swatches" role="group" aria-label="Background">
+                ${BACKGROUNDS.map((b) => `<button type="button" data-bg="${b.id}" aria-pressed="false" title="${b.label}" aria-label="${b.label}" style="background:linear-gradient(${b.top},${b.bottom})"></button>`).join("")}
+              </div>
+              <div class="row"><label for="solid-on">Solid colour</label>
+                <input type="checkbox" id="solid-on" title="Ignore vertex colours / textures and paint the whole model in one colour" />
+                <input type="color" id="solid-color" value="#cccccc" /></div>
+              <div class="row"><label for="backface">Back faces</label>
+                <select id="backface" class="grow">
+                  <option value="tint">Tinted</option>
+                  <option value="fill">Filled</option>
+                  <option value="cull">Hidden</option>
+                </select></div>
+            </section>
           </div>
+
+          <div class="mesh-toolbar" id="mesh-toolbar" role="toolbar" aria-label="Mesh viewer tools">
+            ${tool("home-btn", "Reset view (H)", ICON.home)}
+            ${tool("zoomin-btn", "Zoom in", ICON.zoomIn)}
+            ${tool("zoomout-btn", "Zoom out", ICON.zoomOut)}
+            ${tool("camera-btn", "Switch to orthographic camera", ICON.perspective)}
+            <div class="tb-sep"></div>
+            ${tool("lighting-btn", "Scene lighting (on)", ICON.lighting)}
+            ${tool("light-btn", "Move the light instead of the camera", ICON.light)}
+            <div class="tb-sep"></div>
+            ${tool("measure-btn", "Measure distance", ICON.measure)}
+            ${tool("pick-btn", "Pick a point (XYZ)", ICON.pick)}
+            ${tool("sections-btn", "Plane sections", ICON.sections)}
+            <div class="tb-sep"></div>
+            ${tool("appearance-btn", "Appearance", ICON.appearance)}
+            ${tool("screenshot-btn", "Save screenshot", ICON.camera)}
+            ${tool("help-btn", "Help", ICON.help)}
+          </div>
+
+          <div class="mesh-help" id="help" hidden>
+            <div class="card" role="dialog" aria-label="Mesh viewer help">
+              <h2>Navigating the model</h2>
+              <dl>
+                <dt>Left drag</dt><dd>Rotate</dd>
+                <dt>Right / middle drag</dt><dd>Pan (or Ctrl + left drag)</dd>
+                <dt>Mouse wheel</dt><dd>Zoom</dd>
+                <dt>H</dt><dd>Reset the view</dd>
+                <dt>Esc</dt><dd>Switch off the active measuring tool / close this help</dd>
+              </dl>
+              <h2 style="margin-top:14px">Tools</h2>
+              <dl>
+                <dt>Measure</dt><dd>Click two points to get their distance.</dd>
+                <dt>Pick point</dt><dd>Click to read XYZ coordinates.</dd>
+                <dt>Sections</dt><dd>Cut the model with X / Y / Z planes.</dd>
+                <dt>Light</dt><dd>While active, dragging moves the light, not the camera.</dd>
+              </dl>
+              <div class="close-hint">Click anywhere to close.</div>
+            </div>
+          </div>
+
           <div class="viewer-status" id="status">Loading mesh viewer\u2026</div>
         </div>
       `;
 
-      const statusEl = document.getElementById("status");
-      const renderArea = document.getElementById("render-area");
+      const statusEl = $("status");
+      const renderArea = $("render-area");
+      const canvas = $("draw-canvas");
 
-      document.getElementById("fullscreen-btn").addEventListener("click", () => {
+      $("fullscreen-btn").addEventListener("click", () => {
         if (document.fullscreenElement) document.exitFullscreen();
         else renderArea.requestFullscreen().catch((err) => alert(`Couldn't enter fullscreen: ${err.message}`));
       });
 
-      const downloadBtn = document.getElementById("download-btn");
+      const downloadBtn = $("download-btn");
       if (downloadBtn) {
         downloadBtn.addEventListener("click", async () => {
           try {
@@ -183,14 +384,17 @@
 
         // Synchronize WebGL buffer size with actual CSS DOM size
         function resizeCanvas() {
-          const canvas = document.getElementById("draw-canvas");
-          const wrap = document.getElementById("3dhop");
-          if (canvas && wrap) {
+          const wrap = $("3dhop");
+          if (!wrap) return;
+          if (canvas.width !== wrap.clientWidth || canvas.height !== wrap.clientHeight) {
             canvas.width = wrap.clientWidth;
             canvas.height = wrap.clientHeight;
+            if (presenter.repaint) presenter.repaint();
           }
         }
         window.addEventListener("resize", resizeCanvas);
+        document.addEventListener("fullscreenchange", resizeCanvas);
+        if (window.ResizeObserver) new ResizeObserver(resizeCanvas).observe(renderArea);
         resizeCanvas(); // Set initial sizes
 
         presenter.setScene({
@@ -202,27 +406,270 @@
             }
           },
           trackball: {
-            type: TurnTableTrackball,
+            type: TurntablePanTrackball,
             trackOptions: {
               startPhi: 35.0, startTheta: 15.0, startDistance: 2.5,
               minMaxPhi: [-180, 180], minMaxTheta: [-89, 89], minMaxDist: [0.1, 10.0],
+              minMaxPanX: [-3.0, 3.0], minMaxPanY: [-3.0, 3.0], minMaxPanZ: [-3.0, 3.0],
             },
           },
+          // We save screenshots ourselves, on top of the chosen background.
+          config: { autoSaveScreenshot: false },
         });
 
         statusEl.style.display = "none";
 
         // Disable context menu so right-click panning works natively
-        document.getElementById("draw-canvas").addEventListener("contextmenu", (e) => e.preventDefault());
+        canvas.addEventListener("contextmenu", (e) => e.preventDefault());
 
-        document.getElementById("home-btn").addEventListener("click", () => presenter.resetTrackball());
-        document.getElementById("zoomin-btn").addEventListener("click", () => presenter.zoomIn());
-        document.getElementById("zoomout-btn").addEventListener("click", () => presenter.zoomOut());
+        // ---------------------------------------------------------------- helpers
+        const setActive = (id, on) => {
+          const el = $(id);
+          el.classList.toggle("active", !!on);
+          el.setAttribute("aria-pressed", on ? "true" : "false");
+        };
+        const showPanel = (name, on) => { $(`panel-${name}`).hidden = !on; };
+        const setLabel = (el, text) => { el.title = text; el.setAttribute("aria-label", text); };
+        const updateCursor = () => {
+          canvas.style.cursor = (presenter.isMeasurementToolEnabled() || presenter.isPickpointModeEnabled()) ? "crosshair" : "";
+        };
 
-        const lightBtn = document.getElementById("light-btn");
+        // Tools that touch the scene's bounding box only work once the mesh header has loaded.
+        const needsScene = ["measure-btn", "pick-btn", "sections-btn"];
+        needsScene.forEach((id) => { $(id).disabled = true; $(id).title += " (available once the mesh has loaded)"; });
+        const readyTimer = setInterval(() => {
+          let ready = false;
+          try { ready = !!presenter._isSceneReady(); } catch { /* not parsed yet */ }
+          if (!ready) return;
+          clearInterval(readyTimer);
+          needsScene.forEach((id) => { $(id).disabled = false; $(id).title = $(id).title.replace(" (available once the mesh has loaded)", ""); });
+        }, 200);
+
+        // ---------------------------------------------------------------- view
+        $("home-btn").addEventListener("click", () => presenter.resetTrackball());
+        $("zoomin-btn").addEventListener("click", () => presenter.zoomIn());
+        $("zoomout-btn").addEventListener("click", () => presenter.zoomOut());
+
+        const cameraBtn = $("camera-btn");
+        cameraBtn.addEventListener("click", () => {
+          presenter.toggleCameraType();
+          const ortho = presenter.getCameraType() === "orthographic";
+          cameraBtn.innerHTML = ortho ? ICON.ortho : ICON.perspective;
+          setLabel(cameraBtn, ortho ? "Switch to perspective camera" : "Switch to orthographic camera");
+          setActive("camera-btn", ortho);
+        });
+
+        // ---------------------------------------------------------------- light
+        const lightingBtn = $("lighting-btn");
+        const lightBtn = $("light-btn");
+        setActive("lighting-btn", true);
+        lightingBtn.addEventListener("click", () => {
+          const on = !presenter.isSceneLightingEnabled();
+          presenter.enableSceneLighting(on);
+          setLabel(lightingBtn, `Scene lighting (${on ? "on" : "off"})`);
+          setActive("lighting-btn", on);
+          if (!on && presenter.isLightTrackballEnabled()) {
+            presenter.enableLightTrackball(false);
+            setActive("light-btn", false);
+          }
+          lightBtn.disabled = !on;
+        });
         lightBtn.addEventListener("click", () => {
           presenter.enableLightTrackball(!presenter.isLightTrackballEnabled());
-          lightBtn.classList.toggle("active", presenter.isLightTrackballEnabled());
+          setActive("light-btn", presenter.isLightTrackballEnabled());
+        });
+
+        // ---------------------------------------------------------------- measure
+        let lastMeasure = null;
+        const unitSelect = $("measure-unit");
+        unitSelect.value = UNITS.includes(store.get("vg_mesh_unit", "units")) ? store.get("vg_mesh_unit", "units") : "units";
+        const fmt = (v) => (Math.abs(v) >= 1000 ? v.toFixed(1) : v.toFixed(3));
+        function renderMeasure() {
+          const unit = unitSelect.value === "units" ? "" : ` ${unitSelect.value}`;
+          if (!lastMeasure) {
+            $("measure-value").textContent = "\u2014";
+            $("measure-delta").innerHTML = "&nbsp;";
+            return;
+          }
+          const { length, a, b } = lastMeasure;
+          $("measure-value").textContent = `${fmt(length)}${unit}`;
+          $("measure-delta").textContent =
+            `\u0394X ${fmt(Math.abs(b[0] - a[0]))}  \u0394Y ${fmt(Math.abs(b[1] - a[1]))}  \u0394Z ${fmt(Math.abs(b[2] - a[2]))}`;
+        }
+        unitSelect.addEventListener("change", () => { store.set("vg_mesh_unit", unitSelect.value); renderMeasure(); });
+        presenter._onEndMeasurement = (length, a, b) => { lastMeasure = { length, a, b }; renderMeasure(); };
+
+        // ---------------------------------------------------------------- pick point
+        let lastPick = null;
+        presenter._onEndPickingPoint = (p) => {
+          lastPick = p;
+          $("pick-value").textContent = `[ ${p.map((v) => v.toFixed(3)).join(" , ")} ]`;
+          $("pick-copy").disabled = false;
+        };
+        $("pick-copy").addEventListener("click", async () => {
+          if (!lastPick) return;
+          const text = lastPick.map((v) => v.toFixed(6)).join(", ");
+          try {
+            await navigator.clipboard.writeText(text);
+          } catch {
+            // Clipboard API needs a secure context; fall back for plain-http deployments.
+            const ta = document.createElement("textarea");
+            ta.value = text; document.body.appendChild(ta); ta.select();
+            try { document.execCommand("copy"); } catch { /* nothing more we can do */ }
+            ta.remove();
+          }
+        });
+
+        function setMeasure(on) {
+          if (on) setPick(false);
+          presenter.enableMeasurementTool(on);
+          if (!on) { lastMeasure = null; renderMeasure(); }
+          setActive("measure-btn", on);
+          showPanel("measure", on);
+          updateCursor();
+        }
+        function setPick(on) {
+          if (on && presenter.isMeasurementToolEnabled()) setMeasure(false);
+          presenter.enablePickpointMode(on);
+          if (!on) {
+            lastPick = null;
+            $("pick-value").textContent = "\u2014";
+            $("pick-copy").disabled = true;
+          }
+          setActive("pick-btn", on);
+          showPanel("pick", on);
+          updateCursor();
+        }
+        $("measure-btn").addEventListener("click", () => setMeasure(!presenter.isMeasurementToolEnabled()));
+        $("pick-btn").addEventListener("click", () => setPick(!presenter.isPickpointModeEnabled()));
+
+        // ---------------------------------------------------------------- sections
+        const AXES = ["x", "y", "z"];
+        const sec = { x: { on: false }, y: { on: false }, z: { on: false } };
+        const Cap = (a) => a.toUpperCase();
+        function applyAxis(a) {
+          const flip = $(`sec-${a}-flip`).checked;
+          presenter[`setClipping${Cap(a)}`](sec[a].on ? (flip ? -1 : 1) : 0);
+          presenter[`setClippingPoint${Cap(a)}`]($(`sec-${a}-pos`).valueAsNumber);
+          setAxisButton(a);
+        }
+        function setAxisButton(a) {
+          const b = $(`sec-${a}`);
+          b.setAttribute("aria-pressed", sec[a].on ? "true" : "false");
+          b.title = `${sec[a].on ? "Disable" : "Enable"} ${Cap(a)} axis section`;
+        }
+        function applyRendermode() {
+          presenter.setClippingRendermode($("sec-planes").checked, $("sec-edges").checked);
+        }
+        function resetSections() {
+          AXES.forEach((a) => { sec[a].on = false; $(`sec-${a}-pos`).value = 0.5; $(`sec-${a}-flip`).checked = false; });
+          $("sec-planes").checked = true;
+          $("sec-edges").checked = false;
+          presenter.setClippingPointXYZ(0.5, 0.5, 0.5);
+          presenter.setClippingXYZ(0, 0, 0);
+          applyRendermode();
+          AXES.forEach(setAxisButton);
+        }
+        AXES.forEach((a) => {
+          $(`sec-${a}`).addEventListener("click", () => { sec[a].on = !sec[a].on; applyAxis(a); });
+          // Moving a slider switches that plane on, as in the 3DHOP example.
+          $(`sec-${a}-pos`).addEventListener("input", () => { sec[a].on = true; applyAxis(a); });
+          $(`sec-${a}-flip`).addEventListener("change", () => { if (sec[a].on) applyAxis(a); });
+        });
+        $("sec-planes").addEventListener("change", applyRendermode);
+        $("sec-edges").addEventListener("change", applyRendermode);
+        $("sec-reset").addEventListener("click", resetSections);
+        function setSections(on) {
+          setActive("sections-btn", on);
+          showPanel("sections", on);
+          if (on) resetSections();
+          else presenter.setClippingXYZ(0, 0, 0);
+        }
+        $("sections-btn").addEventListener("click", () => setSections(!$("sections-btn").classList.contains("active")));
+
+        // ---------------------------------------------------------------- appearance
+        function applyBackground(id) {
+          const bg = BACKGROUNDS.find((b) => b.id === id) || BACKGROUNDS[0];
+          canvas.style.background = `linear-gradient(${bg.top}, ${bg.bottom})`;
+          document.querySelectorAll("#bg-swatches button").forEach((b) =>
+            b.setAttribute("aria-pressed", b.dataset.bg === bg.id ? "true" : "false"));
+          store.set("vg_mesh_bg", bg.id);
+          return bg;
+        }
+        let currentBg = applyBackground(store.get("vg_mesh_bg", "gradient"));
+        document.querySelectorAll("#bg-swatches button").forEach((b) =>
+          b.addEventListener("click", () => { currentBg = applyBackground(b.dataset.bg); }));
+
+        const hexToRgb = (hex) => [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255);
+        const applySolid = () => presenter.setInstanceSolidColor(HOP_ALL, $("solid-on").checked, true, hexToRgb($("solid-color").value));
+        $("solid-on").addEventListener("change", applySolid);
+        $("solid-color").addEventListener("input", () => { $("solid-on").checked = true; applySolid(); });
+        $("backface").addEventListener("change", (e) =>
+          presenter.setInstanceBackface(HOP_ALL, [0.7, 0.4, 0.4], e.target.value, true));
+
+        $("appearance-btn").addEventListener("click", () => {
+          const on = $("panel-appearance").hidden;
+          showPanel("appearance", on);
+          setActive("appearance-btn", on);
+        });
+
+        // ---------------------------------------------------------------- screenshot
+        function saveScreenshot() {
+          presenter.screenshotData = null;
+          presenter.saveScreenshot();
+          let tries = 0;
+          const timer = setInterval(() => {
+            const data = presenter.screenshotData;
+            if (!data && ++tries < 60) return;
+            clearInterval(timer);
+            if (!data) return;
+            const img = new Image();
+            img.onload = () => {
+              const out = document.createElement("canvas");
+              out.width = img.width; out.height = img.height;
+              const ctx = out.getContext("2d");
+              const g = ctx.createLinearGradient(0, 0, 0, out.height);
+              g.addColorStop(0, currentBg.top); g.addColorStop(1, currentBg.bottom);
+              ctx.fillStyle = g; ctx.fillRect(0, 0, out.width, out.height);
+              ctx.drawImage(img, 0, 0);
+              out.toBlob((blob) => {
+                if (!blob) return;
+                const base = (mesh.title || "mesh").replace(/[^\w-]+/g, "_").replace(/^_+|_+$/g, "") || "mesh";
+                const a = document.createElement("a");
+                a.href = URL.createObjectURL(blob);
+                a.download = `${base}-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, "")}.png`;
+                a.click();
+                setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+              }, "image/png");
+            };
+            img.src = data.replace("image/octet-stream", "image/png");
+          }, 50);
+        }
+        $("screenshot-btn").addEventListener("click", saveScreenshot);
+
+        // ---------------------------------------------------------------- help + keys
+        const help = $("help");
+        $("help-btn").addEventListener("click", () => { help.hidden = !help.hidden; });
+        help.addEventListener("click", () => { help.hidden = true; });
+
+        document.querySelectorAll("[data-close]").forEach((b) => b.addEventListener("click", () => {
+          const which = b.dataset.close;
+          if (which === "measure") setMeasure(false);
+          else if (which === "pick") setPick(false);
+          else if (which === "sections") setSections(false);
+          else { showPanel(which, false); setActive(`${which}-btn`, false); }
+        }));
+
+        document.addEventListener("keydown", (e) => {
+          if (e.target.closest && e.target.closest("input, select, textarea")) return;
+          if (e.ctrlKey || e.metaKey || e.altKey) return;
+          if (e.key === "Escape") {
+            if (!help.hidden) help.hidden = true;
+            else if (presenter.isMeasurementToolEnabled()) setMeasure(false);
+            else if (presenter.isPickpointModeEnabled()) setPick(false);
+          } else if (e.key === "h" || e.key === "H") {
+            presenter.resetTrackball();
+          }
         });
       } catch (err) {
         statusEl.textContent = `Could not load mesh: ${err.message}`;
