@@ -59,6 +59,16 @@ def convert_tiff_stack_to_ome_zarr(tiff_dir: Path, zarr_dir: Path) -> None:
     elif image_data.ndim == 4:
         image_data = image_data[None, ...]
 
+    # --- ADD PADDING HERE ---
+    _, _, z, y, x = image_data.shape
+    pad_z = (16 - z % 16) % 16
+    pad_y = (16 - y % 16) % 16
+    pad_x = (16 - x % 16) % 16
+
+    if pad_z or pad_y or pad_x:
+        image_data = da.pad(image_data, ((0, 0), (0, 0), (0, pad_z), (0, pad_y), (0, pad_x)), mode='constant')
+    # ------------------------
+
     zarr_dir = Path(zarr_dir)
     zarr_dir.mkdir(parents=True, exist_ok=True)
 
