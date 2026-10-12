@@ -1,9 +1,10 @@
 import enum
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
-from sqlmodel import SQLModel, Field
+from sqlmodel import Field, SQLModel, Column, DateTime
 
+from .utils import get_utc_now
 
 class Role(str, enum.Enum):
     admin = "admin"
@@ -23,17 +24,23 @@ class User(SQLModel, table=True):
     username: str = Field(index=True, unique=True)
     password_hash: str
     role: Role = Field(default=Role.reader)
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(
+        default_factory=get_utc_now,
+        sa_type=DateTime(timezone=True)
+    )
     disabled: bool = Field(default=False)
 
 
 class AssetBase(SQLModel):
-    slug: str = Field(index=True, unique=True)  # folder name on disk, also used in URLs
+    slug: str = Field(index=True, unique=True)
     title: str
     description: str = Field(default="")
     thumbnail_path: Optional[str] = Field(default=None)
     created_by: Optional[int] = Field(default=None, foreign_key="user.id")
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(
+        default_factory=get_utc_now,
+        sa_type=DateTime(timezone=True)
+    )
     status: AssetStatus = Field(default=AssetStatus.ready)
     status_log: str = Field(default="")
 
@@ -42,7 +49,10 @@ class AssetAccessBase(SQLModel):
     """Shared fields for asset access control."""
     user_id: int = Field(foreign_key="user.id", index=True)
     granted_by: Optional[int] = Field(default=None, foreign_key="user.id")
-    granted_at: datetime = Field(default_factory=datetime.utcnow)
+    granted_at: datetime = Field(
+        default_factory=get_utc_now,
+        sa_type=DateTime(timezone=True)
+    )
 
 
 class Volume(AssetBase, table=True):
