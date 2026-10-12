@@ -1,6 +1,6 @@
-fastapi==0.141.1
-uvicorn[standard]==0.52.4
-sqlmodel==0.0.42
+fastapi==0.142.2
+uvicorn[standard]==0.54.0
+sqlmodel==0.0.47
 python-jose[cryptography]==3.5.0
 passlib==1.7.4
 bcrypt==4.0.1
@@ -15,5 +15,5 @@ dask==2026.8.0
 ome-zarr==0.19.2
 zarr==3.4.0
 # --- Mesh and point cloud processing (backend/app/helpers/mesh.py) ---
-trimesh==5.1.0
+trimesh==5.1.1
 

@@ -40,6 +40,22 @@ RUN git clone --depth 1 --branch 2025.07 https://github.com/cnr-isti-vclab/vcgli
     && ldd /opt/nexus/bin/nxsbuild /opt/nexus/bin/nxscompress | awk '/=> \//{print $3}' \
        | grep -v -E '/lib(c|m)\.so' | sort -u | xargs -I{} cp -L {} /opt/nexus/lib/
 
+# kiln-render: pinned npm release + our patch (backend/kiln-patches). Its own
+# stage so it is cached independently and never depends on what happens to be
+# in frontend/vendor. The patch lifts the 10-slots-per-axis atlas cap.
+FROM python:3.12-slim AS kiln
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates git wget \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /kiln
+RUN wget -q https://registry.npmjs.org/kiln-render/-/kiln-render-0.5.0.tgz -O kiln-render.tgz \
+    && echo "c010380899828175fc685b691d693280c5cb086e0f73f3da2a60401e31435673  kiln-render.tgz" | sha256sum -c - \
+    && tar -xzf kiln-render.tgz --strip-components=1 package/lib/kiln-render.js \
+    && rm kiln-render.tgz
+COPY backend/kiln-patches /tmp/kiln-patches
+RUN sed -i 's/\r$//' /tmp/kiln-patches/*.patch \
+    && git apply --ignore-whitespace /tmp/kiln-patches/*.patch \
+    && grep -q "MAX_GRID_SIZE = 32" lib/kiln-render.js
+
 FROM python:3.12-slim
 
 ENV PYTHONUNBUFFERED=1 \
@@ -98,9 +114,6 @@ RUN wget -q "https://github.com/potree/potree/releases/download/1.8.2/Potree_1.8
     cp -r Potree_1.8.2/build/potree/* /frontend/vendor/potree/ && \
     cp -r Potree_1.8.2/libs/* /frontend/vendor/libs/
 
-# Download Kiln Render
-RUN wget -q "https://cdn.jsdelivr.net/npm/kiln-render/lib/kiln-render.js" -O /frontend/vendor/kiln-render/lib/kiln-render.js
-
 # Clean up
 RUN rm -rf /tmp/vendor_downloads
 
@@ -111,6 +124,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY backend/app ./app
 COPY frontend /frontend
+
+# Patched kiln-render from the `kiln` stage. Copied after `COPY frontend` so it
+# always wins over any frontend/vendor/kiln-render copy in the build context.
+COPY --from=kiln /kiln/lib/kiln-render.js /frontend/vendor/kiln-render/lib/kiln-render.js
 
 # /processing is the mount point for the optional scratch directory (set
 # VG_PROCESSING_DIR=/processing to use it, see the README). No VOLUME for it:

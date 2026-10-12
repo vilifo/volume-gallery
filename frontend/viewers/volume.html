@@ -409,12 +409,22 @@
 
   <script type="module">
     import { api, requireLogin, getRole, getUsername, renderShell, wireLogout } from "/js/api.js?v=theme2";
-    import { KilnViewer } from "/vendor/kiln-render/lib/kiln-render.js";
+    import { KilnViewer } from "/vendor/kiln-render/lib/kiln-render.js?v=atlas2";
+    import {
+      ATLAS_VRAM_OPTIONS_MB,
+      formatVram,
+      loadSavedAtlasMB,
+      planAtlas,
+      saveAtlasMB,
+    } from "/js/atlas-budget.js?v=atlas3";
 
     requireLogin();
     const role = getRole();
     const params = new URLSearchParams(window.location.search);
     const volumeId = params.get("id");
+    // VRAM the brick atlas may use (Advanced > VRAM allocation); remembered
+    // per browser, see /js/atlas-budget.js.
+    let atlasVramMB = loadSavedAtlasMB();
 
     const EXPAND_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M21 16v3a2 2 0 0 1-2 2h-3M3 16v3a2 2 0 0 0 2 2h3"/></svg>`;
     const COLLAPSE_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3v3a2 2 0 0 1-2 2H4M15 3v3a2 2 0 0 0 2 2h3M4 16h3a2 2 0 0 1 2 2v3M20 16h-3a2 2 0 0 0-2 2v3"/></svg>`;
@@ -751,7 +761,7 @@
           urlSync = null;
           nextOptions = stateToOptions(currentViewer.getState());
         }
-        showStatus(currentViewer ? "Reloading with new detail limit\u2026" : "Requesting WebGPU device\u2026");
+        showStatus(currentViewer ? "Reloading volume\u2026" : "Requesting WebGPU device\u2026");
         setLoadUi("indeterminate", 0, "Loading\u2026");
         if (stopStats) {
           stopStats();
@@ -772,8 +782,17 @@
         try {
           const access = await api.zarrAccessUrl(volumeId, minLevel);
           if (token !== loadToken) return;
-          const canvas = replaceCanvas();
-          const viewer = await KilnViewer.create(canvas, access.url, nextOptions);
+
+          // The atlas gets the VRAM the user selected, but no more than this
+          // dataset can fill. The engine clamps it to the device limits and
+          // steps it down if the allocation fails.
+          const atlas = await planAtlas(access.url, { vramMB: atlasVramMB });
+          if (token !== loadToken) return;
+          console.info(`[atlas] ${Math.round(atlas.budgetBytes / 1e6)} MB budget (${atlas.source})`);
+          const viewer = await KilnViewer.create(replaceCanvas(), access.url, {
+            ...nextOptions,
+            atlasBudgetBytes: atlas.budgetBytes,
+          });
           if (token !== loadToken) {
             viewer.dispose();
             return;
@@ -784,8 +803,14 @@
             numLodLevels: numLevels,
             minLevel,
             onMinLevelChange: (newMinLevel) => loadVolume(newMinLevel),
+            atlasVramMB,
+            onAtlasVramChange: (mb) => {
+              atlasVramMB = mb;
+              saveAtlasMB(mb);
+              loadVolume(activeMinLevel);
+            },
           });
-          stopStats = startStatsLoop(viewer);
+          stopStats = startStatsLoop(viewer, atlas);
           urlSync = startUrlSync(viewer, () => activeMinLevel);
         } catch (err) {
           if (token !== loadToken) return;
@@ -984,6 +1009,14 @@
               </label>`
                   : ""
               }
+              <label class="ctl-select-row" title="Upper limit for the GPU memory used to cache volume bricks. A larger allocation keeps more of the volume resident, so less is evicted and downloaded again; it is never larger than the volume needs, and the engine lowers it if the GPU cannot allocate it. Changing it reloads the volume; the view and transfer function are kept.">
+                <span class="ctl-row-label ctl-select-label">VRAM allocation</span>
+                <select class="ctl-select-input" data-role="atlas-vram">
+                  ${ATLAS_VRAM_OPTIONS_MB.map(
+                    (mb) => `<option value="${mb}"${mb === lodOptions.atlasVramMB ? " selected" : ""}>${formatVram(mb)}</option>`
+                  ).join("")}
+                </select>
+              </label>
               <label class="ctl-toggle-row${state.mode !== "dvr" && state.mode !== "slice" ? " disabled" : ""}" title="Only available for DVR and Slice modes">
                 <span class="ctl-row-label ctl-toggle-label">LOD Levels</span>
                 <input type="checkbox" class="ctl-toggle-input" data-role="lod" ${state.lod ? "checked" : ""} ${state.mode !== "dvr" && state.mode !== "slice" ? "disabled" : ""}>
@@ -1340,6 +1373,11 @@
           lodOptions.onMinLevelChange(parseInt(evt.target.value, 10));
         });
       }
+      panel.querySelector('[data-role="atlas-vram"]').addEventListener("change", (evt) => {
+        // The atlas is allocated when the viewer is created, so this reloads
+        // it (view and transfer function carried over, as for max detail level).
+        lodOptions.onAtlasVramChange(parseInt(evt.target.value, 10));
+      });
       panel.querySelector('[data-role="lod"]').addEventListener("change", (evt) => {
         state.lod = evt.target.checked;
         applyMode();
@@ -1364,9 +1402,37 @@
       });
     }
 
+    // "10³ ≈ 580 MB": the atlas textures the engine actually allocated.
+    function atlasVramLabel(viewer, meta, atlas) {
+      const r = viewer.engine.resources;
+      const texBytes = meta.bitDepth <= 8 ? 1 : 2;
+      const mb = Math.round((r.numChannels * r.atlasSize ** 3 * texBytes) / 1e6);
+      return `${r.gridSize}\u00b3 \u2248 ${mb} MB${atlasCapWarning(r, texBytes, atlas) ? " \u26a0 capped" : ""}`;
+    }
+
+    // Stock kiln-render never allocates more than a 10^3 atlas. If the budget
+    // allowed an 11^3 one and the engine still stopped at 10^3 or less, either
+    // the bundle was not patched (backend/kiln-patches) or the GPU ran out of
+    // memory and the engine stepped down (it logs that as a [Kiln] warning).
+    let atlasCapWarned = false;
+    function atlasCapWarning(r, texBytes, atlas) {
+      const grid11Bytes = r.numChannels * texBytes * (11 * 66) ** 3;
+      const capped = r.gridSize <= 10 && atlas.budgetBytes >= grid11Bytes;
+      if (capped && !atlasCapWarned) {
+        atlasCapWarned = true;
+        console.error(
+          `[atlas] ${Math.round(atlas.budgetBytes / 1e6)} MB requested but the atlas is ${r.gridSize}\u00b3 ` +
+          `(\u2248${Math.round((r.numChannels * r.atlasSize ** 3 * texBytes) / 1e6)} MB). ` +
+          "The kiln-render bundle is probably unpatched (the Docker `kiln` stage applies " +
+          "backend/kiln-patches; rebuild the image and hard-refresh) or the GPU ran out of memory."
+        );
+      }
+      return capped;
+    }
+
     // Drives the info box and the loading indicator for one viewer. Returns a
     // function that stops it.
-    function startStatsLoop(viewer) {
+    function startStatsLoop(viewer, atlas) {
       const statsEl = $("stats-text");
       const meta = viewer.metadata;
       let frames = 0;
@@ -1433,6 +1499,7 @@
             `lod levels   ${meta.maxLod + 1}\n` +
             `bricks       ${s.loadedCount}/${s.desiredCount} loaded\n` +
             `atlas        ${s.atlasUsage}/${s.atlasCapacity}\n` +
+            `atlas vram   ${atlasVramLabel(viewer, meta, atlas)} (${atlas.source})\n` +
             `downloaded   ${mb} MB (${kbs} KB/s)\n` +
             (s.timeToFirstRender != null ? `first frame  ${s.timeToFirstRender.toFixed(0)} ms\n` : "");
         }
