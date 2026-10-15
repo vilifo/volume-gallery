@@ -21,6 +21,16 @@ class Settings:
 
     PROCESSING_DIR: Path = Path(os.environ.get("VG_PROCESSING_DIR") or "/processing")  # "" (unset in compose) -> default
 
+    # --- Slice views (server-extracted planes, see helpers/slices.py) ---
+    # RAM for decoded 64-plane slabs, shared by every viewer. A slab of a 2000^3
+    # 16-bit volume is ~512 MB, so ~4 slabs fit the default; 0 disables caching
+    # (every plane is then read straight from the chunks, ~10-50x slower).
+    SLICE_CACHE_MB: int = int(os.environ.get("VG_SLICE_CACHE_MB", "2048"))
+    # Slabs decoded in parallel (each decode is itself multi-threaded by zarr)
+    SLICE_BUILD_THREADS: int = int(os.environ.get("VG_SLICE_BUILD_THREADS", "2"))
+    # zstd level for planes sent to browsers that accept it (1 = fastest)
+    SLICE_ZSTD_LEVEL: int = int(os.environ.get("VG_SLICE_ZSTD_LEVEL", "1"))
+
     # --- External processing tools ---
     # These binaries are NOT bundled with this app — see README's "Meshes and
     # point clouds" section. Point these at wherever you've placed them

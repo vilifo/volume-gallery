@@ -113,6 +113,8 @@ export const api = {
     const qs = minLevel != null ? `?min_level=${encodeURIComponent(minLevel)}` : "";
     return request(`/api/volumes/${id}/zarr-access-url${qs}`);
   },
+  // Signed base URL for the slice views: one finished plane per request (backend/app/helpers/slices.py)
+  sliceAccessUrl(id) { return request(`/api/volumes/${id}/slice-access-url`); },
   meshAccessUrl(id) { return request(`/api/volumes/${id}/mesh-access-url`); },
   volumeMeshViewUrl(id) { return request(`/api/volumes/${id}/mesh-view-url`); },
   listAccess(id) { return request(`/api/volumes/${id}/access`); },

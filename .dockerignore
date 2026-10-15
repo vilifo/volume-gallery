@@ -18,3 +18,4 @@ docker-compose.yml
 **/*.pyc
 # the image downloads its own copy of the vendored viewer libraries
 /frontend/vendor/
+**/node_modules

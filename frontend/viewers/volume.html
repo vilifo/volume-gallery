@@ -71,6 +71,47 @@
      closing the panel resizes the canvas instead of covering the volume. */
   .viewer-canvas-area { position: relative; flex: 1; min-width: 0; height: 100%; overflow: hidden; }
   .viewer-canvas-area > canvas { width: 100%; height: 100%; display: block; }
+
+  /* --- Slice views: a grid of panes (the kiln canvas lives in #pane-3d) --- */
+  .slice-grid { position: absolute; inset: 0; display: grid; gap: 2px; background: #050506; }
+  .slice-grid[data-layout="3d"], .slice-grid[data-layout="xy"],
+  .slice-grid[data-layout="xz"], .slice-grid[data-layout="yz"] { grid-template: minmax(0, 1fr) / minmax(0, 1fr); }
+  .slice-grid[data-layout="quad"] { grid-template: minmax(0, 1fr) minmax(0, 1fr) / minmax(0, 1fr) minmax(0, 1fr); }
+  .slice-grid > [data-axis]:not(.slice-pane) { display: none; }
+  .slice-pane { position: relative; min-width: 0; min-height: 0; overflow: hidden; background: #0b0b0d; outline: none; }
+  .slice-pane[data-visible="0"] { display: none; }
+  /* The 3D pane keeps its size when hidden so the renderer is never resized to 0x0 */
+  .slice-pane-3d { background: #000; }
+  .slice-pane-3d[data-visible="0"] { display: block; visibility: hidden; position: absolute; inset: 0; }
+  .slice-pane-3d > canvas { width: 100%; height: 100%; display: block; }
+  .slice-pane-2d:focus-visible { box-shadow: inset 0 0 0 1px rgba(120, 160, 255, 0.6); }
+  .slice-canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; cursor: crosshair; }
+  .slice-svg { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+  .slice-head { position: absolute; top: 0; left: 0; right: 0; display: flex; align-items: center; gap: 0.6em; padding: 0.35em 0.6em; font-size: 12px; color: #cdd2dc; background: linear-gradient(rgba(0,0,0,0.65), rgba(0,0,0,0)); pointer-events: none; }
+  .slice-title { font-weight: 600; letter-spacing: 0.02em; }
+  .slice-sub { opacity: 0.85; font-variant-numeric: tabular-nums; }
+  .slice-btns { margin-left: auto; display: flex; gap: 2px; pointer-events: auto; opacity: 0; transition: opacity 0.15s; }
+  .slice-pane:hover .slice-btns, .slice-pane:focus-within .slice-btns { opacity: 1; }
+  .slice-btns button { background: rgba(0,0,0,0.55); color: #ddd; border: 1px solid rgba(255,255,255,0.15); border-radius: 4px; width: 22px; height: 22px; padding: 0; cursor: pointer; font-size: 12px; line-height: 1; }
+  .slice-btns button:hover { background: rgba(60,80,120,0.8); }
+  .slice-hud { position: absolute; left: 0.6em; bottom: 0.4em; font: 11px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace; color: #cfd3dc; pointer-events: none; text-shadow: 0 1px 2px #000; }
+  .slice-hud.error { color: #ff8a8a; }
+  .slice-busy { position: absolute; right: 0.7em; bottom: 0.6em; width: 10px; height: 10px; border-radius: 50%; border: 2px solid rgba(255,255,255,0.25); border-top-color: #fff; animation: slice-spin 0.8s linear infinite; }
+  @keyframes slice-spin { to { transform: rotate(360deg); } }
+  .layout-seg { display: flex; border: 1px solid rgba(128,128,128,0.4); border-radius: 6px; overflow: hidden; }
+  .layout-seg button { background: transparent; border: 0; color: inherit; padding: 0.45em 0.7em; font-size: 12px; cursor: pointer; opacity: 0.7; }
+  .layout-seg button:hover { opacity: 1; }
+  .layout-seg button.active { background: rgba(120,160,255,0.25); opacity: 1; }
+  .layout-seg[data-busy] { cursor: progress; }
+  .layout-seg[data-busy] button { pointer-events: none; opacity: 0.5; }
+  .slice-num { width: 7.5em; text-align: right; }
+  .slice-tf-bar { position: relative; height: 22px; margin: 8px 6px 18px; border-radius: 4px; border: 1px solid rgba(128,128,128,0.45); cursor: copy; }
+  .slice-tf-stop { position: absolute; top: -4px; width: 12px; height: 28px; margin-left: -6px; padding: 0; border: 2px solid #fff; border-radius: 3px; box-shadow: 0 0 0 1px rgba(0,0,0,0.55); cursor: ew-resize; }
+  .slice-tf-stop.end { cursor: pointer; }
+  .slice-tf-stop.selected { border-color: #7aa2ff; z-index: 1; }
+  .slice-tf-edit { display: flex; align-items: center; gap: 0.5em; margin: 2px 0 8px; font-size: 0.85em; }
+  .slice-tf-edit input[type="color"] { width: 34px; height: 24px; padding: 0; border: 1px solid rgba(128,128,128,0.45); border-radius: 4px; background: none; }
+  .slice-tf-edit .slice-num { width: 4.5em; }
   [hidden] { display: none !important; }
   /* When the canvas wrap itself is the fullscreen element, it should still
      behave like a normal fill-the-box layout rather than picking up any
@@ -150,8 +191,8 @@
 
   /* --- Side panel (mirrors kilnrender.com's widget design): docked on the
      right, closeable, with a segmented mode switch, a swap region for
-     mode-dependent controls (transfer function / windowing / density / slice
-     planes) and collapsible Scene and Advanced sections. --- */
+     mode-dependent controls (transfer function / windowing / density) and
+     collapsible Scene, Info and Advanced sections. --- */
   .ctl-panel {
     flex: 0 0 340px;
     width: 340px;
@@ -373,32 +414,13 @@
   .ctl-collapsible-body { display: none; padding-top: 0.5em; }
   .ctl-collapsible.open .ctl-collapsible-body { display: block; }
 
-  .viewer-stats-hud {
-    position: absolute;
-    left: 12px;
-    bottom: 12px;
-    background: rgba(26, 29, 35, 0.85);
-    backdrop-filter: blur(8px);
-    -webkit-backdrop-filter: blur(8px);
-    border-radius: 10px;
-    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.4), 0 0 0 1px rgba(255, 255, 255, 0.05);
-    padding: 0.5em 1em 0.8em;
-    font-family: var(--mono);
-    font-size: 0.72em;
-    color: var(--text-dim);
-    line-height: 1.65;
-    pointer-events: none; /* let the camera controls through; only the close button is clickable */
-    z-index: 2;
-  }
-  .viewer-stats-head { display: flex; align-items: center; justify-content: space-between; gap: 2em; margin-bottom: 0.2em; }
-  .viewer-stats-head .ctl-eyebrow { font-family: inherit; }
-  .viewer-stats-hud .ctl-close { pointer-events: auto; font-size: 16px; }
+   /* The info box lives in the side panel (a closed-by-default collapsible before "Advanced") */
+  .ctl-collapsible-body .viewer-stats-text { font-family: var(--mono); font-size: 0.75em; color: var(--text-dim); line-height: 1.65; }
   .viewer-stats-text { white-space: pre-wrap; }
 
   @media (max-width: 700px) {
     .viewer-topbar { flex-wrap: wrap; }
     .icon-btn .icon-btn-label { display: none; }
-    .viewer-stats-hud { font-size: 0.65em; }
     /* Narrow screens: the panel floats over the render instead of docking. */
     .ctl-panel { position: absolute; right: 0; top: 0; bottom: 0; width: min(340px, 90%); flex: none; z-index: 5; }
   }
@@ -408,7 +430,7 @@
   <div class="app-shell" id="shell"></div>
 
   <script type="module">
-    import { api, requireLogin, getRole, getUsername, renderShell, wireLogout } from "/js/api.js?v=theme2";
+    import { api, requireLogin, getRole, getUsername, renderShell, wireLogout } from "/js/api.js?v=slice1";
     import { KilnViewer } from "/vendor/kiln-render/lib/kiln-render.js?v=atlas2";
     import {
       ATLAS_VRAM_OPTIONS_MB,
@@ -417,6 +439,7 @@
       planAtlas,
       saveAtlasMB,
     } from "/js/atlas-budget.js?v=atlas3";
+    import { setupSliceIntegration } from "/js/slice/slice-integration.js?v=slice1";
 
     requireLogin();
     const role = getRole();
@@ -481,7 +504,7 @@
     // tfpts, up, scale, cam, clipMin, clipMax, wireframe, axis, slices,
     // sliceVis), plus `id` (this volume) and `minLevel` (max detail level).
     // ------------------------------------------------------------------
-    const MODES = ["dvr", "mip", "iso", "lod", "slice", "slice-lod"];
+    const MODES = ["dvr", "mip", "iso", "lod"];
     const UP_AXES = ["x", "y", "z", "-x", "-y", "-z"];
     const TF_PRESETS = [
       ["coolwarm", "Cool-Warm"], ["grayscale", "Grayscale"],
@@ -509,12 +532,6 @@
       if (state.clipMax.some((v) => v !== 1)) p.set("clipMax", state.clipMax.map((v) => fx(v)).join(","));
       if (state.showWireframe) p.set("wireframe", "1");
       if (state.showAxis) p.set("axis", "1");
-      const slicesDefault = state.sliceX === 0.5 && state.sliceY === 0.5 && state.sliceZ === 0.5;
-      if (state.mode.startsWith("slice") || !slicesDefault) {
-        p.set("slices", [state.sliceX, state.sliceY, state.sliceZ].map((v) => fx(v)).join(","));
-      }
-      const visMask = (state.showSliceX ? 1 : 0) | (state.showSliceY ? 2 : 0) | (state.showSliceZ ? 4 : 0);
-      if (visMask !== 7) p.set("sliceVis", String(visMask)); // omitted when all visible
       if (minLevel != null) p.set("minLevel", String(minLevel));
       return p;
     }
@@ -534,12 +551,6 @@
         cam: state.cam,
         clipMin: state.clipMin,
         clipMax: state.clipMax,
-        sliceX: state.sliceX,
-        sliceY: state.sliceY,
-        sliceZ: state.sliceZ,
-        showSliceX: state.showSliceX,
-        showSliceY: state.showSliceY,
-        showSliceZ: state.showSliceZ,
         showWireframe: state.showWireframe,
         showAxis: state.showAxis,
       };
@@ -577,16 +588,6 @@
       const cam = numList(p.get("cam"), [3, 6]); if (cam) o.cam = cam;
       const clipMin = numList(p.get("clipMin"), [3]); if (clipMin) o.clipMin = clipMin;
       const clipMax = numList(p.get("clipMax"), [3]); if (clipMax) o.clipMax = clipMax;
-      const slices = numList(p.get("slices"), [3]);
-      if (slices) [o.sliceX, o.sliceY, o.sliceZ] = slices;
-      if (p.has("sliceVis")) {
-        const mask = parseInt(p.get("sliceVis"), 10);
-        if (!isNaN(mask)) {
-          o.showSliceX = !!(mask & 1);
-          o.showSliceY = !!(mask & 2);
-          o.showSliceZ = !!(mask & 4);
-        }
-      }
       if (p.get("wireframe") === "1") o.showWireframe = true;
       if (p.get("axis") === "1") o.showAxis = true;
 
@@ -602,18 +603,13 @@
     // UI state that must survive a reload of the viewer (the side panel is
     // rebuilt for each KilnViewer, so its open/closed state lives here).
     // ------------------------------------------------------------------
-    const uiState = { panelOpen: true, infoOpen: true, sceneOpen: true, advancedOpen: false, panelScroll: 0 };
+    const uiState = { panelOpen: true, infoOpen: false, sceneOpen: true, advancedOpen: false, panelScroll: 0 };
 
     function setPanelOpen(open) {
       uiState.panelOpen = open;
       const panel = document.querySelector(".ctl-panel");
       if (panel) panel.hidden = !open;
       $("panel-open").hidden = open;
-    }
-    function setInfoOpen(open) {
-      uiState.infoOpen = open;
-      $("stats-hud").hidden = !open;
-      $("info-open").hidden = open;
     }
 
     function showStatus(text, { busy = true } = {}) {
@@ -641,6 +637,8 @@
     }
 
     let currentViewer = null;
+    // Extra URL parameters owned by the slice views (cursor, layout, window); set once they exist
+    let sliceUrlParams = () => ({});
 
     async function init() {
       if (!volumeId) {
@@ -663,6 +661,13 @@
             ${volume.description ? `<div class="viewer-desc">${escapeHtml(volume.description)}</div>` : ""}
           </div>
           <div class="viewer-topbar-actions">
+            <div class="layout-seg" id="layout-seg" role="group" aria-label="View layout">
+              <button type="button" data-layout="3d" title="3D view only">3D</button>
+              <button type="button" data-layout="quad" title="3D view and the three slice views">Quad</button>
+              <button type="button" data-layout="xy" title="XY plane: slices along Z">XY</button>
+              <button type="button" data-layout="xz" title="XZ plane: slices along Y">XZ</button>
+              <button type="button" data-layout="yz" title="YZ plane: slices along X">YZ</button>
+            </div>
             <button id="share-btn" class="icon-btn" title="Copy a link to this exact view">${LINK_ICON}<span class="icon-btn-label">Share</span></button>
             ${
               volume.mesh_status === "ready"
@@ -674,18 +679,13 @@
         </div>
         <div class="viewer-canvas-wrap" id="canvas-wrap">
           <div class="viewer-canvas-area" id="canvas-area">
-            <canvas id="canvas"></canvas>
+            <div class="slice-grid" id="slice-grid" data-layout="3d">
+              <div class="slice-pane slice-pane-3d" id="pane-3d" data-visible="1"><canvas id="canvas"></canvas></div>
+              <div data-axis="xy"></div><div data-axis="xz"></div><div data-axis="yz"></div>
+            </div>
             <div class="viewer-progress" id="load-progress"><div class="viewer-progress-bar" id="load-progress-bar"></div></div>
             <div class="viewer-load-chip" id="load-chip"><div class="spinner"></div><span id="load-text">Loading\u2026</span></div>
             <div class="viewer-status" id="status"></div>
-            <div class="viewer-stats-hud" id="stats-hud">
-              <div class="viewer-stats-head">
-                <span class="ctl-eyebrow">Info</span>
-                <button type="button" class="ctl-close" id="info-close" aria-label="Close info box" title="Close">\u00d7</button>
-              </div>
-              <div class="viewer-stats-text" id="stats-text">\u2014</div>
-            </div>
-            <button type="button" class="ctl-chip" id="info-open" style="left:12px; bottom:12px" hidden>Info</button>
             <button type="button" class="ctl-chip" id="panel-open" style="right:12px; top:12px" hidden>Controls</button>
           </div>
         </div>
@@ -694,8 +694,6 @@
       const canvasWrap = $("canvas-wrap");
       const canvasArea = $("canvas-area");
 
-      $("info-close").addEventListener("click", () => setInfoOpen(false));
-      $("info-open").addEventListener("click", () => setInfoOpen(true));
       $("panel-open").addEventListener("click", () => setPanelOpen(true));
 
       const fullscreenBtn = $("fullscreen-btn");
@@ -715,6 +713,7 @@
 
       const gpu = webgpuStatus();
       if (!gpu.ok) {
+        $("layout-seg").hidden = true;
         showStatus(gpu.message, { busy: false });
         return;
       }
@@ -740,6 +739,22 @@
       let loadToken = 0;
       let stopStats = null;
       let urlSync = null;
+
+      // Slice views (xy / xz / yz panes + quad layout). Nothing is
+      // fetched or allocated until a slice layout is chosen or the URL asks for one.
+      const slices = setupSliceIntegration({
+        grid: $("slice-grid"),
+        seg: $("layout-seg"),
+        getAccessUrl: async () => (await api.sliceAccessUrl(volumeId)).url,
+        params,
+        debug: params.get("debug") === "slices",
+        onError: (message) => {
+          showStatus(message, { busy: false });
+          setTimeout(() => { if (currentViewer) $("status").style.display = "none"; }, 6000);
+        },
+      });
+      sliceUrlParams = () => slices.toParams();
+      let initialLayoutApplied = false;
 
       function replaceCanvas() {
         const canvas = document.createElement("canvas");
@@ -770,6 +785,7 @@
         if (currentViewer) {
           const old = currentViewer;
           currentViewer = null;
+          slices.detachViewer();
           try {
             old.dispose();
           } catch (err) {
@@ -812,6 +828,12 @@
           });
           stopStats = startStatsLoop(viewer, atlas);
           urlSync = startUrlSync(viewer, () => activeMinLevel);
+          slices.attachViewer(viewer);
+          slices.mountControls(canvasWrap.querySelector(".ctl-panel-body"));
+          if (!initialLayoutApplied) {
+            initialLayoutApplied = true;
+            slices.applyInitial();
+          }
         } catch (err) {
           if (token !== loadToken) return;
           console.error(err);
@@ -857,12 +879,14 @@
     }
 
     // Keeps the page URL in sync with the live view (camera, mode, transfer
-    // function, clip/slice planes, ...) so a reload or a copied link restores it.
+    // function, clip range, ...) so a reload or a copied link restores it.
     function startUrlSync(viewer, getMinLevel) {
       let last = window.location.search;
       const write = () => {
         try {
-          const qs = "?" + stateToParams(viewer.getState(), getMinLevel()).toString();
+          const p = stateToParams(viewer.getState(), getMinLevel());
+          for (const [k, v] of Object.entries(sliceUrlParams())) p.set(k, v);
+          const qs = "?" + p.toString();
           if (qs !== last) {
             history.replaceState(history.state, "", window.location.pathname + qs + window.location.hash);
             last = qs;
@@ -878,10 +902,11 @@
 
     // The side panel: a segmented mode switch, a "swap region" whose contents
     // depend on the selected mode (transfer function + windowing + density
-    // for DVR, windowing for MIP, + iso value for ISO, + slice planes for
-    // Slice), a collapsible Scene section (up axis, wireframe/axis overlays,
-    // per-axis clip range in voxel coordinates) and a collapsible Advanced
-    // section (render scale, max detail level, LOD/jitter/TAA/indirection).
+    // for DVR, windowing for MIP, + iso value for ISO), a collapsible Scene
+    // section (up axis, wireframe/axis overlays, per-axis clip range in voxel
+    // coordinates), a closed-by-default Info section (live render statistics)
+    // and a collapsible Advanced section (render scale, max detail level,
+    // LOD/jitter/TAA/indirection). The slice views have their own section.
     function buildControlPanel(viewer, container, lodOptions) {
 
       const renderer = viewer.renderer;
@@ -891,10 +916,8 @@
       const dims = { X: dimX, Y: dimY, Z: dimZ };
 
       const state = {
-        mode: ["dvr", "mip", "iso", "slice"].includes(viewer.mode)
-          ? viewer.mode
-          : viewer.mode === "slice-lod" ? "slice" : "dvr",
-        lod: viewer.mode === "lod" || viewer.mode === "slice-lod",
+        mode: ["dvr", "mip", "iso"].includes(viewer.mode) ? viewer.mode : "dvr",
+        lod: viewer.mode === "lod",
         tfPreset: tf.preset,
         upAxis: camera.getUpAxis(),
         clipMinX: Math.round(renderer.clipMin[0] * dimX),
@@ -907,7 +930,6 @@
 
       function effectiveMode() {
         if (state.lod && state.mode === "dvr") return "lod";
-        if (state.lod && state.mode === "slice") return "slice-lod";
         return state.mode; // MIP/ISO have no LOD-streaming variant
       }
       function applyMode() { viewer.mode = effectiveMode(); }
@@ -930,9 +952,9 @@
         </div>
         <div class="ctl-panel-body">
           <div class="ctl-segmented" data-role="mode-segmented">
-            ${["dvr", "mip", "iso", "slice"].map((m) => `
+            ${["dvr", "mip", "iso"].map((m) => `
               <button type="button" class="ctl-segment${state.mode === m ? " active" : ""}" data-mode="${m}">
-                ${m === "dvr" ? "DVR" : m === "mip" ? "MIP" : m === "iso" ? "ISO" : "Slice"}
+                ${m === "dvr" ? "DVR" : m === "mip" ? "MIP" : "ISO"}
               </button>`).join("")}
           </div>
 
@@ -978,6 +1000,15 @@
             </div>
           </div>
 
+          <div class="ctl-collapsible${uiState.infoOpen ? " open" : ""}" data-key="infoOpen">
+            <button type="button" class="ctl-collapsible-header">
+              ${collapsibleArrow}
+              <span class="ctl-eyebrow">Info</span>
+            </button>
+            <div class="ctl-collapsible-body">
+              <div class="viewer-stats-text" id="stats-text">\u2014</div>
+            </div>
+          </div>
           <div class="ctl-collapsible${uiState.advancedOpen ? " open" : ""}" data-key="advancedOpen">
             <button type="button" class="ctl-collapsible-header">
               ${collapsibleArrow}
@@ -1017,9 +1048,9 @@
                   ).join("")}
                 </select>
               </label>
-              <label class="ctl-toggle-row${state.mode !== "dvr" && state.mode !== "slice" ? " disabled" : ""}" title="Only available for DVR and Slice modes">
+              <label class="ctl-toggle-row${state.mode !== "dvr" ? " disabled" : ""}" title="Only available for DVR mode">
                 <span class="ctl-row-label ctl-toggle-label">LOD Levels</span>
-                <input type="checkbox" class="ctl-toggle-input" data-role="lod" ${state.lod ? "checked" : ""} ${state.mode !== "dvr" && state.mode !== "slice" ? "disabled" : ""}>
+                <input type="checkbox" class="ctl-toggle-input" data-role="lod" ${state.lod ? "checked" : ""} ${state.mode !== "dvr" ? "disabled" : ""}>
                 <span class="ctl-toggle-track"></span>
               </label>
               <label class="ctl-toggle-row">
@@ -1235,7 +1266,6 @@
         const swap = panel.querySelector('[data-role="swap-region"]');
         const showDensity = state.mode === "dvr";
         const showIso = state.mode === "iso";
-        const showSlices = state.mode === "slice";
         swap.innerHTML = `
           <label class="ctl-select-row">
             <span class="ctl-row-label ctl-select-label">Preset</span>
@@ -1284,38 +1314,12 @@
             </div>
             <span class="ctl-row-value ctl-mono" data-role="value-iso">${viewer.isoValue.toFixed(3)}</span>
           </div>` : ""}
-          ${showSlices ? `
-          <div class="ctl-eyebrow ctl-subhead">Slice planes</div>
-          ${["X", "Y", "Z"].map((axis) => `
-          <div class="ctl-slider-row">
-            <label class="ctl-slice-toggle" title="Show the ${axis} slice">
-              <input type="checkbox" class="ctl-toggle-input" data-role="slice-show-${axis}" ${renderer["showSlice" + axis] ? "checked" : ""}>
-              <span class="ctl-toggle-track"></span>
-            </label>
-            <span class="ctl-row-label ctl-slider-label">Slice ${axis}</span>
-            <div class="ctl-slider-track">
-              <div class="ctl-slider-fill" data-role="fill-slice${axis}"></div>
-              <input type="range" class="ctl-slider-input" data-role="slider-slice${axis}" min="0" max="1" step="0.001" value="${renderer["slice" + axis]}">
-            </div>
-            <span class="ctl-row-value ctl-mono" data-role="value-slice${axis}"></span>
-          </div>`).join("")}` : ""}
         `;
 
         wireSlider(swap, "center", (v) => { viewer.windowCenter = v; if (redrawTf) redrawTf(); }, (v) => v.toFixed(2));
         wireSlider(swap, "width", (v) => { viewer.windowWidth = v; if (redrawTf) redrawTf(); }, (v) => v.toFixed(2));
         if (showDensity) wireSlider(swap, "density", (v) => { renderer.densityScale = v; dirty(); }, (v) => v.toFixed(2));
         if (showIso) wireSlider(swap, "iso", (v) => { viewer.isoValue = v; }, (v) => v.toFixed(3));
-        if (showSlices) {
-          for (const axis of ["X", "Y", "Z"]) {
-            const dim = dims[axis];
-            wireSlider(swap, "slice" + axis, (v) => { renderer["slice" + axis] = v; dirty(); },
-              (v) => String(Math.min(dim - 1, Math.floor(v * dim))));
-            swap.querySelector(`[data-role="slice-show-${axis}"]`).addEventListener("change", (evt) => {
-              renderer["showSlice" + axis] = evt.target.checked;
-              dirty();
-            });
-          }
-        }
 
         swap.querySelector('[data-role="tf-preset"]').addEventListener("change", (evt) => {
           state.tfPreset = evt.target.value;
@@ -1341,8 +1345,7 @@
           // section's toggle state rather than re-render the whole panel.
           const lodInput = panel.querySelector('[data-role="lod"]');
           const lodRow = lodInput.closest(".ctl-toggle-row");
-          const lodAvailable = state.mode === "dvr" || state.mode === "slice";
-          lodInput.disabled = !lodAvailable;
+          const lodAvailable = state.mode === "dvr";          lodInput.disabled = !lodAvailable;
           lodRow.classList.toggle("disabled", !lodAvailable);
         });
       });
