@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, UploadFile, File, Form, Query, Request
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response
 from sqlmodel import Session, select
 
 from ..database import get_session, engine
@@ -14,6 +14,7 @@ from ..deps import get_current_user, require_editor
 from ..security import create_file_token, decode_token
 from ..config import settings
 from .. import workdir
+from ..helpers.slices import SliceError, open_volume_slices, plane_response_parts
 from ..helpers import extract_zarr_zip_from_path, convert_tiff_zip_from_path, ZIP_NAME, count_multiscale_levels, get_multiscales
 from ..utils import SLUG_RE, _now  # noqa: F401 - re-exported for the other asset routers
 from .meshes import attach_mesh_to_volume, delete_volume_mesh, get_volume_mesh, volume_mesh_source, volume_mesh_file
@@ -392,6 +393,93 @@ def mesh_view_url(
         url=f"{base}/api/volumes/{volume_id}/mesh-view-file/{token}",
         expires_in_minutes=settings.FILE_TOKEN_EXPIRE_MINUTES,
     )
+
+
+# ---------- Slice views: planes extracted server-side ----------
+# The browser asks for one finished plane at a time instead of streaming zarr
+# chunks (a plane needs a whole column of chunks: ~1000 requests for a 2000^3
+# volume). See helpers/slices.py for the cache that keeps scrolling fast.
+
+@router.get("/{volume_id}/slice-access-url", response_model=FileAccessUrl)
+def slice_access_url(
+    volume_id: int,
+    session: Session = Depends(get_session),
+    user: User = Depends(get_current_user),
+):
+    volume = session.get(Volume, volume_id)
+    if not volume or not _can_see_volume(user, volume, session):
+        raise HTTPException(status_code=404, detail="Volume not found")
+    if volume.status != AssetStatus.ready:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Volume is still processing"
+                if volume.status == AssetStatus.processing
+                else "Volume processing failed — see its status log"
+            ),
+        )
+    token = create_file_token(subject=user.username, asset_id=volume_id, kind="slice")
+    return FileAccessUrl(
+        url=f"/api/volumes/{volume_id}/slices/{token}/",
+        expires_in_minutes=settings.FILE_TOKEN_EXPIRE_MINUTES,
+    )
+
+
+def _slice_store(volume_id: int, token: str, level: int, session: Session):
+    _check_file_token(token, volume_id, "slice")
+    volume = session.get(Volume, volume_id)
+    if not volume:
+        raise HTTPException(status_code=404, detail="Volume not found")
+    zarr_root = (_volume_dir(volume.slug) / volume.zarr_path).resolve()
+    # Plane reads can take a while: give the DB connection back first so a
+    # burst of slice requests cannot exhaust the connection pool.
+    session.close()
+    try:
+        return open_volume_slices(zarr_root, level)
+    except SliceError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc))
+
+
+@router.get("/{volume_id}/slices/{token}/info")
+def slice_info(
+    volume_id: int,
+    token: str,
+    level: int = Query(0, ge=0, description="Resolution level (0 = finest, the default)"),
+    session: Session = Depends(get_session),
+):
+    """Dimensions, voxel spacing, data type and a suggested window for the slice views."""
+    vs = _slice_store(volume_id, token, level, session)
+    return JSONResponse(vs.info(), headers={"Cache-Control": "private, max-age=60"})
+
+
+@router.get("/{volume_id}/slices/{token}/{axis}/{index}")
+def slice_plane(
+    volume_id: int,
+    token: str,
+    axis: str,
+    index: int,
+    request: Request,
+    channel: int = Query(0, ge=0),
+    stride: int = Query(1, description="1 (full detail), or 2/4/8 for a subsampled preview"),
+    level: int = Query(0, ge=0),
+    session: Session = Depends(get_session),
+):
+    """One plane as raw little-endian samples (zstd Content-Encoding when accepted).
+
+    `axis` is the plane: xy (index = z), xz (index = y) or yz (index = x). Rows run
+    along the plane's vertical axis: xy (y, x), xz (z, x), yz (z, y).
+    Width/height/dtype are in the X-Plane-* response headers.
+    """
+    vs = _slice_store(volume_id, token, level, session)
+    try:
+        body, headers = plane_response_parts(
+            vs, axis, index, channel, stride, request.headers.get("accept-encoding", "")
+        )
+    except SliceError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc))
+    # Same reasoning as serve_zarr_file: the bytes are fixed by the token's claims.
+    headers["Cache-Control"] = f"public, max-age={settings.FILE_TOKEN_EXPIRE_MINUTES * 60}, immutable"
+    return Response(content=body, media_type="application/octet-stream", headers=headers)
 
 
 def _check_file_token(token: str, volume_id: int, kind: str) -> dict:
