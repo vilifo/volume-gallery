@@ -458,9 +458,9 @@ def slice_plane(
     token: str,
     axis: str,
     index: int,
-    request: Request,
     channel: int = Query(0, ge=0),
     stride: int = Query(1, description="1 (full detail), or 2/4/8 for a subsampled preview"),
+    enc: str = Query("identity", description="identity (raw, the default) or zstd (Content-Encoding: zstd)"),
     level: int = Query(0, ge=0),
     session: Session = Depends(get_session),
 ):
@@ -468,13 +468,12 @@ def slice_plane(
 
     `axis` is the plane: xy (index = z), xz (index = y) or yz (index = x). Rows run
     along the plane's vertical axis: xy (y, x), xz (z, x), yz (z, y).
-    Width/height/dtype are in the X-Plane-* response headers.
+    Width/height/dtype are in the X-Plane-* response headers. The body is raw unless
+    `enc=zstd` is requested explicitly (the Accept-Encoding header is not consulted).
     """
     vs = _slice_store(volume_id, token, level, session)
     try:
-        body, headers = plane_response_parts(
-            vs, axis, index, channel, stride, request.headers.get("accept-encoding", "")
-        )
+        body, headers = plane_response_parts(vs, axis, index, channel, stride, enc)
     except SliceError as exc:
         raise HTTPException(status_code=exc.status, detail=str(exc))
     # Same reasoning as serve_zarr_file: the bytes are fixed by the token's claims.

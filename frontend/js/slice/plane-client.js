@@ -1,6 +1,7 @@
 // Fetches finished planes from the server (see backend/app/helpers/slices.py).
 //
-//   * one request per plane; the browser decodes zstd Content-Encoding itself
+//   * one request per plane; planes are raw unless a one-time probe shows that this
+//     browser/connection really decodes `Content-Encoding: zstd` (see _useZstd)
 //   * identical requests are shared; a request nobody waits for any more is aborted
 //     ("latest wins" while dragging a crosshair)
 //   * decoded planes are kept in a byte-budgeted LRU
@@ -12,10 +13,11 @@
 import { textureFormatFor } from "./geometry.js";
 
 export class PlaneError extends Error {
-  constructor(message, status = 0) {
+  constructor(message, status = 0, { sizeMismatch = false } = {}) {
     super(message);
     this.name = "PlaneError";
     this.status = status;
+    this.sizeMismatch = sizeMismatch;
   }
 }
 
@@ -27,9 +29,15 @@ export class PlaneClient {
    * @param {string} o.baseUrl   ".../slices/<token>/" (ends with "/")
    * @param {Function} [o.fetchFn]
    * @param {() => Promise<string>} [o.refreshUrl]  returns a new baseUrl when the token expired (403)
+   * @param {"auto"|"on"|"off"} [o.compression]  "auto" (default): ask for zstd only after the probe
+   *  proved that this connection decodes it; "off": always raw; "on": always zstd (falls back
+   *  to raw if a response turns out to be undecoded)
    */
-  constructor({ baseUrl, fetchFn = (...a) => fetch(...a), refreshUrl = null, maxCacheBytes = 384e6, maxInflight = 6 }) {
+  constructor({ baseUrl, fetchFn = (...a) => fetch(...a), refreshUrl = null, maxCacheBytes = 384e6, maxInflight = 6, compression = "auto" }) {
     this.baseUrl = baseUrl;
+    this.compression = compression;
+    this._zstd = compression === "on";
+    this._probe = null;
     this.fetchFn = fetchFn;
     this.refreshUrl = refreshUrl;
     this.maxCacheBytes = maxCacheBytes;
@@ -190,27 +198,86 @@ export class PlaneClient {
     return res;
   }
 
+  /**
+   * Whether to request `enc=zstd`. A body sent with `Content-Encoding: zstd` is only usable if
+   * fetch() decodes it; older embedded Chromium builds, proxies that drop the header and the like
+   * hand over the compressed bytes (the "plane size does not match its headers" failure). So in
+   * "auto" mode one tiny plane is fetched compressed first and its size checked; raw is the
+   * fallback and is always correct.
+   */
+  _useZstd() {
+    if (this.compression !== "auto") return Promise.resolve(this._zstd);
+    this._probe ??= this._probeZstd();
+    return this._probe;
+  }
+
+  async _probeZstd() {
+    let ok = false;
+    try {
+      const res = await this._request("xy/0?stride=8&enc=zstd");
+      const buf = await res.arrayBuffer();
+      const fmt = textureFormatFor(res.headers.get("X-Plane-Dtype"));
+      const w = parseInt(res.headers.get("X-Plane-Width"), 10);
+      const h = parseInt(res.headers.get("X-Plane-Height"), 10);
+      ok = !!fmt && buf.byteLength === w * h * fmt.bytes;
+    } catch {
+      ok = false;
+    }
+    this._zstd = ok;
+    if (!ok) console.warn("[slice] compressed planes are not decoded on this connection; using raw planes");
+    return ok;
+  }
+
+  _disableZstd() {
+    if (this._zstd) console.warn("[slice] a compressed plane arrived undecoded; switching to raw planes");
+    this._zstd = false;
+    this.compression = "off";
+  }
+
+  /** One request for one plane; throws PlaneError{sizeMismatch} when the body does not fit its headers. */
+  async _fetchPlane(job, zstd) {
+    const { axis, index, channel, stride } = job;
+    const qs = new URLSearchParams();
+    if (channel) qs.set("channel", String(channel));
+    if (stride !== 1) qs.set("stride", String(stride));
+    if (zstd) qs.set("enc", "zstd");
+    const res = await this._request(`${axis}/${index}${qs.size ? `?${qs}` : ""}`, job.controller.signal);
+    const buf = await res.arrayBuffer();
+    const dtype = res.headers.get("X-Plane-Dtype");
+    const fmt = textureFormatFor(dtype);
+    if (!fmt) throw new PlaneError(`Unsupported plane data type ${dtype}`);
+    const width = parseInt(res.headers.get("X-Plane-Width"), 10);
+    const height = parseInt(res.headers.get("X-Plane-Height"), 10);
+    const expected = width * height * fmt.bytes;
+    if (buf.byteLength !== expected) {
+      throw new PlaneError(
+        `Plane size does not match its headers: received ${buf.byteLength} bytes, expected ${expected} ` +
+        `(${width}x${height} ${dtype}); Content-Encoding: ${res.headers.get("Content-Encoding") ?? "none"}, ` +
+        `Content-Length: ${res.headers.get("Content-Length") ?? "?"}, requested ${zstd ? "zstd" : "raw"}`,
+        0,
+        { sizeMismatch: true },
+      );
+    }
+    return {
+      axis, index, channel, stride, width, height, dtype, data: new fmt.array(buf),
+      serverMs: parseFloat(res.headers.get("X-Plane-Server-Ms") ?? "0"),
+      source: res.headers.get("X-Plane-Source") ?? "",
+    };
+  }
+
   async _run(job) {
     const { axis, index, channel, stride } = job;
     const t0 = performance.now();
     try {
-      const qs = new URLSearchParams();
-      if (channel) qs.set("channel", String(channel));
-      if (stride !== 1) qs.set("stride", String(stride));
-      const res = await this._request(`${axis}/${index}${qs.size ? `?${qs}` : ""}`, job.controller.signal);
-      const buf = await res.arrayBuffer();
-      const dtype = res.headers.get("X-Plane-Dtype");
-      const fmt = textureFormatFor(dtype);
-      if (!fmt) throw new PlaneError(`Unsupported plane data type ${dtype}`);
-      const width = parseInt(res.headers.get("X-Plane-Width"), 10);
-      const height = parseInt(res.headers.get("X-Plane-Height"), 10);
-      const data = new fmt.array(buf);
-      if (data.length !== width * height) throw new PlaneError("Plane size does not match its headers");
-      const plane = {
-        axis, index, channel, stride, width, height, dtype, data,
-        serverMs: parseFloat(res.headers.get("X-Plane-Server-Ms") ?? "0"),
-        source: res.headers.get("X-Plane-Source") ?? "",
-      };
+      const zstd = await this._useZstd();
+      let plane;
+      try {
+        plane = await this._fetchPlane(job, zstd);
+      } catch (err) {
+        if (!(err?.sizeMismatch && zstd)) throw err;
+        this._disableZstd(); // compressed bytes came through undecoded: retry this plane raw
+        plane = await this._fetchPlane(job, false);
+      }
       this.counters.fetches++;
       this.counters.lastMs = performance.now() - t0;
       this.counters.lastServerMs = plane.serverMs;
