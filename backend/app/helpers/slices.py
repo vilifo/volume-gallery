@@ -352,10 +352,18 @@ def to_transport(plane: np.ndarray, dtype: str, stride: int = 1) -> np.ndarray:
     return np.ascontiguousarray(plane, dtype=_NATIVE.get(dtype, (np.dtype("<f4"),))[0])
 
 
-def encode_plane(plane: np.ndarray, accept_encoding: str = "", zstd_level: int = 1) -> Tuple[bytes, Optional[str]]:
-    """Plane bytes for the wire. Uses zstd when the client accepts it (every current
-    Chromium / Firefox decodes it transparently inside fetch), otherwise raw."""
-    if "zstd" in (accept_encoding or "").lower():
+ENCODINGS = ("identity", "zstd")
+
+
+def encode_plane(plane: np.ndarray, encoding: str = "identity", zstd_level: int = 1) -> Tuple[bytes, Optional[str]]:
+    """Plane bytes for the wire.
+
+    The client chooses (``?enc=``) instead of the Accept-Encoding header deciding: a body that
+    is sent as ``Content-Encoding: zstd`` but arrives undecoded (older embedded Chromium, a
+    proxy that strips the header, ...) is unusable, so the page first proves with a tiny probe
+    that its fetch() really decodes zstd and only then asks for it. Raw is always safe.
+    """
+    if encoding == "zstd":
         import zstandard
 
         return zstandard.ZstdCompressor(level=zstd_level).compress(plane), "zstd"
@@ -368,15 +376,17 @@ def plane_response_parts(
     index: int,
     channel: int = 0,
     stride: int = 1,
-    accept_encoding: str = "",
+    encoding: str = "identity",
 ) -> Tuple[bytes, dict]:
     """Everything the HTTP layer needs: (body, headers). Kept free of FastAPI for testing."""
     if stride not in (1, 2, 4, 8):
         raise SliceError("stride must be 1, 2, 4 or 8")
+    if encoding not in ENCODINGS:
+        raise SliceError(f"enc must be one of {', '.join(ENCODINGS)}")
     t0 = time.perf_counter()
     plane, source = vs.get_plane(axis, index, channel)
     out = to_transport(plane, vs.dtype, stride)
-    body, encoding = encode_plane(out, accept_encoding, settings.SLICE_ZSTD_LEVEL)
+    body, content_encoding = encode_plane(out, encoding, settings.SLICE_ZSTD_LEVEL)
     headers = {
         "X-Plane-Width": str(out.shape[1]),
         "X-Plane-Height": str(out.shape[0]),
@@ -385,8 +395,9 @@ def plane_response_parts(
         "X-Plane-Source": source,
         "X-Plane-Raw-Bytes": str(out.nbytes),
         "X-Plane-Server-Ms": f"{(time.perf_counter() - t0) * 1000:.1f}",
+        "X-Plane-Encoding": encoding,
         "Vary": "Accept-Encoding",
     }
-    if encoding:
-        headers["Content-Encoding"] = encoding
+    if content_encoding:
+        headers["Content-Encoding"] = content_encoding
     return body, headers
