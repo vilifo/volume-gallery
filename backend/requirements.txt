@@ -12,7 +12,7 @@ numpy==2.5.3
 dask==2026.8.0
 # ome-zarr-py writes/reads via the zarr-python v2 API; pin below v3 until it
 # adds v3 support, or `write_image()` will fail on import/attribute errors.
-ome-zarr==0.19.2
+ome-zarr==0.21.0
 zarr==3.4.0
 # --- Slice views: zstd-compressed planes (backend/app/helpers/slices.py) ---
 zstandard==0.25.0
