@@ -21,9 +21,33 @@ export function clearSession() {
   localStorage.removeItem(USER_KEY);
 }
 
+// Login page URL that remembers the page the user was trying to reach (shared links!).
+export function loginUrl() {
+  const { pathname, search, hash } = window.location;
+  if (pathname.endsWith("/login.html")) return "/login.html";
+  return `/login.html?next=${encodeURIComponent(pathname + search + hash)}`;
+}
+
+// Where to go after signing in: the login URL's `next` parameter, but only if it points
+// into this app (otherwise a crafted link could send people to another site).
+export function postLoginUrl() {
+  const raw = new URLSearchParams(window.location.search).get("next");
+  if (!raw) return "/index.html";
+  try {
+    const url = new URL(raw, window.location.origin);
+    if (url.origin !== window.location.origin || url.pathname.endsWith("/login.html")) return "/index.html";
+    return url.pathname + url.search + url.hash;
+  } catch (_) {
+    return "/index.html";
+  }
+}
+
 export function requireLogin() {
   if (!getToken()) {
-    window.location.href = "/login.html";
+    window.location.href = loginUrl();
+    // Stop the page's own script here: it would otherwise carry on and, for pages that
+    // check the role next, replace this redirect with one to the gallery (losing the link).
+    throw new Error("Not signed in: redirecting to the login page");
   }
 }
 
@@ -34,7 +58,7 @@ async function request(path, options = {}) {
   const res = await fetch(path, { ...options, headers });
   if (res.status === 401) {
     clearSession();
-    window.location.href = "/login.html";
+    window.location.href = loginUrl();
     throw new Error("Not authenticated");
   }
   if (!res.ok) {
@@ -65,7 +89,7 @@ function _uploadWithProgress(path, formData, onProgress) {
     xhr.addEventListener("load", () => {
       if (xhr.status === 401) {
         clearSession();
-        window.location.href = "/login.html";
+        window.location.href = loginUrl();
         reject(new Error("Not authenticated"));
         return;
       }

@@ -4,8 +4,8 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Sign in — Volume Gallery</title>
-<script src="/js/theme-init.js?v=acct1"></script>
-<link rel="stylesheet" href="/css/style.css?v=acct1" />
+<script src="/js/theme-init.js?v=next1"></script>
+<link rel="stylesheet" href="/css/style.css?v=next1" />
 </head>
 <body>
   <div class="login-shell">
@@ -28,9 +28,9 @@
   </div>
 
   <script type="module">
-    import { api, setSession, getToken } from "/js/api.js?v=acct1";
+    import { api, setSession, getToken, postLoginUrl } from "/js/api.js?v=next1";
 
-    if (getToken()) window.location.href = "/index.html";
+    if (getToken()) window.location.href = postLoginUrl();
 
     const form = document.getElementById("login-form");
     const errorBox = document.getElementById("error");
@@ -43,7 +43,7 @@
       try {
         const data = await api.login(username, password);
         setSession(data.access_token, data.role, data.username);
-        window.location.href = "/index.html";
+        window.location.href = postLoginUrl();
       } catch (err) {
         errorBox.textContent = err.message;
         errorBox.style.display = "block";
