@@ -16,6 +16,7 @@ from ..config import settings
 from .. import workdir
 from ..helpers.slices import SliceError, open_volume_slices, plane_response_parts
 from ..helpers import extract_zarr_zip_from_path, convert_tiff_zip_from_path, ZIP_NAME, count_multiscale_levels, get_multiscales
+from ..helpers import read_thumbnail, write_thumbnail, store_thumbnail, remove_thumbnail, thumbnail_response
 from ..utils import SLUG_RE, _now  # noqa: F401 - re-exported for the other asset routers
 from .meshes import attach_mesh_to_volume, delete_volume_mesh, get_volume_mesh, volume_mesh_source, volume_mesh_file
 
@@ -52,6 +53,7 @@ def _volume_read(v: Volume, mesh: Optional[Mesh] = None) -> VolumeRead:
         slug=v.slug,
         title=v.title,
         description=v.description,
+        has_thumbnail=bool(v.thumbnail_path),
         has_mesh=v.has_mesh,
         mesh_filename=v.mesh_filename,
         mesh_status=mesh.status if mesh else None,
@@ -112,6 +114,7 @@ def create_volume(
         None, description="Zip archive of a flat .tif/.tiff slice stack, converted to OME-Zarr on upload"
     ),
     mesh_file: Optional[UploadFile] = File(None),
+    thumbnail_file: Optional[UploadFile] = File(None, description="Optional PNG/JPEG/WebP thumbnail"),
     session: Session = Depends(get_session),
     editor: User = Depends(require_editor),
 ):
@@ -124,6 +127,7 @@ def create_volume(
         raise HTTPException(status_code=400, detail="Provide only one of zarr_zip, tiff_zip")
     if session.exec(select(Volume).where(Volume.slug == slug)).first():
         raise HTTPException(status_code=409, detail="A volume with this slug already exists")
+    thumbnail = read_thumbnail(thumbnail_file) if thumbnail_file is not None else None  # validate before creating anything
 
     vol_dir = _volume_dir(slug)
     vol_dir.mkdir(parents=True, exist_ok=False)
@@ -132,6 +136,7 @@ def create_volume(
     source_upload = zarr_zip if zarr_zip is not None else tiff_zip
     try:
         workdir.prepare_work_dir("volumes", slug, vol_dir)
+        thumbnail_name = write_thumbnail(vol_dir, *thumbnail) if thumbnail else None
         # The upload is copied into the scratch folder by the background task, so
         # the response isn't held up by it (see workdir.detach_upload).
         upload_fd = workdir.detach_upload(source_upload)
@@ -144,6 +149,7 @@ def create_volume(
         slug=slug,
         title=title,
         description=description,
+        thumbnail_path=thumbnail_name,
         zarr_path="",  # filled in by _process_upload once conversion/extraction finishes
         created_by=editor.id,
         status=AssetStatus.uploaded if source_kind == "tiff-files" else AssetStatus.processing,
@@ -233,6 +239,48 @@ def upload_or_replace_mesh(
     mesh = attach_mesh_to_volume(session, volume, mesh_file, editor, background_tasks)
     session.refresh(volume)
     return _volume_read(volume, mesh)
+
+
+@router.get("/{volume_id}/thumbnail")
+def get_thumbnail(
+    volume_id: int, request: Request, session: Session = Depends(get_session), user: User = Depends(get_current_user)
+):
+    volume = session.get(Volume, volume_id)
+    if not volume or not _can_see_volume(user, volume, session):
+        raise HTTPException(status_code=404, detail="Volume not found")
+    return thumbnail_response(_volume_dir(volume.slug), volume.thumbnail_path, request)
+
+
+@router.post("/{volume_id}/thumbnail", response_model=VolumeRead)
+def upload_or_replace_thumbnail(
+    volume_id: int,
+    thumbnail_file: UploadFile = File(...),
+    session: Session = Depends(get_session),
+    _editor: User = Depends(require_editor),
+):
+    volume = session.get(Volume, volume_id)
+    if not volume:
+        raise HTTPException(status_code=404, detail="Volume not found")
+    volume.thumbnail_path = store_thumbnail(thumbnail_file, _volume_dir(volume.slug))
+    session.add(volume)
+    session.commit()
+    session.refresh(volume)
+    return _volume_read(volume, get_volume_mesh(session, volume.id))
+
+
+@router.delete("/{volume_id}/thumbnail", response_model=VolumeRead)
+def delete_thumbnail(
+    volume_id: int, session: Session = Depends(get_session), _editor: User = Depends(require_editor)
+):
+    volume = session.get(Volume, volume_id)
+    if not volume:
+        raise HTTPException(status_code=404, detail="Volume not found")
+    remove_thumbnail(_volume_dir(volume.slug))
+    volume.thumbnail_path = None
+    session.add(volume)
+    session.commit()
+    session.refresh(volume)
+    return _volume_read(volume, get_volume_mesh(session, volume.id))
 
 
 @router.delete("/{volume_id}")

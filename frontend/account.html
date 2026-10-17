@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Account — Volume Gallery</title>
+<script src="/js/theme-init.js?v=acct1"></script>
+<link rel="stylesheet" href="/css/style.css?v=acct1" />
+</head>
+<body>
+  <div class="app-shell" id="shell"></div>
+
+  <script type="module">
+    import { api, requireLogin, getRole, getUsername, setSession, renderShell, wireLogout } from "/js/api.js?v=acct1";
+
+    requireLogin();
+    const role = getRole();
+
+    document.getElementById("shell").innerHTML = `
+      ${renderShell("account", role, getUsername())}
+      <main>
+        <h1>Account</h1>
+        <p class="subtitle">Signed in as <strong>${getUsername()}</strong>.</p>
+        <h2>Change password</h2>
+        <div id="error" style="display:none" class="error-box"></div>
+        <div id="success" style="display:none;color:var(--ok);margin-bottom:1em"></div>
+        <form id="pw-form" style="max-width:360px">
+          <input type="text" autocomplete="username" value="${getUsername()}" hidden />
+          <div class="field">
+            <label for="current-password">Current password</label>
+            <input id="current-password" type="password" autocomplete="current-password" required />
+          </div>
+          <div class="field">
+            <label for="new-password">New password</label>
+            <input id="new-password" type="password" autocomplete="new-password" required />
+          </div>
+          <div class="field">
+            <label for="confirm-password">Repeat new password</label>
+            <input id="confirm-password" type="password" autocomplete="new-password" required />
+          </div>
+          <button type="submit" class="primary">Change password</button>
+        </form>
+      </main>
+    `;
+    wireLogout();
+
+    const form = document.getElementById("pw-form");
+    const errorBox = document.getElementById("error");
+    const successBox = document.getElementById("success");
+
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      errorBox.style.display = "none";
+      successBox.style.display = "none";
+      const current = document.getElementById("current-password").value;
+      const next = document.getElementById("new-password").value;
+      if (next !== document.getElementById("confirm-password").value) {
+        errorBox.textContent = "The new passwords do not match.";
+        errorBox.style.display = "block";
+        return;
+      }
+      try {
+        const data = await api.changePassword(current, next);
+        // The server revoked the old token; keep this browser signed in with the new one.
+        setSession(data.access_token, data.role, data.username);
+        form.reset();
+        successBox.textContent = "Password changed. Your other sessions have been signed out.";
+        successBox.style.display = "block";
+      } catch (err) {
+        errorBox.textContent = err.message;
+        errorBox.style.display = "block";
+      }
+    });
+  </script>
+</body>
+</html>

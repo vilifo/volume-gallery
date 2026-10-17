@@ -4,9 +4,17 @@ A small self-hosted gallery for CT volumes, viewed in-browser with
 [kiln-render](https://github.com/MPanknin/kiln-render) (WebGPU, OME-Zarr).
 Three roles:
 
-- **admin** — add/remove/disable users, change roles.
+- **admin** — add/remove/disable users, change roles, reset users' passwords.
 - **editor** — upload/delete volumes, grant or revoke reader access to them.
 - **reader** — view the volumes they've been given access to, download meshes.
+
+Every user can change their own password on the **Account** page; changing or resetting a
+password signs that user out everywhere else. New passwords must be at least
+`VG_MIN_PASSWORD_LENGTH` (default 8) characters; there is no 72-byte limit (up to 1024
+characters are accepted).
+
+Volumes, meshes and point clouds can have an optional thumbnail (PNG, JPEG or WebP, at most
+`VG_THUMBNAIL_MAX_MB`, default 5) — set it on upload, or later under **Manage**.
 
 Admins and editors can see and manage every volume; readers only see volumes
 an editor has explicitly granted them.

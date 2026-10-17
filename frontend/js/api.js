@@ -83,6 +83,9 @@ function _uploadWithProgress(path, formData, onProgress) {
   });
 }
 
+// URL segment of each asset kind's API (used by the kind-agnostic thumbnail calls)
+const ASSET_API = { volume: "volumes", mesh: "meshes", pointcloud: "pointclouds" };
+
 export const api = {
   async login(username, password) {
     const body = new URLSearchParams({ username, password });
@@ -96,6 +99,35 @@ export const api = {
   },
 
   me() { return request("/api/users/me"); },
+  // Changes the signed-in user's own password. Resolves with a fresh token (the old one
+  // is revoked by the server): pass it to setSession() to stay signed in.
+  changePassword(currentPassword, newPassword) {
+    return request("/api/users/me/password", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }),
+    });
+  },
+
+  // thumbnails — kind is "volume" | "mesh" | "pointcloud"
+  uploadThumbnail(kind, id, file) {
+    const fd = new FormData();
+    fd.append("thumbnail_file", file);
+    return request(`/api/${ASSET_API[kind]}/${id}/thumbnail`, { method: "POST", body: fd });
+  },
+  deleteThumbnail(kind, id) {
+    return request(`/api/${ASSET_API[kind]}/${id}/thumbnail`, { method: "DELETE" });
+  },
+  // <img> cannot send the Authorization header, so the image is fetched and handed out as a
+  // blob: URL. Resolves with null when the asset has no (readable) thumbnail.
+  async thumbnailUrl(kind, id) {
+    try {
+      const res = await request(`/api/${ASSET_API[kind]}/${id}/thumbnail`);
+      return URL.createObjectURL(await res.blob());
+    } catch (_) {
+      return null;
+    }
+  },
 
   // volumes
   listVolumes() { return request("/api/volumes"); },
@@ -246,6 +278,7 @@ export function renderShell(activePage, role, username) {
   if (role === "admin") {
     navItems.push({ href: "/admin.html", label: "Users", key: "admin" });
   }
+  navItems.push({ href: "/account.html", label: "Account", key: "account" });
   const nav = navItems
     .map(
       (item) =>

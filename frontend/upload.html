@@ -4,8 +4,8 @@
     <meta charset="UTF-8"/>
     <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
     <title>Upload asset — Volume Gallery</title>
-    <script src="/js/theme-init.js?v=theme2"></script>
-    <link rel="stylesheet" href="/css/style.css?v=theme2"/>
+    <script src="/js/theme-init.js?v=acct1"></script>
+    <link rel="stylesheet" href="/css/style.css?v=acct1"/>
     <style>
         .source-toggle {
             display: flex;
@@ -119,7 +119,7 @@
 <div class="app-shell" id="shell"></div>
 
 <script type="module">
-    import {api, requireLogin, getRole, getUsername, renderShell, wireLogout} from "/js/api.js?v=theme2";
+    import {api, requireLogin, getRole, getUsername, renderShell, wireLogout} from "/js/api.js?v=acct1";
 
     requireLogin();
     const role = getRole();
@@ -164,6 +164,11 @@
           <div class="field">
             <label for="description">Description</label>
             <input id="description" placeholder="Optional" />
+          </div>
+          <div class="field">
+            <label for="thumbnail_file">Thumbnail</label>
+            <input id="thumbnail_file" type="file" accept="image/png,image/jpeg,image/webp" />
+            <div class="field-hint">Optional. PNG, JPEG or WebP image shown in the gallery. It can be changed later under Manage.</div>
           </div>
 
           <div class="field" id="zarr-field">
@@ -325,6 +330,8 @@
         }
         const meshFile = document.getElementById("mesh_file").files[0];
         if (meshFile) fd.append("mesh_file", meshFile);
+        const thumbnailFile = document.getElementById("thumbnail_file").files[0];
+        if (thumbnailFile) fd.append("thumbnail_file", thumbnailFile);
 
         form.style.display = "none";
         progressBox.style.display = "block";

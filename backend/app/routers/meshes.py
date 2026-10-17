@@ -13,7 +13,7 @@ from ..deps import get_current_user, require_editor
 from ..security import create_file_token, decode_token
 from ..config import settings
 from .. import workdir
-from ..helpers import convert_mesh_to_nxz
+from ..helpers import convert_mesh_to_nxz, read_thumbnail, write_thumbnail, store_thumbnail, remove_thumbnail, thumbnail_response
 from ..utils import SLUG_RE, _now  # shared slug validation + timestamp helper
 
 router = APIRouter(prefix="/api/meshes", tags=["meshes"])
@@ -55,7 +55,7 @@ def _mesh_read(m: Mesh, can_download: bool = False) -> MeshRead:
     log_lines = [line for line in (m.status_log or "").split("\n") if line]
     return MeshRead(
         id=m.id, slug=m.slug, title=m.title, description=m.description, created_at=m.created_at.isoformat(),
-        status=m.status, status_log=log_lines, can_download=can_download,
+        status=m.status, status_log=log_lines, can_download=can_download, has_thumbnail=bool(m.thumbnail_path),
     )
 
 
@@ -171,6 +171,7 @@ def create_mesh(
     title: str = Form(...),
     description: str = Form(""),
     mesh_file: UploadFile = File(..., description="Any common mesh format: obj, stl, ply, off, dae, glb, gltf, 3mf, ..."),
+    thumbnail_file: Optional[UploadFile] = File(None, description="Optional PNG/JPEG/WebP thumbnail"),
     session: Session = Depends(get_session),
     editor: User = Depends(require_editor),
 ):
@@ -178,6 +179,7 @@ def create_mesh(
         raise HTTPException(status_code=400, detail="Slug must be lowercase alphanumeric/-/_ (2-63 chars)")
     if session.exec(select(Mesh).where(Mesh.slug == slug)).first():
         raise HTTPException(status_code=409, detail="A mesh with this slug already exists")
+    thumbnail = read_thumbnail(thumbnail_file) if thumbnail_file is not None else None  # validate before creating anything
 
     mesh_dir = _mesh_dir(slug)
     mesh_dir.mkdir(parents=True, exist_ok=False)
@@ -185,6 +187,7 @@ def create_mesh(
     source_ext = Path(mesh_file.filename or "").suffix.lstrip(".").lower() or "bin"
     try:
         workdir.prepare_work_dir("meshes", slug, mesh_dir)  # scratch for the conversion's temp files
+        thumbnail_name = write_thumbnail(mesh_dir, *thumbnail) if thumbnail else None
         upload_fd = workdir.detach_upload(mesh_file)  # copied into the data folder by the background task
     except Exception as exc:  # noqa: BLE001
         shutil.rmtree(mesh_dir, ignore_errors=True)
@@ -192,7 +195,7 @@ def create_mesh(
         raise HTTPException(status_code=400, detail=f"Could not save upload: {exc}")
 
     mesh = Mesh(
-        slug=slug, title=title, description=description, created_by=editor.id,
+        slug=slug, title=title, description=description, created_by=editor.id, thumbnail_path=thumbnail_name,
         status=AssetStatus.processing, file_extension=source_ext,
         status_log=f"{_now()}  Upload received, queued for processing\n",
     )
@@ -237,6 +240,48 @@ def _process_mesh_upload(mesh_id: int, mesh_dir_str: str, upload_fd: int) -> Non
             workdir.discard_job("meshes", mesh.slug)  # success or failure: scratch is never kept
         session.add(mesh)
         session.commit()
+
+
+@router.get("/{mesh_id}/thumbnail")
+def get_thumbnail(
+    mesh_id: int, request: Request, session: Session = Depends(get_session), user: User = Depends(get_current_user)
+):
+    mesh = session.get(Mesh, mesh_id)
+    if not mesh or not _can_see_mesh(user, mesh, session):
+        raise HTTPException(status_code=404, detail="Mesh not found")
+    return thumbnail_response(_mesh_dir(mesh.slug), mesh.thumbnail_path, request)
+
+
+@router.post("/{mesh_id}/thumbnail", response_model=MeshRead)
+def upload_or_replace_thumbnail(
+    mesh_id: int,
+    thumbnail_file: UploadFile = File(...),
+    session: Session = Depends(get_session),
+    _editor: User = Depends(require_editor),
+):
+    mesh = session.get(Mesh, mesh_id)
+    if not mesh:
+        raise HTTPException(status_code=404, detail="Mesh not found")
+    _require_standalone(mesh, "Set the thumbnail on the volume instead")
+    mesh.thumbnail_path = store_thumbnail(thumbnail_file, _mesh_dir(mesh.slug))
+    session.add(mesh)
+    session.commit()
+    session.refresh(mesh)
+    return _mesh_read(mesh, can_download=True)
+
+
+@router.delete("/{mesh_id}/thumbnail", response_model=MeshRead)
+def delete_thumbnail(mesh_id: int, session: Session = Depends(get_session), _editor: User = Depends(require_editor)):
+    mesh = session.get(Mesh, mesh_id)
+    if not mesh:
+        raise HTTPException(status_code=404, detail="Mesh not found")
+    _require_standalone(mesh, "Set the thumbnail on the volume instead")
+    remove_thumbnail(_mesh_dir(mesh.slug))
+    mesh.thumbnail_path = None
+    session.add(mesh)
+    session.commit()
+    session.refresh(mesh)
+    return _mesh_read(mesh, can_download=True)
 
 
 @router.delete("/{mesh_id}")
