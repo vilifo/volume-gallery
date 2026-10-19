@@ -1,7 +1,9 @@
 import json
+import posixpath
 import shutil
+import time
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, UploadFile, File, Form, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, Response
@@ -21,6 +23,86 @@ from ..utils import SLUG_RE, _now  # noqa: F401 - re-exported for the other asse
 from .meshes import attach_mesh_to_volume, delete_volume_mesh, get_volume_mesh, volume_mesh_source, volume_mesh_file
 
 router = APIRouter(prefix="/api/volumes", tags=["volumes"])
+
+# In-memory caches to keep serve_zarr_file async and avoid threadpool/DB/JWT
+# overhead on every 64^3 brick request.
+_TOKEN_CACHE: Dict[str, Tuple[float, dict]] = {}
+_VOLUME_LOC_CACHE: Dict[int, Tuple[float, str, str, Path]] = {}
+_CACHE_MAX_SIZE = 4096
+
+
+def _invalidate_volume_cache(volume_id: int) -> None:
+    _VOLUME_LOC_CACHE.pop(volume_id, None)
+
+
+def _validate_zarr_rel_path(path: str) -> str:
+    """Validates and normalizes a relative path inside a Zarr store.
+    Rejects empty paths, leading slashes, backslashes, null bytes, empty
+    segments ('//'), and '.' or '..' traversal segments before any filesystem
+    or X-Accel-Redirect path is constructed."""
+    if not path or "\\" in path or "\x00" in path or path.startswith("/"):
+        raise HTTPException(status_code=400, detail="Invalid path")
+    segments = path.split("/")
+    for seg in segments:
+        if not seg or seg in (".", ".."):
+            raise HTTPException(status_code=400, detail="Invalid path")
+    return "/".join(segments)
+
+
+def _check_file_token_cached(token: str, volume_id: int, kind: str) -> dict:
+    now = time.time()
+    cached = _TOKEN_CACHE.get(token)
+    if cached is not None:
+        exp_ts, payload = cached
+        if now < exp_ts:
+            if payload.get("vol") == volume_id and payload.get("kind") == kind:
+                return payload
+            raise HTTPException(status_code=403, detail="Invalid or expired link")
+        _TOKEN_CACHE.pop(token, None)
+
+    payload = _check_file_token(token, volume_id, kind)
+    token_exp = float(payload.get("exp", 0))
+    ttl = max(1.0, float(settings.ZARR_META_CACHE_TTL_SECONDS))
+    exp_ts = min(token_exp, now + ttl) if token_exp > now else now
+    if exp_ts > now:
+        if len(_TOKEN_CACHE) >= _CACHE_MAX_SIZE:
+            _TOKEN_CACHE.clear()
+        _TOKEN_CACHE[token] = (exp_ts, payload)
+    return payload
+
+
+def _get_volume_zarr_loc(volume_id: int) -> Tuple[str, str, Path]:
+    """Returns (slug, clean_zarr_rel_path, resolved_zarr_root) for volume_id,
+    using a short-TTL in-memory cache so chunk requests do not open a SQLite
+    session per chunk."""
+    now = time.time()
+    cached = _VOLUME_LOC_CACHE.get(volume_id)
+    if cached is not None:
+        exp_ts, slug, zarr_rel, zarr_root = cached
+        if now < exp_ts:
+            return slug, zarr_rel, zarr_root
+        _VOLUME_LOC_CACHE.pop(volume_id, None)
+
+    with Session(engine) as session:
+        volume = session.get(Volume, volume_id)
+        if not volume or not volume.zarr_path:
+            raise HTTPException(status_code=404, detail="Volume not found")
+        slug = volume.slug
+        raw_zarr_path = volume.zarr_path.replace("\\", "/").strip("/")
+
+    vol_dir = _volume_dir(slug).resolve()
+    zarr_root = (vol_dir / raw_zarr_path).resolve()
+    if not zarr_root.is_relative_to(vol_dir):
+        raise HTTPException(status_code=400, detail="Invalid volume zarr_path")
+    zarr_rel = posixpath.normpath(raw_zarr_path)
+    if zarr_rel in ("", ".") or zarr_rel.startswith(".."):
+        zarr_rel = ""
+
+    ttl = max(1.0, float(settings.ZARR_META_CACHE_TTL_SECONDS))
+    if len(_VOLUME_LOC_CACHE) >= _CACHE_MAX_SIZE:
+        _VOLUME_LOC_CACHE.clear()
+    _VOLUME_LOC_CACHE[volume_id] = (now + ttl, slug, zarr_rel, zarr_root)
+    return slug, zarr_rel, zarr_root
 
 
 def _volume_dir(slug: str) -> Path:
@@ -223,6 +305,7 @@ def _process_upload(volume_id: int, vol_dir_str: str, source_kind: str, upload_f
             workdir.discard_job("volumes", volume.slug)  # success or failure: scratch is never kept
         session.add(volume)
         session.commit()
+        _invalidate_volume_cache(volume_id)
 
 
 @router.post("/{volume_id}/mesh", response_model=VolumeRead)
@@ -290,6 +373,7 @@ def delete_volume(
     volume = session.get(Volume, volume_id)
     if not volume:
         raise HTTPException(status_code=404, detail="Volume not found")
+    _invalidate_volume_cache(volume_id)
     shutil.rmtree(_volume_dir(volume.slug), ignore_errors=True)
     workdir.discard_job("volumes", volume.slug)
     delete_volume_mesh(session, volume)
@@ -542,27 +626,17 @@ def _check_file_token(token: str, volume_id: int, kind: str) -> dict:
 
 
 @router.get("/{volume_id}/dataset.ome.zarr/{token}/{path:path}")
-def serve_zarr_file(
-    volume_id: int, token: str, path: str, session: Session = Depends(get_session)
-):
+async def serve_zarr_file(volume_id: int, token: str, path: str):
     """Serves individual chunk/metadata files inside the OME-Zarr store.
     kiln-render performs many small ranged GETs against this — keep it fast and stateless.
     """
-    payload = _check_file_token(token, volume_id, "zarr")
-    volume = session.get(Volume, volume_id)
-    if not volume:
-        raise HTTPException(status_code=404, detail="Volume not found")
-    zarr_root = (_volume_dir(volume.slug) / volume.zarr_path).resolve()
-    # Strip any leading slash first: pathlib treats "root / '/x'" as the
-    # absolute path "/x" (discarding root entirely) rather than joining them,
-    # which would otherwise defeat the containment check below.
-    target = (zarr_root / path.lstrip("/")).resolve()
-    if not str(target).startswith(str(zarr_root)):
-        raise HTTPException(status_code=400, detail="Invalid path")
-    if not target.exists() or not target.is_file():
-        raise HTTPException(status_code=404, detail="Not found")
+    clean_path = _validate_zarr_rel_path(path)
+    payload = _check_file_token_cached(token, volume_id, "zarr")
+    slug, zarr_rel, zarr_root = _get_volume_zarr_loc(volume_id)
 
     min_lod = payload.get("min_lod")
+    is_root_meta = "/" not in clean_path and clean_path in (".zattrs", "zarr.json")
+
     # Every file this endpoint can serve is immutable for the lifetime of
     # the signed token that grants access to it (a volume's data never
     # changes after processing finishes, and this URL's content is fully
@@ -573,13 +647,32 @@ def serve_zarr_file(
     # window since the URL 403s once it expires anyway.
     cache_headers = {"Cache-Control": f"public, max-age={settings.FILE_TOKEN_EXPIRE_MINUTES * 60}, immutable"}
 
+    if settings.ZARR_ACCEL_REDIRECT and not is_root_meta:
+        prefix = settings.ZARR_ACCEL_PREFIX.rstrip("/")
+        rel_parts = [p for p in (slug, zarr_rel, clean_path) if p]
+        accel_uri = f"{prefix}/{'/'.join(rel_parts)}"
+        headers = {
+            ** cache_headers,
+            "X-Accel-Redirect": accel_uri,
+            "Content-Type": "application/json" if clean_path.endswith("zarr.json") or clean_path.endswith(
+        ".zarray") or clean_path.endswith(".zattrs") else "application/octet-stream",
+        }
+        return Response(status_code=200, headers=headers)
+
+    target = (zarr_root / clean_path).resolve()
+
+    if not target.is_relative_to(zarr_root):
+        raise HTTPException(status_code=400, detail="Invalid path")
+    if not target.is_file():
+        raise HTTPException(status_code=404, detail="Not found")
+
     # Only the store's own root metadata file (no "/" in path — a per-level
     # array's metadata is at e.g. "5/zarr.json", which has one) ever lists
     # the multiscale pyramid; everything else (chunk data, per-level array
     # metadata) is served completely unmodified regardless of min_lod, since
     # capping only means "which levels are listed as available", not
     # anything about the bytes of the levels that remain.
-    if min_lod and "/" not in path and path in (".zattrs", "zarr.json"):
+    if min_lod and is_root_meta:
         rewritten = _truncate_multiscales_json(target.read_bytes(), min_lod)
         if rewritten is not None:
             media_type = "application/json"

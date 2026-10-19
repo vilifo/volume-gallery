@@ -22,6 +22,7 @@ services:
       VG_ACCESS_TOKEN_MINUTES: ${VG_ACCESS_TOKEN_MINUTES:-480}
       VG_FILE_TOKEN_MINUTES: ${VG_FILE_TOKEN_MINUTES:-30}
       VG_PROCESSING_DIR: ${VG_PROCESSING_DIR:-}
+      VG_ZARR_ACCEL_REDIRECT: ${VG_ZARR_ACCEL_REDIRECT:-true}
       PUID: 568
       PGID: 568
     volumes:
@@ -50,3 +51,4 @@ services:
     volumes:
       - /mnt/your/path/to/certs/here:/etc/nginx/certs:ro
       - /mnt/your/path/to/processing/here:/processing
+      - /mnt/your/path/to/data/here/volumes:/data/volumes:ro

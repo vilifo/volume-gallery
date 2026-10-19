@@ -21,6 +21,14 @@ class Settings:
     POINTCLOUDS_DIR: Path = DATA_DIR / "pointclouds"
     DB_PATH: Path = DATA_DIR / "gallery.db"
 
+    # Offload OME-Zarr chunk file delivery to nginx via X-Accel-Redirect.
+    # Off by default so bare `uvicorn` local development works out of the box.
+    ZARR_ACCEL_REDIRECT: bool = os.environ.get("VG_ZARR_ACCEL_REDIRECT", "").lower() in (
+        "1", "true", "yes", "on"
+    )
+    ZARR_ACCEL_PREFIX: str = os.environ.get("VG_ZARR_ACCEL_PREFIX", "/_internal_volumes")
+    ZARR_META_CACHE_TTL_SECONDS: int = int(os.environ.get("VG_ZARR_META_CACHE_TTL_SECONDS", "60"))
+
     # Largest accepted thumbnail upload (png / jpeg / webp)
     THUMBNAIL_MAX_MB: int = int(os.environ.get("VG_THUMBNAIL_MAX_MB", "5"))
 

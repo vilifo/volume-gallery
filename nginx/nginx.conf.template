@@ -69,6 +69,15 @@ http {
 		ssl_ciphers         HIGH:!aNULL:!MD5;
 		ssl_prefer_server_ciphers on;
 
+		# Internal location used by serve_zarr_file's X-Accel-Redirect response.
+		# Marked `internal;` so direct client requests to /_internal_volumes/... return 404.
+		location /_internal_volumes/ {
+			internal;
+			gzip off;
+			alias /data/volumes/;
+			 add_header Cache-Control $upstream_http_cache_control always;
+		}
+
 		location ~ ^/api/volumes/[0-9]+/dataset\.ome\.zarr/ {
 			gzip off;
 			proxy_buffering off;
