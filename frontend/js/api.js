@@ -21,6 +21,65 @@ export function clearSession() {
   localStorage.removeItem(USER_KEY);
 }
 
+// ---- branding (branding/branding.toml on the server; see the README) ----
+
+const DEFAULT_BRANDING = {
+  app_name: "Volume Gallery", tagline: "", about: "", organization: "", copyright: "",
+  logo_url: null, logo_dark_url: null, contact: {}, links: [],
+};
+let brandingPromise = null;
+
+// Resolves with the branding (never rejects: falls back to the defaults). Cached per page.
+export function getBranding() {
+  if (!brandingPromise) {
+    brandingPromise = fetch("/api/branding", { cache: "no-cache" })
+      .then((res) => (res.ok ? res.json() : {}))
+      .catch(() => ({}))
+      .then((b) => ({ ...DEFAULT_BRANDING, ...b, contact: b.contact || {}, links: b.links || [] }));
+  }
+  return brandingPromise;
+}
+
+// Escapes text for use in HTML, including inside attribute values.
+export function escapeHtml(s) {
+  return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+// <img> tags for the logo: one, or a light and a dark one (shown according to the theme).
+export function brandLogoHtml(b, cls = "brand-logo") {
+  if (!b.logo_url) return "";
+  if (!b.logo_dark_url) return `<img class="${cls}" src="${escapeHtml(b.logo_url)}" alt="" />`;
+  return `<img class="${cls} logo-light" src="${escapeHtml(b.logo_url)}" alt="" />` +
+         `<img class="${cls} logo-dark" src="${escapeHtml(b.logo_dark_url)}" alt="" />`;
+}
+
+// Contact details as links/spans, one per item (the caller decides how to lay them out).
+export function contactItems(b) {
+  const c = b.contact || {};
+  const items = [];
+  if (c.email) items.push(`<a href="mailto:${escapeHtml(c.email)}">${escapeHtml(c.email)}</a>`);
+  if (c.phone) items.push(`<a href="tel:${escapeHtml(c.phone.replace(/[^+\d]/g, ""))}">${escapeHtml(c.phone)}</a>`);
+  if (c.website) {
+    items.push(`<a href="${escapeHtml(c.website)}" target="_blank" rel="noopener noreferrer">${escapeHtml(c.website.replace(/^https?:\/\//, ""))}</a>`);
+  }
+  if (c.address) items.push(`<span>${escapeHtml(c.address)}</span>`);
+  return items;
+}
+
+export function linkItems(b) {
+  return (b.links || []).map((l) =>
+    `<a href="${escapeHtml(l.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(l.label)}</a>`);
+}
+
+// Puts the configured name and logo into the side rail and the page title.
+export async function applyBranding() {
+  const b = await getBranding();
+  const brand = document.querySelector(".rail .brand");
+  if (brand) brand.innerHTML = `<div class="brand-logos">${brandLogoHtml(b)}</div><span>${escapeHtml(b.app_name)}</span>`;
+  document.title = document.title.replace(/ \u2014 Volume Gallery$/, ` \u2014 ${b.app_name}`);
+  return b;
+}
+
 // Login page URL that remembers the page the user was trying to reach (shared links!).
 export function loginUrl() {
   const { pathname, search, hash } = window.location;
@@ -311,8 +370,16 @@ export function renderShell(activePage, role, username) {
     .join("");
   return `
     <div class="rail">
-      <div class="brand">Volume Gallery</div>
-      <div class="role-tag">${role}</div>
+      <div class="rail-top">
+        <div class="rail-id">
+          <div class="brand">Volume Gallery</div>
+          <div class="role-tag">${role}</div>
+        </div>
+        <button type="button" class="rail-toggle" aria-label="Menu" aria-expanded="false" aria-controls="rail-menu">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+        </button>
+      </div>
+      <div class="rail-menu" id="rail-menu">
       <nav>${nav}</nav>
       <div class="spacer"></div>
       <div class="theme-switch" role="radiogroup" aria-label="Theme" data-pos="1">
@@ -328,12 +395,22 @@ export function renderShell(activePage, role, username) {
       </div>
       <div class="signed-in-as">Signed in as <strong>${username}</strong></div>
       <button id="logout-btn">Sign out</button>
+      </div>
     </div>
   `;
 }
 
 export function wireLogout() {
   wireTheme(); // every page that renders the shell already calls this
+  applyBranding();
+  // On phones the side rail is a top bar whose menu opens with this button.
+  const rail = document.querySelector(".rail");
+  const toggle = document.querySelector(".rail-toggle");
+  if (rail && toggle) {
+    toggle.addEventListener("click", () => {
+      toggle.setAttribute("aria-expanded", String(rail.classList.toggle("open")));
+    });
+  }
   const btn = document.getElementById("logout-btn");
   if (btn) {
     btn.addEventListener("click", () => {

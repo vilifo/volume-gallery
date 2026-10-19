@@ -63,6 +63,15 @@ processing/ (optional, created at runtime) scratch space for uploads being proce
   indirection toggles, and a live stats readout (fps, dataset dimensions,
   brick/atlas counts, bytes streamed).
 
+## Branding
+
+The name, logo, tagline, copyright and contact details shown on the login page (and the
+name/logo in the side rail and the Help dialog) come from `branding/branding.toml`. It
+is commented, read on every request (no restart needed), and Docker mounts the folder as
+`/branding` (`VG_HOST_BRANDING_DIR`, default `./branding`). Replace `branding/logo.svg` with
+your own logo; set `logo_dark` if it needs a different version on the dark theme. Without
+Docker, point `VG_BRANDING_DIR` at the folder. Needs Python 3.11+ (TOML parser).
+
 ## Preparing volumes to upload
 
 The uploader expects a **.zip** file containing your OME-Zarr store (v0.5,

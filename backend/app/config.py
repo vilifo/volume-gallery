@@ -24,6 +24,10 @@ class Settings:
     # Largest accepted thumbnail upload (png / jpeg / webp)
     THUMBNAIL_MAX_MB: int = int(os.environ.get("VG_THUMBNAIL_MAX_MB", "5"))
 
+    # Folder with branding.toml and the logo files (see branding/branding.toml). The default is
+    # <repo>/branding, which is /branding inside the Docker image.
+    BRANDING_DIR: Path = Path(os.environ.get("VG_BRANDING_DIR") or Path(__file__).resolve().parents[2] / "branding")
+
     PROCESSING_DIR: Path = Path(os.environ.get("VG_PROCESSING_DIR") or "/processing")  # "" (unset in compose) -> default
 
     # --- Slice views (server-extracted planes, see helpers/slices.py) ---

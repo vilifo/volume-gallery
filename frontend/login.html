@@ -4,13 +4,18 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Sign in — Volume Gallery</title>
-<script src="/js/theme-init.js?v=next1"></script>
-<link rel="stylesheet" href="/css/style.css?v=next1" />
+<script src="/js/theme-init.js?v=mobile1"></script>
+<link rel="stylesheet" href="/css/style.css?v=mobile1" />
 </head>
 <body>
   <div class="login-shell">
+   <div class="login-col">
     <div class="login-box">
-      <h1>Volume Gallery</h1>
+      <div class="login-brand">
+        <div class="brand-logos" id="brand-logos"></div>
+        <h1 id="app-name">Volume Gallery</h1>
+        <p class="tagline" id="tagline"></p>
+      </div>
       <p class="subtitle">Sign in to view or manage assets.</p>
       <div id="error" style="display:none" class="error-box"></div>
       <form id="login-form">
@@ -25,12 +30,29 @@
         <button type="submit" class="primary" style="width:100%">Sign in</button>
       </form>
     </div>
+    <footer class="login-footer" id="login-footer"></footer>
+   </div>
   </div>
 
   <script type="module">
-    import { api, setSession, getToken, postLoginUrl } from "/js/api.js?v=next1";
+    import { api, setSession, getToken, postLoginUrl, getBranding, brandLogoHtml, contactItems, linkItems, escapeHtml } from "/js/api.js?v=mobile1";
 
     if (getToken()) window.location.href = postLoginUrl();
+
+    // Name, logo, copyright and contact details come from the server's branding.toml.
+    getBranding().then((b) => {
+      document.title = `Sign in \u2014 ${b.app_name}`;
+      document.getElementById("app-name").textContent = b.app_name;
+      document.getElementById("tagline").textContent = b.tagline;
+      document.getElementById("brand-logos").innerHTML = brandLogoHtml(b, "login-logo");
+      const rows = [];
+      if (b.copyright) rows.push(`<div>${escapeHtml(b.copyright)}</div>`);
+      const contact = contactItems(b);
+      if (contact.length) rows.push(`<div class="login-contact">${contact.join("")}</div>`);
+      const links = linkItems(b);
+      if (links.length) rows.push(`<div class="login-contact">${links.join("")}</div>`);
+      document.getElementById("login-footer").innerHTML = rows.join("");
+    });
 
     const form = document.getElementById("login-form");
     const errorBox = document.getElementById("error");

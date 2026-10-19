@@ -124,6 +124,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY backend/app ./app
 COPY frontend /frontend
+# Default branding (branding.toml + logo); docker-compose mounts ./branding over it.
+COPY branding /branding
 
 # Patched kiln-render from the `kiln` stage. Copied after `COPY frontend` so it
 # always wins over any frontend/vendor/kiln-render copy in the build context.

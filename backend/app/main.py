@@ -10,7 +10,7 @@ from .security import hash_password
 from .config import settings
 from . import workdir
 from .utils import _now
-from .routers import auth, users, volumes, meshes, pointclouds
+from .routers import auth, users, volumes, meshes, pointclouds, branding
 
 
 def _bootstrap_admin():
@@ -72,6 +72,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Volume Gallery", lifespan=lifespan)
 
+app.include_router(branding.router)
 app.include_router(auth.router)
 app.include_router(users.router)
 app.include_router(volumes.router)

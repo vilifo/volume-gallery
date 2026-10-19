@@ -1,0 +1,44 @@
+# Branding and marketing settings for the gallery.
+#
+# Edit this file, then reload the page: it is read on every request, so no restart is
+# needed. Everything is optional; a missing or empty value is simply left out of the
+# pages. The file must stay valid TOML: if it cannot be read the built-in defaults are
+# shown instead and a warning is written to the server log.
+#
+# Docker: this folder is mounted into the container as /branding (see docker-compose.yml,
+# VG_HOST_BRANDING_DIR). Without Docker, set VG_BRANDING_DIR to its location.
+
+# Name shown on the login page, in the side rail and in the browser tab.
+app_name = "Volume Gallery"
+
+# One line shown under the name on the login page.
+tagline = "Explore CT volumes, meshes and point clouds in your browser."
+
+# A few sentences shown at the top of the Help dialog. Separate paragraphs with a blank line.
+about = ""
+
+# Who the gallery belongs to. Used in the copyright line below.
+organization = "Your Organization"
+
+# Shown at the bottom of the login page. {year} becomes the current year and
+# {organization} the organization above. Leave empty to build "(c) <year> <organization>".
+copyright = "\u00a9 {year} {organization}. All rights reserved."
+
+# Logo files, relative to this folder: .svg, .png, .jpg, .webp or .gif.
+# logo_dark is optional and used instead of logo when the dark theme is active.
+logo = "logo.svg"
+logo_dark = ""
+
+# Contact details shown on the login page and at the end of the Help dialog.
+[contact]
+email = ""
+phone = ""
+website = ""      # must start with http:// or https://
+address = ""
+
+# Extra links shown under the login form (privacy policy, terms of use, ...).
+# Only http://, https:// and mailto: links are accepted. Copy the block for more links.
+#
+# [[links]]
+# label = "Privacy policy"
+# url = "https://example.com/privacy"

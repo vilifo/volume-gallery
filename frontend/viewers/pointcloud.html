@@ -4,8 +4,8 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Point Cloud Viewer — Volume Gallery</title>
-<script src="/js/theme-init.js?v=next1"></script>
-<link rel="stylesheet" href="/css/style.css?v=next1" />
+<script src="/js/theme-init.js?v=mobile1"></script>
+<link rel="stylesheet" href="/css/style.css?v=mobile1" />
 <link rel="stylesheet" href="/vendor/potree/potree.css" />
 <link rel="stylesheet" href="/vendor/libs/jquery-ui/jquery-ui.min.css" />
 <link rel="stylesheet" href="/vendor/libs/openlayers3/ol.css" />
@@ -60,7 +60,7 @@
   <script src="/vendor/potree/potree.js"></script>
 
   <script type="module">
-    import { api, requireLogin, getRole, getUsername, renderShell, wireLogout } from "/js/api.js?v=next1";
+    import { api, requireLogin, getRole, getUsername, renderShell, wireLogout } from "/js/api.js?v=mobile1";
 
     requireLogin();
     const role = getRole();
@@ -155,7 +155,9 @@
           viewer.setLanguage("en");
           $("#menu_appearance").next().show();
           $("#menu_tools").next().show();
-          viewer.toggleSidebar();
+          // The sidebar would cover most of a phone screen: leave it closed there (Potree's
+          // menu button in the render area opens it).
+          if (window.innerWidth > 800) viewer.toggleSidebar();
         });
 
         Potree.loadPointCloud(`${access.url}metadata.json`, "cloud", (e) => {
