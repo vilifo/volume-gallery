@@ -20,6 +20,7 @@ from collections import deque
 from typing import Optional
 import multiprocessing
 import subprocess
+import json
 
 TIFF_EXTENSIONS = (".tif", ".tiff")
 ZARR_DIRNAME = "data.ome.zarr"  # the converted/extracted store, as kept in the volume's data folder
@@ -378,3 +379,16 @@ def truncate_multiscales_json(raw: bytes, min_lod: int) -> Optional[bytes]:
     if not changed:
         return None
     return json.dumps(data).encode("utf-8")
+
+
+def compute_histogram(zarr_dir: Path, hist_path: Path):
+    darr = da.from_zarr(zarr_dir)
+
+    vmin, vmax = da.compute(da.nanmin(darr), da.nanmax(darr))
+
+    counts_lazy, bin_edges = da.histogram(darr, bins=1024, range=[vmin, vmax])
+    counts = counts_lazy.compute()
+
+    # Only export the 1D counts array
+    with open(hist_path, "w") as f:
+        json.dump(counts.tolist(), f)

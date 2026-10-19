@@ -15,10 +15,26 @@ export function setSession(token, role, username) {
   localStorage.setItem(USER_KEY, username);
 }
 
+export function clearZarrChunkCache() {
+  try {
+    if ("serviceWorker" in navigator && navigator.serviceWorker.controller) {
+      navigator.serviceWorker.controller.postMessage({ type: "CLEAR_ZARR_CACHE" });
+    }
+    if ("caches" in window) {
+      caches.keys().then((names) => {
+        for (const name of names) {
+          if (name.startsWith("vg-zarr-chunks-")) caches.delete(name);
+        }
+      }).catch(() => {});
+    }
+  } catch (_) {}
+}
+
 export function clearSession() {
   localStorage.removeItem(TOKEN_KEY);
   localStorage.removeItem(ROLE_KEY);
   localStorage.removeItem(USER_KEY);
+  clearZarrChunkCache();
 }
 
 // ---- branding (branding/branding.toml on the server; see the README) ----

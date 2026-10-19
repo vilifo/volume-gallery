@@ -85,3 +85,5 @@ class GrantedUserRead(BaseModel):
 class FileAccessUrl(BaseModel):
     url: str
     expires_in_minutes: int
+    version: Optional[str] = None
+

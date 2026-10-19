@@ -393,6 +393,14 @@ Beyond WebGPU, HTTPS also matters here because JWTs and the signed file
 tokens are passed as plain bearer tokens / URL query params, and you don't
 want those on the wire unencrypted outside your LAN.
 
+**Fast chunk delivery (`VG_ZARR_ACCEL_REDIRECT`).** In `docker-compose.yml` and
+`truenas_app.yml`, the host's volumes directory (`<data>/volumes`) is mounted
+read-only into the `nginx` container at `/data/volumes:ro` and `VG_ZARR_ACCEL_REDIRECT=true`
+is set on the backend. Python validates the signed token and returns an internal
+`X-Accel-Redirect` header so nginx serves chunk files directly using `sendfile`.
+When running `uvicorn` directly without nginx (local development), leave
+`VG_ZARR_ACCEL_REDIRECT` unset (`false`) so FastAPI serves chunks directly.
+
 ### Backups
 
 Everything that matters lives under the dataset from step 1: `gallery.db`
