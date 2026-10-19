@@ -1,3 +1,4 @@
+import hashlib
 import json
 import posixpath
 import shutil
@@ -478,9 +479,12 @@ def zarr_access_url(
     # it requires a fully-qualified absolute URL, not a path, so we build one
     # from the incoming request rather than returning a relative path.
     base = str(request.base_url).rstrip("/")
+    ver_input = f"{volume.id}:{volume.created_at.isoformat()}:{volume.zarr_path}"
+    version = hashlib.sha256(ver_input.encode("utf-8")).hexdigest()[:16]
     return FileAccessUrl(
         url=f"{base}/api/volumes/{volume_id}/dataset.ome.zarr/{token}/",
         expires_in_minutes=settings.FILE_TOKEN_EXPIRE_MINUTES,
+        version=version,
     )
 
 

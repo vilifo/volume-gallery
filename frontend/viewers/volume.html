@@ -498,6 +498,28 @@
       return { ok: true };
     }
 
+    async function registerZarrServiceWorker(volId, version) {
+      if (!("serviceWorker" in navigator) || !("caches" in window)) return;
+      try {
+        const reg = await navigator.serviceWorker.register("/sw.js", { scope: "/" });
+        await navigator.serviceWorker.ready;
+        const target = navigator.serviceWorker.controller || reg.active;
+        if (target && version) {
+          await new Promise((resolve) => {
+            const ch = new MessageChannel();
+            const timer = setTimeout(resolve, 300);
+            ch.port1.onmessage = () => { clearTimeout(timer); resolve(); };
+            target.postMessage(
+              { type: "SET_VOLUME_VERSION", volumeId: String(volId), version: String(version) },
+              [ch.port2]
+            );
+          });
+        }
+      } catch (err) {
+        console.warn("[sw] Service worker registration skipped:", err);
+      }
+    }
+
     // ------------------------------------------------------------------
     // View state <-> URL. Parameter names and formats follow the upstream
     // kiln-render basic-viewer share link (mode, wc, ww, density, iso, tf,
@@ -797,6 +819,9 @@
 
         try {
           const access = await api.zarrAccessUrl(volumeId, minLevel);
+          if (token !== loadToken) return;
+
+          await registerZarrServiceWorker(volumeId, access.version);
           if (token !== loadToken) return;
 
           // The atlas gets the VRAM the user selected, but no more than this
