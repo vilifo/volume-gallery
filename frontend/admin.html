@@ -4,14 +4,14 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Users — Volume Gallery</title>
-<script src="/js/theme-init.js?v=theme2"></script>
-<link rel="stylesheet" href="/css/style.css?v=theme2" />
+<script src="/js/theme-init.js?v=mobile1"></script>
+<link rel="stylesheet" href="/css/style.css?v=mobile1" />
 </head>
 <body>
   <div class="app-shell" id="shell"></div>
 
   <script type="module">
-    import { api, requireLogin, getRole, getUsername, renderShell, wireLogout } from "/js/api.js?v=theme2";
+    import { api, requireLogin, getRole, getUsername, renderShell, wireLogout } from "/js/api.js?v=mobile1";
 
     requireLogin();
     const role = getRole();
@@ -25,7 +25,7 @@
           <button class="primary" id="new-user-btn">Add user</button>
         </div>
         <div id="error" style="display:none" class="error-box"></div>
-        <table>
+        <table class="responsive">
           <thead><tr><th>Username</th><th>Role</th><th>Status</th><th></th></tr></thead>
           <tbody id="users-body"></tbody>
         </table>
@@ -52,7 +52,7 @@
           <td>${escapeHtml(u.username)}</td>
           <td><span class="pill ${u.role}">${u.role}</span></td>
           <td>${u.disabled ? '<span class="dim">disabled</span>' : '<span style="color:var(--ok)">active</span>'}</td>
-          <td style="display:flex;gap:0.4em">
+          <td class="row-actions">
             ${
               u.username === me
                 ? '<span class="dim" style="font-size:0.85em">(you)</span>'
@@ -63,6 +63,7 @@
                   .join("")}
               </select>
               <button data-toggle="${u.id}" data-disabled="${u.disabled}">${u.disabled ? "Enable" : "Disable"}</button>
+              <button data-reset="${u.id}">Reset password</button>
               <button class="danger" data-delete="${u.id}">Delete</button>
               `
             }
@@ -82,6 +83,12 @@
           const disabled = btn.dataset.disabled === "true";
           await api.updateUser(btn.dataset.toggle, { disabled: !disabled });
           load();
+        });
+      });
+      document.querySelectorAll("[data-reset]").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          const target = users.find((u) => String(u.id) === btn.dataset.reset);
+          openResetModal(btn.dataset.reset, target ? target.username : "this user");
         });
       });
       document.querySelectorAll("[data-delete]").forEach((btn) => {
@@ -140,6 +147,49 @@
         }
       });
     });
+
+    // Admin password reset: the user's existing sessions are signed out by the server.
+    function openResetModal(userId, username) {
+      document.getElementById("modal-root").innerHTML = `
+        <div class="modal-backdrop" id="backdrop">
+          <div class="modal">
+            <h2>Reset password</h2>
+            <p class="dim">Set a new password for <strong>${escapeHtml(username)}</strong>. They will be signed out everywhere.</p>
+            <div id="modal-error" style="display:none" class="error-box"></div>
+            <div class="field">
+              <label for="rp-password">New password</label>
+              <input id="rp-password" type="password" autocomplete="new-password" required />
+            </div>
+            <div class="field">
+              <label for="rp-confirm">Repeat new password</label>
+              <input id="rp-confirm" type="password" autocomplete="new-password" required />
+            </div>
+            <div class="modal-actions">
+              <button id="rp-cancel">Cancel</button>
+              <button class="primary" id="rp-save">Reset password</button>
+            </div>
+          </div>
+        </div>
+      `;
+      const close = () => { document.getElementById("modal-root").innerHTML = ""; };
+      document.getElementById("rp-cancel").addEventListener("click", close);
+      document.getElementById("rp-save").addEventListener("click", async () => {
+        const box = document.getElementById("modal-error");
+        const password = document.getElementById("rp-password").value;
+        if (password !== document.getElementById("rp-confirm").value) {
+          box.textContent = "The passwords do not match.";
+          box.style.display = "block";
+          return;
+        }
+        try {
+          await api.updateUser(userId, { password });
+          close();
+        } catch (err) {
+          box.textContent = err.message;
+          box.style.display = "block";
+        }
+      });
+    }
 
     function escapeHtml(s) {
       const d = document.createElement("div");

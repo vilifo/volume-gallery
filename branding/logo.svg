@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Logo">
+  <!-- Placeholder logo: replace this file (and set `logo` in branding.toml if the name changes). -->
+  <g fill="none" stroke="#e8a33d" stroke-width="3" stroke-linejoin="round" stroke-linecap="round">
+    <path d="M32 6 56 19v26L32 58 8 45V19z"/>
+    <path d="M8 19 32 32 56 19M32 32v26"/>
+  </g>
+  <circle cx="32" cy="32" r="3.5" fill="#e8a33d"/>
+</svg>

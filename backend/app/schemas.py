@@ -23,6 +23,11 @@ class UserRead(BaseModel):
     disabled: bool
 
 
+class PasswordChange(BaseModel):
+    current_password: str
+    new_password: str
+
+
 class UserUpdate(BaseModel):
     role: Optional[Role] = None
     disabled: Optional[bool] = None
@@ -38,6 +43,8 @@ class AssetRead(BaseModel):
     status: AssetStatus
     status_log: List[str] = []
     can_download: bool = False
+    # True when a thumbnail image is stored: fetch it from <asset api>/{id}/thumbnail
+    has_thumbnail: bool = False
 
 
 class VolumeRead(AssetRead):

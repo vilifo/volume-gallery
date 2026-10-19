@@ -4,8 +4,8 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Manage — Volume Gallery</title>
-<script src="/js/theme-init.js?v=theme2"></script>
-<link rel="stylesheet" href="/css/style.css?v=theme2" />
+<script src="/js/theme-init.js?v=mobile1"></script>
+<link rel="stylesheet" href="/css/style.css?v=mobile1" />
 <style>
   .cd-toggle { display: inline-flex; align-items: center; gap: 0.4em; font-size: 0.85em; color: var(--text-dim); }
 </style>
@@ -14,7 +14,7 @@
   <div class="app-shell" id="shell"></div>
 
   <script type="module">
-    import { api, requireLogin, getRole, getUsername, renderShell, wireLogout } from "/js/api.js?v=theme2";
+    import { api, requireLogin, getRole, getUsername, renderShell, wireLogout } from "/js/api.js?v=mobile1";
 
     requireLogin();
     const role = getRole();
@@ -126,9 +126,45 @@
             : `<p class="dim" style="margin-top:1em">${allUsers.length ? "All readers already have access." : "Sign in as admin to see the full user list here."}</p>`
         }
 
-        <h2 style="margin-top:2em">Danger zone</h2>
+        <h2 style="margin-top:2em" id="danger-heading">Danger zone</h2>
         <button class="danger" id="delete-btn">Delete this ${KIND.label.toLowerCase()}</button>
       `;
+
+      const thumbSectionHtml = `
+        <h2 style="margin-top:2em">Thumbnail</h2>
+        <div class="thumb-preview" id="thumb-preview">${item.has_thumbnail ? "" : '<span class="dim">No thumbnail</span>'}</div>
+        <input type="file" id="thumb-file" accept="image/png,image/jpeg,image/webp" style="max-width:320px" />
+        <div style="display:flex;gap:0.5em;margin-top:0.6em">
+          <button id="thumb-upload-btn">Upload / replace thumbnail</button>
+          ${item.has_thumbnail ? '<button class="danger" id="thumb-delete-btn">Remove thumbnail</button>' : ""}
+        </div>
+        <p class="dim" style="font-size:0.85em">PNG, JPEG or WebP.</p>
+      `;
+      document.getElementById("danger-heading").insertAdjacentHTML("beforebegin", thumbSectionHtml);
+
+      if (item.has_thumbnail) {
+        api.thumbnailUrl(kind, itemId).then((url) => {
+          if (url) document.getElementById("thumb-preview").innerHTML = `<img src="${url}" alt="" />`;
+        });
+      }
+      document.getElementById("thumb-upload-btn").addEventListener("click", async () => {
+        const file = document.getElementById("thumb-file").files[0];
+        if (!file) return;
+        try {
+          await api.uploadThumbnail(kind, itemId, file);
+        } catch (err) {
+          alert(err.message);
+          return;
+        }
+        load();
+      });
+      const thumbDeleteBtn = document.getElementById("thumb-delete-btn");
+      if (thumbDeleteBtn) {
+        thumbDeleteBtn.addEventListener("click", async () => {
+          await api.deleteThumbnail(kind, itemId);
+          load();
+        });
+      }
 
       if (kind === "volume") {
         const meshSectionHtml = `
@@ -149,7 +185,7 @@
           <input type="file" id="mesh-file" style="max-width:320px" />
           <button id="mesh-upload-btn" style="margin-top:0.6em">Upload / replace mesh</button>
         `;
-        document.getElementById("delete-btn").insertAdjacentHTML("beforebegin", meshSectionHtml);
+        document.getElementById("danger-heading").insertAdjacentHTML("beforebegin", meshSectionHtml);
 
         document.getElementById("mesh-upload-btn").addEventListener("click", async () => {
           const file = document.getElementById("mesh-file").files[0];

@@ -4,7 +4,7 @@ from fastapi.security import OAuth2PasswordBearer
 from sqlmodel import Session, select
 
 from .database import get_session
-from .security import decode_token
+from .security import decode_token, password_fingerprint
 from .models import User, Role
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login", auto_error=False)
@@ -27,6 +27,12 @@ def get_current_user(
     username = payload.get("sub")
     user = session.exec(select(User).where(User.username == username)).first()
     if not user or user.disabled:
+        raise credentials_exc
+    # Tokens carry a fingerprint of the password they were issued for: after a password
+    # change/reset the old ones stop working. (Tokens issued before this claim existed
+    # have none and stay valid until they expire.)
+    pwv = payload.get("pwv")
+    if pwv is not None and pwv != password_fingerprint(user.password_hash):
         raise credentials_exc
     return user
 

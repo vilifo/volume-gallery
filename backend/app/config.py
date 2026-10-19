@@ -11,6 +11,8 @@ class Settings:
     ACCESS_TOKEN_EXPIRE_MINUTES: int = int(os.environ.get("VG_ACCESS_TOKEN_MINUTES", "480"))
     # Short-lived token used to authorize a single volume-data / mesh download
     FILE_TOKEN_EXPIRE_MINUTES: int = int(os.environ.get("VG_FILE_TOKEN_MINUTES", "30"))
+    # Shortest password accepted when a password is set or changed
+    MIN_PASSWORD_LENGTH: int = int(os.environ.get("VG_MIN_PASSWORD_LENGTH", "8"))
 
     # --- Storage ---
     DATA_DIR: Path = Path(os.environ.get("VG_DATA_DIR", "/data"))
@@ -18,6 +20,13 @@ class Settings:
     MESHES_DIR: Path = DATA_DIR / "meshes"
     POINTCLOUDS_DIR: Path = DATA_DIR / "pointclouds"
     DB_PATH: Path = DATA_DIR / "gallery.db"
+
+    # Largest accepted thumbnail upload (png / jpeg / webp)
+    THUMBNAIL_MAX_MB: int = int(os.environ.get("VG_THUMBNAIL_MAX_MB", "5"))
+
+    # Folder with branding.toml and the logo files (see branding/branding.toml). The default is
+    # <repo>/branding, which is /branding inside the Docker image.
+    BRANDING_DIR: Path = Path(os.environ.get("VG_BRANDING_DIR") or Path(__file__).resolve().parents[2] / "branding")
 
     PROCESSING_DIR: Path = Path(os.environ.get("VG_PROCESSING_DIR") or "/processing")  # "" (unset in compose) -> default
 

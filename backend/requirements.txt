@@ -1,19 +1,19 @@
 fastapi==0.142.2
 uvicorn[standard]==0.54.0
-sqlmodel==0.0.47
+sqlmodel==0.0.48
 python-jose[cryptography]==3.5.0
-passlib==1.7.4
-bcrypt==4.0.1
+argon2-cffi==25.1.0
+bcrypt==5.0.0
 python-multipart==0.0.32
 
 # --- TIFF-stack -> OME-Zarr conversion (backend/app/helpers/volume.py) ---
 tifffile==2026.9.20
-numpy==2.5.3
+numpy==2.5.4
 dask==2026.8.0
 # ome-zarr-py writes/reads via the zarr-python v2 API; pin below v3 until it
 # adds v3 support, or `write_image()` will fail on import/attribute errors.
-ome-zarr==0.19.2
-zarr==3.4.0
+ome-zarr==0.21.0
+zarr==3.4.1
 # --- Slice views: zstd-compressed planes (backend/app/helpers/slices.py) ---
 zstandard==0.25.0
 # --- Mesh and point cloud processing (backend/app/helpers/mesh.py) ---

@@ -4,9 +4,17 @@ A small self-hosted gallery for CT volumes, viewed in-browser with
 [kiln-render](https://github.com/MPanknin/kiln-render) (WebGPU, OME-Zarr).
 Three roles:
 
-- **admin** — add/remove/disable users, change roles.
+- **admin** — add/remove/disable users, change roles, reset users' passwords.
 - **editor** — upload/delete volumes, grant or revoke reader access to them.
 - **reader** — view the volumes they've been given access to, download meshes.
+
+Every user can change their own password on the **Account** page; changing or resetting a
+password signs that user out everywhere else. New passwords must be at least
+`VG_MIN_PASSWORD_LENGTH` (default 8) characters; there is no 72-byte limit (up to 1024
+characters are accepted).
+
+Volumes, meshes and point clouds can have an optional thumbnail (PNG, JPEG or WebP, at most
+`VG_THUMBNAIL_MAX_MB`, default 5) — set it on upload, or later under **Manage**.
 
 Admins and editors can see and manage every volume; readers only see volumes
 an editor has explicitly granted them.
@@ -54,6 +62,15 @@ processing/ (optional, created at runtime) scratch space for uploads being proce
   controls, per-axis clip range sliders in voxel coordinates, LOD/jitter/TAA/
   indirection toggles, and a live stats readout (fps, dataset dimensions,
   brick/atlas counts, bytes streamed).
+
+## Branding
+
+The name, logo, tagline, copyright and contact details shown on the login page (and the
+name/logo in the side rail and the Help dialog) come from `branding/branding.toml`. It
+is commented, read on every request (no restart needed), and Docker mounts the folder as
+`/branding` (`VG_HOST_BRANDING_DIR`, default `./branding`). Replace `branding/logo.svg` with
+your own logo; set `logo_dark` if it needs a different version on the dark theme. Without
+Docker, point `VG_BRANDING_DIR` at the folder. Needs Python 3.11+ (TOML parser).
 
 ## Preparing volumes to upload
 

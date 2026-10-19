@@ -1,7 +1,7 @@
 import shutil
 import zipfile
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, UploadFile, File, Form, Request
 from fastapi.responses import FileResponse
@@ -14,7 +14,7 @@ from ..deps import get_current_user, require_editor
 from ..security import create_file_token, decode_token
 from ..config import settings
 from .. import workdir
-from ..helpers import convert_pointcloud
+from ..helpers import convert_pointcloud, read_thumbnail, write_thumbnail, store_thumbnail, remove_thumbnail, thumbnail_response
 from .volumes import SLUG_RE, _now
 
 router = APIRouter(prefix="/api/pointclouds", tags=["pointclouds"])
@@ -45,7 +45,7 @@ def _pointcloud_read(pc: PointCloud) -> PointCloudRead:
     log_lines = [line for line in (pc.status_log or "").split("\n") if line]
     return PointCloudRead(
         id=pc.id, slug=pc.slug, title=pc.title, description=pc.description, created_at=pc.created_at.isoformat(),
-        status=pc.status, status_log=log_lines
+        status=pc.status, status_log=log_lines, has_thumbnail=bool(pc.thumbnail_path),
     )
 
 
@@ -84,6 +84,7 @@ def create_pointcloud(
     title: str = Form(...),
     description: str = Form(""),
     pointcloud_file: UploadFile = File(..., description="las, laz, ply, xyz, ptx, pts, or e57"),
+    thumbnail_file: Optional[UploadFile] = File(None, description="Optional PNG/JPEG/WebP thumbnail"),
     session: Session = Depends(get_session),
     editor: User = Depends(require_editor),
 ):
@@ -99,11 +100,14 @@ def create_pointcloud(
             detail=f"Unrecognized point cloud format '{source_ext}' — expected one of {', '.join(_POINTCLOUD_SOURCE_EXTS)}",
         )
 
+    thumbnail = read_thumbnail(thumbnail_file) if thumbnail_file is not None else None  # validate before creating anything
+
     pc_dir = _pointcloud_dir(slug)
     pc_dir.mkdir(parents=True, exist_ok=False)
 
     try:
         work_dir = workdir.prepare_work_dir("pointclouds", slug, pc_dir)
+        thumbnail_name = write_thumbnail(pc_dir, *thumbnail) if thumbnail else None
         upload_path = work_dir / f"_upload{source_ext}"  # upload stays in scratch; never copied into data
         upload_fd = workdir.detach_upload(pointcloud_file)  # copied to upload_path by the background task
     except Exception as exc:  # noqa: BLE001
@@ -112,7 +116,7 @@ def create_pointcloud(
         raise HTTPException(status_code=400, detail=f"Could not save upload: {exc}")
 
     pc = PointCloud(
-        slug=slug, title=title, description=description, created_by=editor.id,
+        slug=slug, title=title, description=description, created_by=editor.id, thumbnail_path=thumbnail_name,
         status=AssetStatus.processing,
         status_log=f"{_now()}  Upload received, queued for processing\n",
     )
@@ -158,6 +162,46 @@ def _process_pointcloud_upload(pc_id: int, pc_dir_str: str, upload_path_str: str
             workdir.discard_job("pointclouds", pc.slug)  # scratch is never kept
         session.add(pc)
         session.commit()
+
+
+@router.get("/{pc_id}/thumbnail")
+def get_thumbnail(
+    pc_id: int, request: Request, session: Session = Depends(get_session), user: User = Depends(get_current_user)
+):
+    pc = session.get(PointCloud, pc_id)
+    if not pc or not _can_see_pointcloud(user, pc, session):
+        raise HTTPException(status_code=404, detail="Point cloud not found")
+    return thumbnail_response(_pointcloud_dir(pc.slug), pc.thumbnail_path, request)
+
+
+@router.post("/{pc_id}/thumbnail", response_model=PointCloudRead)
+def upload_or_replace_thumbnail(
+    pc_id: int,
+    thumbnail_file: UploadFile = File(...),
+    session: Session = Depends(get_session),
+    _editor: User = Depends(require_editor),
+):
+    pc = session.get(PointCloud, pc_id)
+    if not pc:
+        raise HTTPException(status_code=404, detail="Point cloud not found")
+    pc.thumbnail_path = store_thumbnail(thumbnail_file, _pointcloud_dir(pc.slug))
+    session.add(pc)
+    session.commit()
+    session.refresh(pc)
+    return _pointcloud_read(pc)
+
+
+@router.delete("/{pc_id}/thumbnail", response_model=PointCloudRead)
+def delete_thumbnail(pc_id: int, session: Session = Depends(get_session), _editor: User = Depends(require_editor)):
+    pc = session.get(PointCloud, pc_id)
+    if not pc:
+        raise HTTPException(status_code=404, detail="Point cloud not found")
+    remove_thumbnail(_pointcloud_dir(pc.slug))
+    pc.thumbnail_path = None
+    session.add(pc)
+    session.commit()
+    session.refresh(pc)
+    return _pointcloud_read(pc)
 
 
 @router.delete("/{pc_id}")

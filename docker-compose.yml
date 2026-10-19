@@ -28,6 +28,7 @@ services:
     volumes:
       - ${VG_HOST_DATA_DIR:-./data}:/data
       - ${VG_HOST_PROCESSING_DIR:-./processing}:/processing
+      - ${VG_HOST_BRANDING_DIR:-./branding}:/branding:ro
 
   nginx:
     build:
