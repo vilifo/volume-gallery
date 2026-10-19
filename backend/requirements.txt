@@ -2,7 +2,7 @@ fastapi==0.142.2
 uvicorn[standard]==0.54.0
 sqlmodel==0.0.48
 python-jose[cryptography]==3.5.0
-# bcrypt is used directly (passlib is unmaintained and breaks with bcrypt >= 4.1)
+argon2-cffi==25.1.0
 bcrypt==5.0.0
 python-multipart==0.0.32
 

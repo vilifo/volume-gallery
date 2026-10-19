@@ -1,4 +1,5 @@
-import base64
+from argon2 import PasswordHasher
+from argon2.exceptions import VerifyMismatchError, VerificationError, InvalidHashError
 import hashlib
 from datetime import datetime, timedelta
 from typing import Optional
@@ -8,36 +9,58 @@ from jose import jwt, JWTError
 
 from .config import settings
 
-# bcrypt only uses the first 72 bytes of a password (and bcrypt 5 refuses longer ones), so
-# new hashes are made from base64(sha256(password)) instead, which lifts that limit. Such
-# hashes are stored as "$bcrypt-sha256$" + the bcrypt hash. Plain "$2b$..." hashes from
-# earlier versions still verify (see verify_password) and are upgraded at the next login.
-_SHA256_PREFIX = "$bcrypt-sha256$"
-MAX_PASSWORD_LENGTH = 1024  # characters; just keeps absurd request bodies away from the hasher
+MAX_PASSWORD_LENGTH = 1024  # Protects against memory/CPU DoS on oversized payloads
 
+# argon2-cffi defaults to RFC 9106 Low-Memory profile (Argon2id, m=65536 [64 MiB], t=3, p=4),
+# which exceeds OWASP's minimum recommendations (m=19456 [19 MiB], t=2, p=1).
+_ph = PasswordHasher()
 
-def _prehash(password: str) -> bytes:
-    return base64.b64encode(hashlib.sha256(password.encode("utf-8")).digest())  # 44 bytes, no NULs
+# Pre-computed dummy hash to prevent user-enumeration timing attacks when a user is not found
+_DUMMY_HASH = _ph.hash("dummy_password_for_timing_mitigation")
 
 
 def hash_password(password: str) -> str:
-    return _SHA256_PREFIX + bcrypt.hashpw(_prehash(password), bcrypt.gensalt()).decode("ascii")
+    if len(password) > MAX_PASSWORD_LENGTH:
+        raise ValueError(f"Password exceeds maximum length of {MAX_PASSWORD_LENGTH} characters.")
+    return _ph.hash(password)
 
 
 def verify_password(plain: str, hashed: str) -> bool:
-    try:
-        if hashed.startswith(_SHA256_PREFIX):
-            return bcrypt.checkpw(_prehash(plain), hashed[len(_SHA256_PREFIX):].encode("ascii"))
-        # Legacy plain-bcrypt hash. Older versions silently truncated to 72 bytes when
-        # hashing, so do the same here or such a user could no longer sign in.
-        return bcrypt.checkpw(plain.encode("utf-8")[:72], hashed.encode("ascii"))
-    except ValueError:  # malformed hash
+    """
+    Drop-in replacement for verifying both Argon2id and legacy bcrypt hashes.
+    """
+    if len(plain) > MAX_PASSWORD_LENGTH or not hashed:
         return False
+
+    # 1. Modern Argon2id path
+    if hashed.startswith("$argon2"):
+        try:
+            return _ph.verify(hashed, plain)
+        except (VerifyMismatchError, VerificationError, InvalidHashError):
+            return False
+
+    # 2. Legacy bcrypt path ($2b$, $2a$, $2y$)
+    if hashed.startswith(("$2b$", "$2a$", "$2y$")):
+        try:
+            # Truncate UTF-8 bytes at 72 to preserve exact compatibility with bcrypt < 5.0.0
+            return bcrypt.checkpw(plain.encode("utf-8")[:72], hashed.encode("ascii"))
+        except (ValueError, UnicodeEncodeError):
+            return False
+
+    return False
 
 
 def needs_rehash(hashed: str) -> bool:
-    """True for hashes made by the old scheme (to be upgraded after a successful login)."""
-    return not hashed.startswith(_SHA256_PREFIX)
+    """
+    Returns True if the hash is a legacy bcrypt hash OR if it's an Argon2 hash
+    created with older/weaker parameters than currently configured on `_ph`.
+    """
+    if not hashed.startswith("$argon2"):
+        return True
+    try:
+        return _ph.check_needs_rehash(hashed)
+    except InvalidHashError:
+        return True
 
 
 def validate_new_password(password: str) -> None:

@@ -57,10 +57,10 @@ export function brandLogoHtml(b, cls = "brand-logo") {
 export function contactItems(b) {
   const c = b.contact || {};
   const items = [];
-  if (c.email) items.push(`<a href="mailto:${escapeHtml(c.email)}">${escapeHtml(c.email)}</a>`);
-  if (c.phone) items.push(`<a href="tel:${escapeHtml(c.phone.replace(/[^+\d]/g, ""))}">${escapeHtml(c.phone)}</a>`);
+  if (c.email) items.push(`<a href="mailto:${escapeHtml(c.email)}">Contact</a>`);
+  if (c.phone) items.push(`<a href="tel:${escapeHtml(c.phone.replace(/[^+\d]/g, ""))}">Phone</a>`);
   if (c.website) {
-    items.push(`<a href="${escapeHtml(c.website)}" target="_blank" rel="noopener noreferrer">${escapeHtml(c.website.replace(/^https?:\/\//, ""))}</a>`);
+    items.push(`<a href="${escapeHtml(c.website)}" target="_blank" rel="noopener noreferrer">Web</a>`);
   }
   if (c.address) items.push(`<span>${escapeHtml(c.address)}</span>`);
   return items;
