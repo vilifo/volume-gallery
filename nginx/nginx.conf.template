@@ -28,8 +28,8 @@ http {
     # container's writable layer. That covers an upload body when request buffering is
     # on (see proxy_request_buffering below) and large proxied responses. nginx creates
     # these directories itself at startup, so the parent (/processing) must be writable.
-    client_body_temp_path /processing/.nginx_client_body 1 2;
-    proxy_temp_path       /processing/.nginx_proxy 1 2;
+    client_body_temp_path /tmp/.nginx_client_body 1 2;
+    proxy_temp_path       /tmp/.nginx_proxy 1 2;
 
     proxy_read_timeout 1200s;
     proxy_send_timeout 1200s;
