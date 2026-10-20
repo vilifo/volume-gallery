@@ -20,6 +20,7 @@ from .. import workdir
 from ..helpers.slices import SliceError, open_volume_slices, plane_response_parts
 from ..helpers import extract_zarr_zip_from_path, convert_tiff_zip_from_path, ZIP_NAME, count_multiscale_levels, get_multiscales
 from ..helpers import read_thumbnail, write_thumbnail, store_thumbnail, remove_thumbnail, thumbnail_response
+from ..helpers import compute_histogram, histogram_path
 from ..utils import SLUG_RE, _now  # noqa: F401 - re-exported for the other asset routers
 from .meshes import attach_mesh_to_volume, delete_volume_mesh, get_volume_mesh, volume_mesh_source, volume_mesh_file
 
@@ -120,6 +121,9 @@ def _work_dir(slug: str) -> Path:
 def _can_see_volume(user: User, volume: Volume, session: Session) -> bool:
     if user.role in (Role.admin, Role.editor):
         return True
+    scope = getattr(user, "_share_scope", None)
+    if scope is not None:
+        return scope["asset_type"] == "volume" and scope["asset_id"] == volume.id
     grant = session.exec(
         select(VolumeAccess).where(
             VolumeAccess.user_id == user.id, VolumeAccess.volume_id == volume.id
@@ -297,6 +301,11 @@ def _process_upload(volume_id: int, vol_dir_str: str, source_kind: str, upload_f
                 zarr_root = convert_tiff_zip_from_path(zip_path, work_dir, vol_dir, log)
             volume.zarr_path = str(zarr_root.relative_to(vol_dir))
             volume.num_lod_levels = count_multiscale_levels(zarr_root)
+            try:
+                log("Computing histogram")
+                compute_histogram(zarr_root, histogram_path(vol_dir))
+            except Exception as exc:  # noqa: BLE001 - the volume works without one (see backfill_missing_histograms)
+                log(f"Histogram skipped: {exc}")
             volume.status = AssetStatus.ready
             log("Ready")
         except Exception as exc:  # noqa: BLE001 - the failure message IS the point, shown to the user
@@ -307,6 +316,45 @@ def _process_upload(volume_id: int, vol_dir_str: str, source_kind: str, upload_f
         session.add(volume)
         session.commit()
         _invalidate_volume_cache(volume_id)
+
+
+def backfill_missing_histograms() -> None:
+    """Start-up job, run in a background thread: computes the histogram of every ready volume
+    that has none (volumes from before histograms existed, or whose computation failed).
+    One volume at a time; failures are only logged and retried at the next start."""
+    with Session(engine) as session:
+        ready = session.exec(select(Volume).where(Volume.status == AssetStatus.ready)).all()
+        todo = [(v.slug, v.zarr_path) for v in ready if v.zarr_path]
+    missing = [(slug, rel) for slug, rel in todo if not histogram_path(_volume_dir(slug)).exists()]
+    if not missing:
+        return
+    print(f"[volume-gallery] Computing {len(missing)} missing histogram(s) in the background")
+    for slug, zarr_rel in missing:
+        vol_dir = _volume_dir(slug)
+        try:
+            compute_histogram(vol_dir / zarr_rel, histogram_path(vol_dir))
+            print(f"[Volume {slug}] Histogram computed")
+        except Exception as exc:  # noqa: BLE001 - e.g. the volume was deleted meanwhile
+            print(f"[Volume {slug}] Histogram skipped: {exc}")
+
+
+@router.get("/{volume_id}/histogram")
+def get_histogram(
+    volume_id: int, request: Request, session: Session = Depends(get_session), user: User = Depends(get_current_user)
+):
+    """The volume's intensity histogram (JSON, see helpers/histogram.py); 404 if there is none."""
+    volume = session.get(Volume, volume_id)
+    if not volume or not _can_see_volume(user, volume, session):
+        raise HTTPException(status_code=404, detail="Volume not found")
+    path = histogram_path(_volume_dir(volume.slug))
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="No histogram")
+    st = path.stat()
+    etag = f'"{st.st_mtime_ns:x}-{st.st_size:x}"'
+    headers = {"ETag": etag, "Cache-Control": "private, no-cache"}
+    if etag in {t.strip() for t in request.headers.get("if-none-match", "").split(",")}:
+        return Response(status_code=304, headers=headers)
+    return Response(content=path.read_bytes(), media_type="application/json", headers=headers)
 
 
 @router.post("/{volume_id}/mesh", response_model=VolumeRead)

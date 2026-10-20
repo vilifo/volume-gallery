@@ -91,7 +91,7 @@ function volumeViewer() {
     <ul>
       <li><strong>Layout</strong> (3D, Quad, XY, XZ, YZ): the 3D view only, the 3D view with the three slice views, or one slice plane. XY steps through slices along Z, XZ along Y and YZ along X.</li>
       <li><strong>Render mode</strong>: <em>DVR</em> (direct volume rendering) shows the volume semi-transparent, shaped by the transfer function. <em>MIP</em> (maximum intensity projection) shows the brightest value along each line of sight. <em>ISO</em> shows a solid surface at the chosen threshold.</li>
-      <li><strong>Transfer function</strong> (colour and opacity curve): click to add a point, drag a point to move it, double-click a point to remove it.</li>
+      <li><strong>Transfer function</strong> (colour and opacity curve): click to add a point, drag a point to move it, double-click a point to remove it. The dark area behind the curve is a histogram of the volume\u2019s intensities (logarithmic height), so you can see where the data is. It is missing for volumes whose histogram has not been computed yet.</li>
       <li><strong>Scene</strong>: choose which axis points up, show a wireframe or axes, and cut the volume open with the Clip X / Y / Z sliders.</li>
       <li><strong>Advanced</strong>: <em>Render scale</em> trades sharpness for speed, <em>Max detail level</em> limits the resolution that is streamed (0 is full resolution), and <em>VRAM allocation</em> sets how much graphics memory may cache the volume.</li>
       <li><strong>Share</strong> copies a link to exactly this view. Whoever opens it must sign in and have access to the item.</li>

@@ -90,6 +90,30 @@ def create_access_token(
     return jwt.encode(payload, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
 
 
+def create_share_session_token(
+    share_id: int,
+    code: str,
+    asset_type: str,
+    asset_id: int,
+    expires_at: datetime,
+    can_download: bool = False,
+    min_lod: Optional[int] = None,
+) -> str:
+    """Creates a scoped bearer token for a guest visiting a /s/<code> share link."""
+    payload = {
+        "sub": f"share:{code}",
+        "type": "share",
+        "sid": share_id,
+        "kind": asset_type,
+        "aid": asset_id,
+        "cd": bool(can_download),
+        "exp": expires_at,
+    }
+    if min_lod is not None:
+        payload["min_lod"] = int(min_lod)
+    return jwt.encode(payload, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
+
+
 def create_file_token(subject: str, asset_id: int, kind: str, min_lod: Optional[int] = None) -> str:
     """kind is 'zarr' or 'mesh' or 'pointcloud' — scopes the token to a specific resource on a
     specific volume.

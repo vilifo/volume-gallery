@@ -370,6 +370,12 @@ th { color: var(--text-dim); font-weight: 500; font-size: 0.82em; }
 }
 .rail .brand .brand-logos { line-height: 0; }
 .rail .brand .brand-logo { max-width: 100%; max-height: 40px; margin-bottom: 0.4em; }
+/* The logo's box is as tall as its largest size from the start, so the menu below does not jump
+   when the image finishes loading. */
+.rail .brand .brand-logos.has-logo { display: flex; align-items: center; height: 40px; margin-bottom: 0.4em; }
+.rail .brand .brand-logos.has-logo .brand-logo { margin-bottom: 0; }
+/* Nothing is drawn until the first branding is known (first visit, nothing cached yet). */
+.rail .brand[data-pending], .login-brand[data-pending], .login-footer[data-pending] { visibility: hidden; }
 
 /* --- help dialog --- */
 .modal.help-modal {
@@ -435,6 +441,7 @@ th { color: var(--text-dim); font-weight: 500; font-size: 0.82em; }
   .rail-id { display: flex; align-items: center; gap: 0.6em; }
   .rail .brand { display: flex; align-items: center; gap: 0.5em; margin: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .rail .brand .brand-logos { display: inline-block; }
+  .rail .brand .brand-logos.has-logo { display: flex; height: 28px; margin: 0; }
   .rail .brand .brand-logo { max-height: 28px; margin: 0; }
   .rail .role-tag { margin: 0; }
   .rail-toggle { display: inline-flex; align-items: center; justify-content: center; width: 44px; height: 44px; padding: 0; flex-shrink: 0; }
@@ -491,4 +498,343 @@ th { color: var(--text-dim); font-weight: 500; font-size: 0.82em; }
   body:not(.viewer-page) main input:not([type="checkbox"]):not([type="radio"]):not([type="color"]):not([type="range"]),
   .modal button, .modal select, .modal input { min-height: 44px; }
   .rail #logout-btn { min-height: 44px; }
+}
+
+/* --- Share Dialog & Animated Mode Switch --- */
+.share-modal {
+  width: 440px;
+  max-width: calc(100vw - 2em);
+  padding: 1.5em;
+}
+.share-modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.35em;
+}
+.share-modal-head h2 {
+  margin: 0;
+  font-size: 1.15em;
+}
+.share-mode-switch {
+  position: relative;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 4px;
+  margin: 1.1em 0 0.75em;
+  user-select: none;
+}
+.share-mode-thumb {
+  position: absolute;
+  top: 4px;
+  bottom: 4px;
+  left: 4px;
+  width: calc(50% - 4px);
+  background: var(--accent);
+  border-radius: 999px;
+  transition: transform 0.26s cubic-bezier(0.22, 1, 0.36, 1);
+  z-index: 0;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
+}
+.share-mode-switch[data-mode="timed"] .share-mode-thumb {
+  transform: translateX(100%);
+}
+.share-mode-btn {
+  position: relative;
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5em;
+  background: transparent !important;
+  border: 0 !important;
+  padding: 0.55em 0.8em;
+  font-size: 0.88em;
+  font-weight: 600;
+  color: var(--text-dim);
+  border-radius: 999px;
+  cursor: pointer;
+  transition: color 0.2s ease;
+}
+.share-mode-btn svg {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+  transition: transform 0.25s ease;
+}
+.share-mode-btn.active {
+  color: #111;
+}
+.share-mode-btn.active svg {
+  transform: scale(1.08);
+}
+.share-mode-desc {
+  font-size: 0.84em;
+  color: var(--text-dim);
+  line-height: 1.45;
+  margin: 0 0 0.8em;
+  min-height: 2.5em;
+}
+.share-drawer {
+  display: grid;
+  grid-template-rows: 0fr;
+  opacity: 0;
+  transition: grid-template-rows 0.28s cubic-bezier(0.22, 1, 0.36, 1),
+              opacity 0.22s ease,
+              margin-bottom 0.28s ease;
+  margin-bottom: 0;
+}
+.share-drawer.open {
+  grid-template-rows: 1fr;
+  opacity: 1;
+  margin-bottom: 1em;
+}
+.share-drawer-inner {
+  overflow: hidden;
+}
+.share-drawer-card {
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 0.95em 1em;
+  display: flex;
+  flex-direction: column;
+  gap: 0.85em;
+}
+.share-code-row {
+  display: flex;
+  align-items: stretch;
+  gap: 0.45em;
+}
+.share-code-prefix {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 0.65em;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  font-family: var(--mono);
+  font-size: 0.85em;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+.share-regen-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 38px;
+  padding: 0;
+  flex-shrink: 0;
+}
+.share-regen-btn svg {
+  width: 16px;
+  height: 16px;
+  transition: transform 0.35s ease;
+}
+.share-regen-btn:active svg {
+  transform: rotate(180deg);
+}
+
+/* --- Collapsible Left Rail (Desktop) --- */
+.rail {
+  transition: width 0.2s cubic-bezier(0.22, 1, 0.36, 1),
+              padding 0.2s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.rail-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.4em;
+}
+.rail-collapse-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border-radius: var(--radius);
+  color: var(--text-dim);
+  background: transparent;
+  border: 1px solid transparent;
+  flex-shrink: 0;
+  cursor: pointer;
+}
+.rail-collapse-btn:hover {
+  color: var(--text);
+  background: var(--bg);
+  border-color: var(--line);
+}
+.rail-collapse-btn svg {
+  width: 16px;
+  height: 16px;
+  transition: transform 0.2s ease;
+}
+
+/* Nav item icons + labels */
+.rail nav a {
+  display: flex;
+  align-items: center;
+  gap: 0.65em;
+  white-space: nowrap;
+  overflow: hidden;
+}
+.rail nav a .nav-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+}
+.rail nav a .nav-icon svg {
+  width: 18px;
+  height: 18px;
+}
+
+/* Sign out button icon + label */
+#logout-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.55em;
+  white-space: nowrap;
+}
+#logout-btn .logout-icon {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+}
+
+/* Fallback monogram if no logo image is configured */
+.brand-monogram {
+  display: none;
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius);
+  background: var(--bg);
+  border: 1px solid var(--line);
+  color: var(--accent);
+  font-weight: 700;
+  font-size: 0.95em;
+  align-items: center;
+  justify-content: center;
+}
+
+/* --- Minimized (.rail.collapsed) State on Desktop --- */
+@media (min-width: 801px) {
+  .rail.collapsed {
+    width: 68px;
+    padding: 1.1em 0.6em;
+    align-items: center;
+  }
+  .rail.collapsed .rail-top {
+    flex-direction: column;
+    align-items: center;
+    gap: 0.6em;
+    width: 100%;
+  }
+  .rail.collapsed .rail-id {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+  }
+  .rail.collapsed .brand {
+    margin-bottom: 0;
+  }
+  .rail.collapsed .brand .brand-logos.has-logo { height: 36px; margin-bottom: 0; justify-content: center; }
+  .rail.collapsed .brand .brand-logo {
+    max-width: 36px;
+    max-height: 36px;
+    margin-bottom: 0;
+  }
+  .rail.collapsed .brand-monogram {
+    display: inline-flex;
+  }
+  .rail.collapsed .brand-text,
+  .rail.collapsed .role-tag,
+  .rail.collapsed .nav-label,
+  .rail.collapsed .signed-in-as,
+  .rail.collapsed .logout-label {
+    display: none !important;
+  }
+  .rail.collapsed .rail-collapse-btn svg {
+    transform: rotate(180deg);
+  }
+  .rail.collapsed .rail-menu {
+    align-items: center;
+    width: 100%;
+  }
+  .rail.collapsed nav {
+    width: 100%;
+    align-items: center;
+  }
+  .rail.collapsed nav a {
+    justify-content: center;
+    width: 42px;
+    height: 42px;
+    padding: 0;
+  }
+
+/* --- theme switch: 3-position icon switch (light / system / dark) - VERTICAL MODE --- */
+  .rail.collapsed .theme-switch {
+    --pos: 1;
+    position: relative;
+    display: grid;
+    grid-template-columns: 1fr;         /* one column: the base rule's 3 columns put the icons in a row */
+    grid-template-rows: repeat(3, 1fr);
+    height: 108px;
+    width: 30px;                        /* 24px button + 2 x 2px padding + 2 x 1px border */
+    padding: 2px;
+    margin-bottom: 0.8em;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    background: var(--bg);
+  }
+  .rail.collapsed .theme-switch[data-pos="0"] { --pos: 0; }
+  .rail.collapsed .theme-switch[data-pos="1"] { --pos: 1; }
+  .rail.collapsed .theme-switch[data-pos="2"] { --pos: 2; }
+  .rail.collapsed .theme-switch::before {            /* sliding thumb */
+    content: "";
+    position: absolute;
+    left: 2px; right: 2px; top: 2px; bottom: auto; width: auto; /* undo the horizontal thumb's width/bottom */
+    height: calc((100% - 4px) / 3);
+    box-sizing: border-box;
+    border-radius: 999px;
+    background: var(--panel-raised);
+    border: 1px solid var(--line);
+    transform: translateY(calc(var(--pos) * 100%)); /* Changed translateX to translateY */
+    transition: transform 0.18s ease;
+  }
+  .rail.collapsed .theme-switch button {
+    position: relative;              /* above the thumb */
+    display: flex; align-items: center; justify-content: center;
+    height: auto; width: auto;       /* fill the grid cell (the base rule fixes the height at 24px) */
+    padding: 0;
+    border: none;
+    border-radius: 999px;
+    background: transparent;
+    color: var(--text-dim);
+  }
+  .rail.collapsed .theme-switch button:hover { color: var(--text); border: none; }
+  .rail.collapsed .theme-switch button[aria-checked="true"] { color: var(--accent); }
+  .rail.collapsed .theme-switch svg { width: 14px; height: 14px; }
+
+  /* Icon-only Sign Out button */
+  .rail.collapsed #logout-btn {
+    width: 42px;
+    height: 42px;
+    padding: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) { .rail.collapsed .theme-switch::before { transition: none; } }
+
+@media (max-width: 800px) {
+  .rail-collapse-btn {
+    display: none;
+  }
 }

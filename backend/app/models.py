@@ -6,10 +6,12 @@ from sqlmodel import Field, SQLModel, Column, DateTime
 
 from .utils import get_utc_now
 
+
 class Role(str, enum.Enum):
     admin = "admin"
     editor = "editor"
     reader = "reader"
+    guest = "guest"
 
 
 class AssetStatus(str, enum.Enum):
@@ -94,3 +96,25 @@ class PointCloudAccess(AssetAccessBase, table=True):
     """Grants a reader visibility into a point cloud."""
     id: Optional[int] = Field(default=None, primary_key=True)
     pointcloud_id: int = Field(foreign_key="pointcloud.id", index=True)
+
+
+class ShareLink(SQLModel, table=True):
+    """Time-limited named/shortened share link granting guest access to one asset."""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    code: str = Field(index=True, unique=True)
+    asset_type: str = Field(index=True)  # "volume" | "mesh" | "pointcloud"
+    asset_id: int = Field(index=True)
+    view_query: str = Field(default="")
+    can_download: bool = Field(default=False)
+    min_lod: Optional[int] = Field(default=None)
+    created_by: Optional[int] = Field(default=None, foreign_key="user.id")
+    created_at: datetime = Field(
+        default_factory=get_utc_now,
+        sa_type=DateTime(timezone=True)
+    )
+    expires_at: datetime = Field(
+        sa_type=DateTime(timezone=True),
+        index=True
+    )
+    revoked: bool = Field(default=False)
+    views_count: int = Field(default=0)

@@ -1,5 +1,5 @@
 from contextlib import asynccontextmanager
-
+import threading
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from sqlmodel import Session, select
@@ -10,7 +10,7 @@ from .security import hash_password
 from .config import settings
 from . import workdir
 from .utils import _now
-from .routers import auth, users, volumes, meshes, pointclouds, branding
+from .routers import auth, users, volumes, meshes, pointclouds, branding, shares
 
 
 def _bootstrap_admin():
@@ -66,6 +66,8 @@ async def lifespan(app: FastAPI):
     init_db()
     _bootstrap_admin()
     _recover_interrupted_jobs()
+    if settings.HISTOGRAM_BACKFILL:  # not on the startup path: a big volume can take minutes
+        threading.Thread(target=volumes.backfill_missing_histograms, name="histogram-backfill", daemon=True).start()
     print(f"[volume-gallery] Processing uploads in {settings.PROCESSING_DIR}; results are stored in {settings.DATA_DIR}.")
     yield
 
@@ -78,6 +80,7 @@ app.include_router(users.router)
 app.include_router(volumes.router)
 app.include_router(meshes.router)
 app.include_router(pointclouds.router)
+app.include_router(shares.router)
 
 # Serve the frontend (single-page-ish static site) at the root.
 app.mount("/", StaticFiles(directory=settings.FRONTEND_DIR, html=True), name="frontend")

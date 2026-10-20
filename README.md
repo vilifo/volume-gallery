@@ -63,6 +63,18 @@ processing/ (optional, created at runtime) scratch space for uploads being proce
   indirection toggles, and a live stats readout (fps, dataset dimensions,
   brick/atlas counts, bytes streamed).
 
+## Histogram
+
+The volume viewer draws a histogram of the data behind the transfer function curve. It is
+computed from the full-resolution level when a volume is created (step "Computing
+histogram") and stored as `histogram.json` in the volume's folder, next to the Zarr store.
+On start, volumes that lack one (created before this feature, or whose computation failed)
+are processed one by one in a background thread; the app is usable meanwhile. A volume
+without a histogram simply shows none. `VG_HISTOGRAM_THREADS` (default: up to 4) limits the
+CPU used, `VG_HISTOGRAM_BACKFILL=0` turns the start-up catch-up off. The file holds
+`{"dtype", "min", "max", "bins", "counts"}`; the voxels the converter pads onto TIFF stacks
+(multiples of 16) count as zeros.
+
 ## Branding
 
 The name, logo, tagline, copyright and contact details shown on the login page (and the
