@@ -370,6 +370,12 @@ th { color: var(--text-dim); font-weight: 500; font-size: 0.82em; }
 }
 .rail .brand .brand-logos { line-height: 0; }
 .rail .brand .brand-logo { max-width: 100%; max-height: 40px; margin-bottom: 0.4em; }
+/* The logo's box is as tall as its largest size from the start, so the menu below does not jump
+   when the image finishes loading. */
+.rail .brand .brand-logos.has-logo { display: flex; align-items: center; height: 40px; margin-bottom: 0.4em; }
+.rail .brand .brand-logos.has-logo .brand-logo { margin-bottom: 0; }
+/* Nothing is drawn until the first branding is known (first visit, nothing cached yet). */
+.rail .brand[data-pending], .login-brand[data-pending], .login-footer[data-pending] { visibility: hidden; }
 
 /* --- help dialog --- */
 .modal.help-modal {
@@ -435,6 +441,7 @@ th { color: var(--text-dim); font-weight: 500; font-size: 0.82em; }
   .rail-id { display: flex; align-items: center; gap: 0.6em; }
   .rail .brand { display: flex; align-items: center; gap: 0.5em; margin: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .rail .brand .brand-logos { display: inline-block; }
+  .rail .brand .brand-logos.has-logo { display: flex; height: 28px; margin: 0; }
   .rail .brand .brand-logo { max-height: 28px; margin: 0; }
   .rail .role-tag { margin: 0; }
   .rail-toggle { display: inline-flex; align-items: center; justify-content: center; width: 44px; height: 44px; padding: 0; flex-shrink: 0; }
@@ -738,6 +745,7 @@ th { color: var(--text-dim); font-weight: 500; font-size: 0.82em; }
   .rail.collapsed .brand {
     margin-bottom: 0;
   }
+  .rail.collapsed .brand .brand-logos.has-logo { height: 36px; margin-bottom: 0; justify-content: center; }
   .rail.collapsed .brand .brand-logo {
     max-width: 36px;
     max-height: 36px;
@@ -776,9 +784,10 @@ th { color: var(--text-dim); font-weight: 500; font-size: 0.82em; }
     --pos: 1;
     position: relative;
     display: grid;
-    grid-template-rows: repeat(3, 1fr); /* Changed columns to rows */
-    height: 108px;                      /* Changed fixed width to fixed height */
-    width: 28px;                        /* Added fixed width to match button height + padding */
+    grid-template-columns: 1fr;         /* one column: the base rule's 3 columns put the icons in a row */
+    grid-template-rows: repeat(3, 1fr);
+    height: 108px;
+    width: 30px;                        /* 24px button + 2 x 2px padding + 2 x 1px border */
     padding: 2px;
     margin-bottom: 0.8em;
     border: 1px solid var(--line);
@@ -791,8 +800,8 @@ th { color: var(--text-dim); font-weight: 500; font-size: 0.82em; }
   .rail.collapsed .theme-switch::before {            /* sliding thumb */
     content: "";
     position: absolute;
-    left: 2px; right: 2px; top: 2px; /* Adjusted anchoring for vertical movement */
-    height: calc((100% - 4px) / 3);  /* Changed calculation from width to height */
+    left: 2px; right: 2px; top: 2px; bottom: auto; width: auto; /* undo the horizontal thumb's width/bottom */
+    height: calc((100% - 4px) / 3);
     box-sizing: border-box;
     border-radius: 999px;
     background: var(--panel-raised);
@@ -803,8 +812,7 @@ th { color: var(--text-dim); font-weight: 500; font-size: 0.82em; }
   .rail.collapsed .theme-switch button {
     position: relative;              /* above the thumb */
     display: flex; align-items: center; justify-content: center;
-    height: 24px;                    /* Fits perfectly inside the grid cells */
-    width: 24px;                     /* Added explicit width to keep buttons square */
+    height: auto; width: auto;       /* fill the grid cell (the base rule fixes the height at 24px) */
     padding: 0;
     border: none;
     border-radius: 999px;
@@ -814,7 +822,6 @@ th { color: var(--text-dim); font-weight: 500; font-size: 0.82em; }
   .rail.collapsed .theme-switch button:hover { color: var(--text); border: none; }
   .rail.collapsed .theme-switch button[aria-checked="true"] { color: var(--accent); }
   .rail.collapsed .theme-switch svg { width: 14px; height: 14px; }
-  .rail.collapsed @media (prefers-reduced-motion: reduce) { .theme-switch::before { transition: none; } }
 
   /* Icon-only Sign Out button */
   .rail.collapsed #logout-btn {
@@ -823,6 +830,8 @@ th { color: var(--text-dim); font-weight: 500; font-size: 0.82em; }
     padding: 0;
   }
 }
+
+@media (prefers-reduced-motion: reduce) { .rail.collapsed .theme-switch::before { transition: none; } }
 
 @media (max-width: 800px) {
   .rail-collapse-btn {

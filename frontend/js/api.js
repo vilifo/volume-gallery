@@ -99,12 +99,36 @@ const NAV_ICONS = {
 let brandingPromise = null;
 
 // Resolves with the branding (never rejects: falls back to the defaults). Cached per page.
+// The last branding the server sent is kept in localStorage, so the next page load can draw the
+// right name and logo straight away instead of the defaults followed by a visible swap.
+const BRANDING_CACHE_KEY = "vg_branding";
+
+function normalizeBranding(b) {
+    return {...DEFAULT_BRANDING, ...b, contact: (b && b.contact) || {}, links: (b && b.links) || []};
+}
+
+// Synchronous: the cached branding, or null on the very first visit (or if storage is unavailable).
+export function getCachedBranding() {
+    try {
+        const raw = localStorage.getItem(BRANDING_CACHE_KEY);
+        return raw ? normalizeBranding(JSON.parse(raw)) : null;
+    } catch (_) {
+        return null;
+    }
+}
+
 export function getBranding() {
     if (!brandingPromise) {
         brandingPromise = fetch("/api/branding", {cache: "no-cache"})
-            .then((res) => (res.ok ? res.json() : {}))
-            .catch(() => ({}))
-            .then((b) => ({...DEFAULT_BRANDING, ...b, contact: b.contact || {}, links: b.links || []}));
+            .then((res) => (res.ok ? res.json() : null))
+            .catch(() => null)
+            .then((b) => {
+                if (b) {
+                    try { localStorage.setItem(BRANDING_CACHE_KEY, JSON.stringify(b)); } catch (_) { /* full or blocked */ }
+                    return normalizeBranding(b);
+                }
+                return getCachedBranding() || normalizeBranding({}); // server unreachable: keep what we had
+            });
     }
     return brandingPromise;
 }
@@ -147,17 +171,36 @@ export function linkItems(b) {
 }
 
 // Puts the configured name and logo into the side rail and the page title.
+// Inner HTML of the rail's brand block, and a signature that says when it needs redrawing.
+function railBrandHtml(b) {
+  const logos = brandLogoHtml(b);
+  const monogram = !logos
+    ? `<span class="brand-monogram">${escapeHtml((b.app_name || "V").slice(0, 1).toUpperCase())}</span>`
+    : "";
+  return `<div class="brand-logos${logos ? " has-logo" : ""}">${logos}${monogram}</div><span class="brand-text">${escapeHtml(b.app_name)}</span>`;
+}
+const brandSignature = (b) => JSON.stringify([b.app_name, b.logo_url, b.logo_dark_url]);
+
+// "<page> \u2014 <name>": swaps the name part of the tab title, whatever name it showed before.
+let titleName = "Volume Gallery";
+function setTitleName(name) {
+  const suffix = ` \u2014 ${titleName}`;
+  if (document.title.endsWith(suffix)) document.title = document.title.slice(0, -suffix.length) + ` \u2014 ${name}`;
+  titleName = name;
+}
+
 export async function applyBranding() {
   const b = await getBranding();
   const brand = document.querySelector(".rail .brand");
   if (brand) {
-    const logos = brandLogoHtml(b);
-    const fallbackMonogram = !logos
-      ? `<span class="brand-monogram">${escapeHtml((b.app_name || "V").slice(0, 1).toUpperCase())}</span>`
-      : "";
-    brand.innerHTML = `<div class="brand-logos">${logos}${fallbackMonogram}</div><span class="brand-text">${escapeHtml(b.app_name)}</span>`;
+    // Already drawn from the cache and unchanged: leave the DOM alone (nothing to flicker).
+    if (brand.dataset.sig !== brandSignature(b)) {
+      brand.innerHTML = railBrandHtml(b);
+      brand.dataset.sig = brandSignature(b);
+    }
+    brand.removeAttribute("data-pending");
   }
-  document.title = document.title.replace(/ \u2014 Volume Gallery$/, ` \u2014 ${b.app_name}`);
+  setTitleName(b.app_name);
   return b;
 }
 
@@ -347,9 +390,9 @@ export const api = {
     // The volume's intensity histogram (JSON), or null when it has none yet.
     async volumeHistogram(id) {
         try {
-            return await (await request(`/api/volumes/${id}/histogram`)).json();
-        } catch (_) {
-            return null;
+            return await (await request(`/api/volumes/${id}/histogram`));
+        } catch (err) {
+            console.debug("No histogram for this volume:", err.message);
         }
     },
     zarrAccessUrl(id, minLevel) {
@@ -521,6 +564,12 @@ export function wireTheme() {
 }
 
 export function renderShell(activePage, role, username) {
+    // Brand from the cache if there is one; on the very first visit it stays invisible until the
+    // server's branding arrives (applyBranding), so the default name never flashes.
+    const cachedBrand = getCachedBranding();
+    const brandInner = railBrandHtml(cachedBrand || DEFAULT_BRANDING);
+    const brandAttrs = cachedBrand ? ` data-sig='${brandSignature(cachedBrand).replace(/'/g, "&#39;")}'` : " data-pending";
+    if (cachedBrand) setTitleName(cachedBrand.app_name);
     if (role !== "guest") {
         const navItems = [{href: "/index.html", label: "Gallery", key: "gallery"}];
         if (role === "editor" || role === "admin") {
@@ -546,7 +595,7 @@ export function renderShell(activePage, role, username) {
     <div class="rail${isCollapsed ? " collapsed" : ""}">
       <div class="rail-top">
         <div class="rail-id">
-          <div class="brand"><span class="brand-text">Volume Gallery</span></div>
+          <div class="brand"${brandAttrs}>${brandInner}</div>
           <div class="role-tag">${role}</div>
         </div>
         <button type="button" class="rail-collapse-btn" id="rail-collapse-btn" title="${isCollapsed ? "Expand sidebar" : "Minimize sidebar"}" aria-label="Toggle sidebar">
@@ -589,7 +638,7 @@ export function renderShell(activePage, role, username) {
     <div class="rail collapsed">
       <div class="rail-top">
         <div class="rail-id">
-          <div class="brand"><span class="brand-text">Volume Gallery</span></div>
+          <div class="brand"${brandAttrs}>${brandInner}</div>
         </div>
       </div>
       <div class="rail-menu" id="rail-menu">

@@ -5,13 +5,13 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Sign in — Volume Gallery</title>
 <script src="/js/theme-init.js?v=hist1"></script>
-<link rel="stylesheet" href="/css/style.css?v=hist1" />
+<link rel="stylesheet" href="/css/style.css?v=brand2" />
 </head>
 <body>
   <div class="login-shell">
    <div class="login-col">
     <div class="login-box">
-      <div class="login-brand">
+      <div class="login-brand" data-pending>
         <div class="brand-logos" id="brand-logos"></div>
         <h1 id="app-name">Volume Gallery</h1>
         <p class="tagline" id="tagline"></p>
@@ -30,29 +30,43 @@
         <button type="submit" class="primary" style="width:100%">Sign in</button>
       </form>
     </div>
-    <footer class="login-footer" id="login-footer"></footer>
+    <footer class="login-footer" id="login-footer" data-pending></footer>
    </div>
   </div>
 
   <script type="module">
-    import { api, setSession, getToken, postLoginUrl, getBranding, brandLogoHtml, contactItems, linkItems, escapeHtml } from "/js/api.js?v=hist1";
+    import { api, setSession, getToken, postLoginUrl, getBranding, getCachedBranding, brandLogoHtml, contactItems, linkItems, escapeHtml } from "/js/api.js?v=brand2";
 
     if (getToken()) window.location.href = postLoginUrl();
 
     // Name, logo, copyright and contact details come from the server's branding.toml.
-    getBranding().then((b) => {
-      document.title = `Sign in \u2014 ${b.app_name}`;
-      document.getElementById("app-name").textContent = b.app_name;
-      document.getElementById("tagline").textContent = b.tagline;
-      document.getElementById("brand-logos").innerHTML = brandLogoHtml(b, "login-logo");
-      const rows = [];
-      if (b.copyright) rows.push(`<div>${escapeHtml(b.copyright)}</div>`);
-      const contact = contactItems(b);
-      if (contact.length) rows.push(`<div class="login-contact">${contact.join("")}</div>`);
-      const links = linkItems(b);
-      if (links.length) rows.push(`<div class="login-contact">${links.join("")}</div>`);
-      document.getElementById("login-footer").innerHTML = rows.join("");
-    });
+    // Drawn from the cached copy at once (no flash of the defaults), then refreshed from the
+    // server; the page is only touched again if something actually changed. On the very first
+    // visit the brand and footer stay invisible until the branding arrives.
+    let paintedSig = null;
+    function paintBranding(b) {
+      const html = {
+        logos: brandLogoHtml(b, "login-logo"),
+        footer: [
+          b.copyright ? `<div>${escapeHtml(b.copyright)}</div>` : "",
+          contactItems(b).length ? `<div class="login-contact">${contactItems(b).join("")}</div>` : "",
+          linkItems(b).length ? `<div class="login-contact">${linkItems(b).join("")}</div>` : "",
+        ].join(""),
+      };
+      const sig = JSON.stringify([b.app_name, b.tagline, html]);
+      if (sig !== paintedSig) {
+        paintedSig = sig;
+        document.title = `Sign in \u2014 ${b.app_name}`;
+        document.getElementById("app-name").textContent = b.app_name;
+        document.getElementById("tagline").textContent = b.tagline;
+        document.getElementById("brand-logos").innerHTML = html.logos;
+        document.getElementById("login-footer").innerHTML = html.footer;
+      }
+      document.querySelectorAll("[data-pending]").forEach((el) => el.removeAttribute("data-pending"));
+    }
+    const cachedBranding = getCachedBranding();
+    if (cachedBranding) paintBranding(cachedBranding);
+    getBranding().then(paintBranding);
 
     const form = document.getElementById("login-form");
     const errorBox = document.getElementById("error");
