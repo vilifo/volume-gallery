@@ -14,6 +14,10 @@ class Settings:
     # Shortest password accepted when a password is set or changed
     MIN_PASSWORD_LENGTH: int = int(os.environ.get("VG_MIN_PASSWORD_LENGTH", "8"))
 
+    # --- Share links (/s/<code>) ---
+    SHARE_CODE_MIN_LENGTH: int = max(4, int(os.environ.get("VG_SHARE_CODE_MIN_LENGTH", "8")))
+    SHARE_CODE_MAX_LENGTH: int = max(8, int(os.environ.get("VG_SHARE_CODE_MAX_LENGTH", "24")))
+
     # --- Storage ---
     DATA_DIR: Path = Path(os.environ.get("VG_DATA_DIR", "/data"))
     VOLUMES_DIR: Path = DATA_DIR / "volumes"

@@ -34,6 +34,14 @@ def _can_see_mesh(user: User, mesh: Mesh, session: Session) -> bool:
         return False  # attached to a volume: only reachable through that volume
     if user.role in (Role.admin, Role.editor):
         return True
+    scope = getattr(user, "_share_scope", None)
+    if scope is not None:
+        if scope["asset_type"] == "mesh" and scope["asset_id"] == mesh.id:
+            return True
+        # Also allow viewing a mesh attached to a shared volume
+        if scope["asset_type"] == "volume" and mesh.volume_id == scope["asset_id"]:
+            return True
+        return False
     grant = session.exec(
         select(MeshAccess).where(MeshAccess.user_id == user.id, MeshAccess.mesh_id == mesh.id)
     ).first()

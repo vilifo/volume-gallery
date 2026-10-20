@@ -87,3 +87,30 @@ class FileAccessUrl(BaseModel):
     expires_in_minutes: int
     version: Optional[str] = None
 
+
+class ShareConfigRead(BaseModel):
+    min_length: int
+    max_length: int
+    suggested_code: str
+
+
+class ShareLinkCreate(BaseModel):
+    code: Optional[str] = None
+    asset_type: str  # "volume" | "mesh" | "pointcloud"
+    asset_id: int
+    expires_in_minutes: int = 1440  # default 24 hours
+    view_query: str = ""
+    can_download: bool = False
+    min_lod: Optional[int] = None
+
+
+class ShareLinkRead(BaseModel):
+    id: int
+    code: str
+    url: str
+    asset_type: str
+    asset_id: int
+    view_query: str
+    can_download: bool
+    min_lod: Optional[int] = None
+    created_at: str

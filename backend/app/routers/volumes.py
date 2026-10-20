@@ -120,6 +120,9 @@ def _work_dir(slug: str) -> Path:
 def _can_see_volume(user: User, volume: Volume, session: Session) -> bool:
     if user.role in (Role.admin, Role.editor):
         return True
+    scope = getattr(user, "_share_scope", None)
+    if scope is not None:
+        return scope["asset_type"] == "volume" and scope["asset_id"] == volume.id
     grant = session.exec(
         select(VolumeAccess).where(
             VolumeAccess.user_id == user.id, VolumeAccess.volume_id == volume.id

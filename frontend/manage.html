@@ -14,7 +14,7 @@
   <div class="app-shell" id="shell"></div>
 
   <script type="module">
-    import { api, requireLogin, getRole, getUsername, renderShell, wireLogout } from "/js/api.js?v=mobile1";
+    import { api, requireLogin, getRole, getUsername, renderShell, wireLogout } from "/js/api.js?v=share1";
 
     requireLogin();
     const role = getRole();
@@ -61,10 +61,12 @@
     const content = document.getElementById("content");
 
     async function load() {
-      const [item, granted, allUsers] = await Promise.all([
+      const [item, granted, allUsers, shares, shareCfg] = await Promise.all([
         KIND.get(itemId),
         KIND.listAccess(itemId),
         api.listUsers().catch(() => []), // editors may not have list-users; fall back gracefully
+        api.listShares(kind, itemId).catch(() => []),
+        api.suggestShareCode().catch(() => ({ min_length: 8, max_length: 24, suggested_code: "" })),
       ]);
 
       const grantedIds = new Set(granted.map((u) => u.id));
@@ -126,9 +128,106 @@
             : `<p class="dim" style="margin-top:1em">${allUsers.length ? "All readers already have access." : "Sign in as admin to see the full user list here."}</p>`
         }
 
+        <h2 style="margin-top:2em">Time-limited share links</h2>
+        <p class="dim" style="font-size:0.9em">Create a short link (<code>/s/&lt;code&gt;</code>) that grants temporary read-only access without a user account.</p>
+        <div id="share-error" class="error-box" style="display:none;max-width:560px"></div>
+        <div style="display:flex;flex-wrap:wrap;gap:0.6em;align-items:flex-end;max-width:680px;margin-bottom:1em">
+          <div class="field" style="margin:0;flex:1 1 220px">
+            <label for="share-code">Code / custom name (${shareCfg.min_length}–${shareCfg.max_length} chars)</label>
+            <div style="display:flex;gap:0.4em">
+              <input id="share-code" class="mono" value="${escapeHtml(shareCfg.suggested_code)}" minlength="${shareCfg.min_length}" maxlength="${shareCfg.max_length}" required />
+              <button type="button" id="share-regen-btn" title="Generate new random hash">↻</button>
+            </div>
+          </div>
+          <div class="field" style="margin:0;width:160px">
+            <label for="share-exp">Expires in</label>
+            <select id="share-exp">
+              <option value="60">1 hour</option>
+              <option value="1440" selected>24 hours</option>
+              <option value="10080">7 days</option>
+              <option value="43200">30 days</option>
+            </select>
+          </div>
+          ${kind === "mesh" ? `<label class="cd-toggle" style="margin-bottom:0.6em"><input type="checkbox" id="share-cd"> allow download</label>` : ""}
+          <button type="button" id="share-create-btn" class="primary">Create link</button>
+        </div>
+        <table class="responsive">
+          <thead>
+            <tr>
+              <th>Short link</th>
+              <th>Expires</th>
+              <th>Views</th>
+              ${kind === "mesh" ? "<th>Download</th>" : ""}
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            ${shares
+              .map(
+                (s) => `<tr>
+                  <td class="mono"><a href="${escapeHtml(s.url)}" target="_blank" rel="noopener">${escapeHtml(s.code)}</a></td>
+                  <td>${s.expired ? '<span class="dim">expired</span>' : escapeHtml(new Date(s.expires_at).toLocaleString())}</td>
+                  <td>${s.views_count}</td>
+                  ${kind === "mesh" ? `<td>${s.can_download ? "yes" : "no"}</td>` : ""}
+                  <td class="row-actions">
+                    <button type="button" data-copy-share="${escapeHtml(s.url)}">Copy URL</button>
+                    <button type="button" class="danger" data-del-share="${s.id}">Revoke</button>
+                  </td>
+                </tr>`
+              )
+              .join("") || `<tr><td colspan="${kind === "mesh" ? 5 : 4}" class="dim">No active share links.</td></tr>`}
+          </tbody>
+        </table>
+
         <h2 style="margin-top:2em" id="danger-heading">Danger zone</h2>
         <button class="danger" id="delete-btn">Delete this ${KIND.label.toLowerCase()}</button>
       `;
+
+      document.getElementById("share-regen-btn").addEventListener("click", async () => {
+        const next = await api.suggestShareCode();
+        document.getElementById("share-code").value = next.suggested_code;
+      });
+
+      document.getElementById("share-create-btn").addEventListener("click", async () => {
+        const errBox = document.getElementById("share-error");
+        errBox.style.display = "none";
+        const code = document.getElementById("share-code").value.trim();
+        const expires_in_minutes = parseInt(document.getElementById("share-exp").value, 10);
+        const can_download = document.getElementById("share-cd")?.checked || false;
+        try {
+          const created = await api.createShare({
+            code,
+            asset_type: kind,
+            asset_id: Number(itemId),
+            expires_in_minutes,
+            can_download,
+          });
+          if (navigator.clipboard) {
+            navigator.clipboard.writeText(created.url).catch(() => {});
+          }
+          load();
+        } catch (err) {
+          errBox.textContent = err.message;
+          errBox.style.display = "block";
+        }
+      });
+
+      content.querySelectorAll("[data-copy-share]").forEach((btn) => {
+        btn.addEventListener("click", async () => {
+          try {
+            await navigator.clipboard.writeText(btn.dataset.copyShare);
+            btn.textContent = "Copied!";
+            setTimeout(() => { btn.textContent = "Copy URL"; }, 1200);
+          } catch (_) {}
+        });
+      });
+
+      content.querySelectorAll("[data-del-share]").forEach((btn) => {
+        btn.addEventListener("click", async () => {
+          await api.deleteShare(btn.dataset.delShare);
+          load();
+        });
+      });
 
       const thumbSectionHtml = `
         <h2 style="margin-top:2em">Thumbnail</h2>

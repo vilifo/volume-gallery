@@ -4,145 +4,198 @@
 const TOKEN_KEY = "vg_token";
 const ROLE_KEY = "vg_role";
 const USER_KEY = "vg_username";
+const SHARE_TOKEN_KEY = "vg_share_token";
+const SHARE_CODE_KEY = "vg_share_code";
 
-export function getToken() { return localStorage.getItem(TOKEN_KEY); }
-export function getRole() { return localStorage.getItem(ROLE_KEY); }
-export function getUsername() { return localStorage.getItem(USER_KEY); }
+// Consume #vg_st=<token>&vg_sc=<code> from /s/<code> redirect immediately on module load
+(function _consumeShareHash() {
+  if (typeof window === "undefined" || !window.location.hash.startsWith("#vg_st=")) return;
+  try {
+    const params = new URLSearchParams(window.location.hash.slice(1));
+    const st = params.get("vg_st");
+    const sc = params.get("vg_sc");
+    if (st) sessionStorage.setItem(SHARE_TOKEN_KEY, st);
+    if (sc) sessionStorage.setItem(SHARE_CODE_KEY, sc);
+    history.replaceState(null, "", window.location.pathname + window.location.search);
+  } catch (_) {}
+})();
+
+export function isGuestShareSession() {
+    return Boolean(sessionStorage.getItem(SHARE_TOKEN_KEY)) && !localStorage.getItem(TOKEN_KEY);
+}
+
+export function getShareToken() {
+    return sessionStorage.getItem(SHARE_TOKEN_KEY);
+}
+
+export function clearShareSession() {
+    sessionStorage.removeItem(SHARE_TOKEN_KEY);
+    sessionStorage.removeItem(SHARE_CODE_KEY);
+}
+
+export function getToken() {
+    // On viewer pages, if a scoped share session token is active, use it when no user is logged in
+    // (or prefer it if the URL was opened via a share link).
+    if (window.location.pathname.startsWith("/viewers/") && sessionStorage.getItem(SHARE_TOKEN_KEY)) {
+        return sessionStorage.getItem(SHARE_TOKEN_KEY);
+    }
+    return localStorage.getItem(TOKEN_KEY) || sessionStorage.getItem(SHARE_TOKEN_KEY);
+}
+
+export function getRole() {
+    return localStorage.getItem(ROLE_KEY) || (sessionStorage.getItem(SHARE_TOKEN_KEY) ? "guest" : null);
+}
+
+export function getUsername() {
+    return localStorage.getItem(USER_KEY) || (sessionStorage.getItem(SHARE_CODE_KEY) ? `shared:${sessionStorage.getItem(SHARE_CODE_KEY)}` : "guest");
+}
 
 export function setSession(token, role, username) {
-  localStorage.setItem(TOKEN_KEY, token);
-  localStorage.setItem(ROLE_KEY, role);
-  localStorage.setItem(USER_KEY, username);
+    localStorage.setItem(TOKEN_KEY, token);
+    localStorage.setItem(ROLE_KEY, role);
+    localStorage.setItem(USER_KEY, username);
 }
 
 export function clearZarrChunkCache() {
-  try {
-    if ("serviceWorker" in navigator && navigator.serviceWorker.controller) {
-      navigator.serviceWorker.controller.postMessage({ type: "CLEAR_ZARR_CACHE" });
-    }
-    if ("caches" in window) {
-      caches.keys().then((names) => {
-        for (const name of names) {
-          if (name.startsWith("vg-zarr-chunks-")) caches.delete(name);
+    try {
+        if ("serviceWorker" in navigator && navigator.serviceWorker.controller) {
+            navigator.serviceWorker.controller.postMessage({type: "CLEAR_ZARR_CACHE"});
         }
-      }).catch(() => {});
+        if ("caches" in window) {
+            caches.keys().then((names) => {
+                for (const name of names) {
+                    if (name.startsWith("vg-zarr-chunks-")) caches.delete(name);
+                }
+            }).catch(() => {
+            });
+        }
+    } catch (_) {
     }
-  } catch (_) {}
 }
 
 export function clearSession() {
-  localStorage.removeItem(TOKEN_KEY);
-  localStorage.removeItem(ROLE_KEY);
-  localStorage.removeItem(USER_KEY);
-  clearZarrChunkCache();
+    localStorage.removeItem(TOKEN_KEY);
+    localStorage.removeItem(ROLE_KEY);
+    localStorage.removeItem(USER_KEY);
+    clearShareSession();
+    clearZarrChunkCache();
 }
 
 // ---- branding (branding/branding.toml on the server; see the README) ----
 
 const DEFAULT_BRANDING = {
-  app_name: "Volume Gallery", tagline: "", about: "", organization: "", copyright: "",
-  logo_url: null, logo_dark_url: null, contact: {}, links: [],
+    app_name: "Volume Gallery", tagline: "", about: "", organization: "", copyright: "",
+    logo_url: null, logo_dark_url: null, contact: {}, links: [],
 };
 let brandingPromise = null;
 
 // Resolves with the branding (never rejects: falls back to the defaults). Cached per page.
 export function getBranding() {
-  if (!brandingPromise) {
-    brandingPromise = fetch("/api/branding", { cache: "no-cache" })
-      .then((res) => (res.ok ? res.json() : {}))
-      .catch(() => ({}))
-      .then((b) => ({ ...DEFAULT_BRANDING, ...b, contact: b.contact || {}, links: b.links || [] }));
-  }
-  return brandingPromise;
+    if (!brandingPromise) {
+        brandingPromise = fetch("/api/branding", {cache: "no-cache"})
+            .then((res) => (res.ok ? res.json() : {}))
+            .catch(() => ({}))
+            .then((b) => ({...DEFAULT_BRANDING, ...b, contact: b.contact || {}, links: b.links || []}));
+    }
+    return brandingPromise;
 }
 
 // Escapes text for use in HTML, including inside attribute values.
 export function escapeHtml(s) {
-  return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+    return String(s ?? "").replace(/[&<>"']/g, (c) => ({
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        '"': "&quot;",
+        "'": "&#39;"
+    }[c]));
 }
 
 // <img> tags for the logo: one, or a light and a dark one (shown according to the theme).
 export function brandLogoHtml(b, cls = "brand-logo") {
-  if (!b.logo_url) return "";
-  if (!b.logo_dark_url) return `<img class="${cls}" src="${escapeHtml(b.logo_url)}" alt="" />`;
-  return `<img class="${cls} logo-light" src="${escapeHtml(b.logo_url)}" alt="" />` +
-         `<img class="${cls} logo-dark" src="${escapeHtml(b.logo_dark_url)}" alt="" />`;
+    if (!b.logo_url) return "";
+    if (!b.logo_dark_url) return `<img class="${cls}" src="${escapeHtml(b.logo_url)}" alt="" />`;
+    return `<img class="${cls} logo-light" src="${escapeHtml(b.logo_url)}" alt="" />` +
+        `<img class="${cls} logo-dark" src="${escapeHtml(b.logo_dark_url)}" alt="" />`;
 }
 
 // Contact details as links/spans, one per item (the caller decides how to lay them out).
 export function contactItems(b) {
-  const c = b.contact || {};
-  const items = [];
-  if (c.email) items.push(`<a href="mailto:${escapeHtml(c.email)}">Contact</a>`);
-  if (c.phone) items.push(`<a href="tel:${escapeHtml(c.phone.replace(/[^+\d]/g, ""))}">Phone</a>`);
-  if (c.website) {
-    items.push(`<a href="${escapeHtml(c.website)}" target="_blank" rel="noopener noreferrer">Web</a>`);
-  }
-  if (c.address) items.push(`<span>${escapeHtml(c.address)}</span>`);
-  return items;
+    const c = b.contact || {};
+    const items = [];
+    if (c.email) items.push(`<a href="mailto:${escapeHtml(c.email)}">Contact</a>`);
+    if (c.phone) items.push(`<a href="tel:${escapeHtml(c.phone.replace(/[^+\d]/g, ""))}">Phone</a>`);
+    if (c.website) {
+        items.push(`<a href="${escapeHtml(c.website)}" target="_blank" rel="noopener noreferrer">Web</a>`);
+    }
+    if (c.address) items.push(`<span>${escapeHtml(c.address)}</span>`);
+    return items;
 }
 
 export function linkItems(b) {
-  return (b.links || []).map((l) =>
-    `<a href="${escapeHtml(l.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(l.label)}</a>`);
+    return (b.links || []).map((l) =>
+        `<a href="${escapeHtml(l.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(l.label)}</a>`);
 }
 
 // Puts the configured name and logo into the side rail and the page title.
 export async function applyBranding() {
-  const b = await getBranding();
-  const brand = document.querySelector(".rail .brand");
-  if (brand) brand.innerHTML = `<div class="brand-logos">${brandLogoHtml(b)}</div><span>${escapeHtml(b.app_name)}</span>`;
-  document.title = document.title.replace(/ \u2014 Volume Gallery$/, ` \u2014 ${b.app_name}`);
-  return b;
+    const b = await getBranding();
+    const brand = document.querySelector(".rail .brand");
+    if (brand) brand.innerHTML = `<div class="brand-logos">${brandLogoHtml(b)}</div><span>${escapeHtml(b.app_name)}</span>`;
+    document.title = document.title.replace(/ \u2014 Volume Gallery$/, ` \u2014 ${b.app_name}`);
+    return b;
 }
 
 // Login page URL that remembers the page the user was trying to reach (shared links!).
 export function loginUrl() {
-  const { pathname, search, hash } = window.location;
-  if (pathname.endsWith("/login.html")) return "/login.html";
-  return `/login.html?next=${encodeURIComponent(pathname + search + hash)}`;
+    const {pathname, search, hash} = window.location;
+    if (pathname.endsWith("/login.html")) return "/login.html";
+    return `/login.html?next=${encodeURIComponent(pathname + search + hash)}`;
 }
 
 // Where to go after signing in: the login URL's `next` parameter, but only if it points
 // into this app (otherwise a crafted link could send people to another site).
 export function postLoginUrl() {
-  const raw = new URLSearchParams(window.location.search).get("next");
-  if (!raw) return "/index.html";
-  try {
-    const url = new URL(raw, window.location.origin);
-    if (url.origin !== window.location.origin || url.pathname.endsWith("/login.html")) return "/index.html";
-    return url.pathname + url.search + url.hash;
-  } catch (_) {
-    return "/index.html";
-  }
+    const raw = new URLSearchParams(window.location.search).get("next");
+    if (!raw) return "/index.html";
+    try {
+        const url = new URL(raw, window.location.origin);
+        if (url.origin !== window.location.origin || url.pathname.endsWith("/login.html")) return "/index.html";
+        return url.pathname + url.search + url.hash;
+    } catch (_) {
+        return "/index.html";
+    }
 }
 
 export function requireLogin() {
-  if (!getToken()) {
-    window.location.href = loginUrl();
-    // Stop the page's own script here: it would otherwise carry on and, for pages that
-    // check the role next, replace this redirect with one to the gallery (losing the link).
-    throw new Error("Not signed in: redirecting to the login page");
-  }
+    if (!getToken()) {
+        window.location.href = loginUrl();
+        // Stop the page's own script here: it would otherwise carry on and, for pages that
+        // check the role next, replace this redirect with one to the gallery (losing the link).
+        throw new Error("Not signed in: redirecting to the login page");
+    }
 }
 
 async function request(path, options = {}) {
-  const headers = options.headers || {};
-  const token = getToken();
-  if (token) headers["Authorization"] = `Bearer ${token}`;
-  const res = await fetch(path, { ...options, headers });
-  if (res.status === 401) {
-    clearSession();
-    window.location.href = loginUrl();
-    throw new Error("Not authenticated");
-  }
-  if (!res.ok) {
-    let detail = res.statusText;
-    try { detail = (await res.json()).detail || detail; } catch (_) {}
-    throw new Error(detail);
-  }
-  const ct = res.headers.get("content-type") || "";
-  return ct.includes("application/json") ? res.json() : res;
+    const headers = options.headers || {};
+    const token = getToken();
+    if (token) headers["Authorization"] = `Bearer ${token}`;
+    const res = await fetch(path, {...options, headers});
+    if (res.status === 401) {
+        clearSession();
+        window.location.href = loginUrl();
+        throw new Error("Not authenticated");
+    }
+    if (!res.ok) {
+        let detail = res.statusText;
+        try {
+            detail = (await res.json()).detail || detail;
+        } catch (_) {
+        }
+        throw new Error(detail);
+    }
+    const ct = res.headers.get("content-type") || "";
+    return ct.includes("application/json") ? res.json() : res;
 }
 
 // XHR-based (not fetch) specifically to get real upload-progress events —
@@ -153,172 +206,244 @@ async function request(path, options = {}) {
 // in a background task after this request already returned). Shared by
 // volumes/meshes/point clouds — same upload shape for all three.
 function _uploadWithProgress(path, formData, onProgress) {
-  return new Promise((resolve, reject) => {
-    const xhr = new XMLHttpRequest();
-    xhr.open("POST", path);
-    const token = getToken();
-    if (token) xhr.setRequestHeader("Authorization", `Bearer ${token}`);
-    xhr.upload.addEventListener("progress", (evt) => {
-      if (evt.lengthComputable && onProgress) onProgress(evt.loaded / evt.total);
+    return new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open("POST", path);
+        const token = getToken();
+        if (token) xhr.setRequestHeader("Authorization", `Bearer ${token}`);
+        xhr.upload.addEventListener("progress", (evt) => {
+            if (evt.lengthComputable && onProgress) onProgress(evt.loaded / evt.total);
+        });
+        xhr.addEventListener("load", () => {
+            if (xhr.status === 401) {
+                clearSession();
+                window.location.href = loginUrl();
+                reject(new Error("Not authenticated"));
+                return;
+            }
+            let data = null;
+            try {
+                data = JSON.parse(xhr.responseText);
+            } catch (_) {
+            }
+            if (xhr.status >= 200 && xhr.status < 300) {
+                resolve(data);
+            } else {
+                reject(new Error((data && data.detail) || xhr.statusText || "Upload failed"));
+            }
+        });
+        xhr.addEventListener("error", () => reject(new Error("Network error during upload")));
+        xhr.addEventListener("abort", () => reject(new Error("Upload cancelled")));
+        xhr.send(formData);
     });
-    xhr.addEventListener("load", () => {
-      if (xhr.status === 401) {
-        clearSession();
-        window.location.href = loginUrl();
-        reject(new Error("Not authenticated"));
-        return;
-      }
-      let data = null;
-      try { data = JSON.parse(xhr.responseText); } catch (_) {}
-      if (xhr.status >= 200 && xhr.status < 300) {
-        resolve(data);
-      } else {
-        reject(new Error((data && data.detail) || xhr.statusText || "Upload failed"));
-      }
-    });
-    xhr.addEventListener("error", () => reject(new Error("Network error during upload")));
-    xhr.addEventListener("abort", () => reject(new Error("Upload cancelled")));
-    xhr.send(formData);
-  });
 }
 
 // URL segment of each asset kind's API (used by the kind-agnostic thumbnail calls)
-const ASSET_API = { volume: "volumes", mesh: "meshes", pointcloud: "pointclouds" };
+const ASSET_API = {volume: "volumes", mesh: "meshes", pointcloud: "pointclouds"};
 
 export const api = {
-  async login(username, password) {
-    const body = new URLSearchParams({ username, password });
-    const res = await fetch("/api/auth/login", { method: "POST", body });
-    if (!res.ok) {
-      let detail = "Login failed";
-      try { detail = (await res.json()).detail || detail; } catch (_) {}
-      throw new Error(detail);
-    }
-    return res.json();
-  },
+    async login(username, password) {
+        const body = new URLSearchParams({username, password});
+        const res = await fetch("/api/auth/login", {method: "POST", body});
+        if (!res.ok) {
+            let detail = "Login failed";
+            try {
+                detail = (await res.json()).detail || detail;
+            } catch (_) {
+            }
+            throw new Error(detail);
+        }
+        return res.json();
+    },
 
-  me() { return request("/api/users/me"); },
-  // Changes the signed-in user's own password. Resolves with a fresh token (the old one
-  // is revoked by the server): pass it to setSession() to stay signed in.
-  changePassword(currentPassword, newPassword) {
-    return request("/api/users/me/password", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }),
-    });
-  },
+    me() {
+        return request("/api/users/me");
+    },
+    // Changes the signed-in user's own password. Resolves with a fresh token (the old one
+    // is revoked by the server): pass it to setSession() to stay signed in.
+    changePassword(currentPassword, newPassword) {
+        return request("/api/users/me/password", {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({current_password: currentPassword, new_password: newPassword}),
+        });
+    },
 
-  // thumbnails — kind is "volume" | "mesh" | "pointcloud"
-  uploadThumbnail(kind, id, file) {
-    const fd = new FormData();
-    fd.append("thumbnail_file", file);
-    return request(`/api/${ASSET_API[kind]}/${id}/thumbnail`, { method: "POST", body: fd });
-  },
-  deleteThumbnail(kind, id) {
-    return request(`/api/${ASSET_API[kind]}/${id}/thumbnail`, { method: "DELETE" });
-  },
-  // <img> cannot send the Authorization header, so the image is fetched and handed out as a
-  // blob: URL. Resolves with null when the asset has no (readable) thumbnail.
-  async thumbnailUrl(kind, id) {
-    try {
-      const res = await request(`/api/${ASSET_API[kind]}/${id}/thumbnail`);
-      return URL.createObjectURL(await res.blob());
-    } catch (_) {
-      return null;
-    }
-  },
+    // thumbnails — kind is "volume" | "mesh" | "pointcloud"
+    uploadThumbnail(kind, id, file) {
+        const fd = new FormData();
+        fd.append("thumbnail_file", file);
+        return request(`/api/${ASSET_API[kind]}/${id}/thumbnail`, {method: "POST", body: fd});
+    },
+    deleteThumbnail(kind, id) {
+        return request(`/api/${ASSET_API[kind]}/${id}/thumbnail`, {method: "DELETE"});
+    },
+    // <img> cannot send the Authorization header, so the image is fetched and handed out as a
+    // blob: URL. Resolves with null when the asset has no (readable) thumbnail.
+    async thumbnailUrl(kind, id) {
+        try {
+            const res = await request(`/api/${ASSET_API[kind]}/${id}/thumbnail`);
+            return URL.createObjectURL(await res.blob());
+        } catch (_) {
+            return null;
+        }
+    },
 
-  // volumes
-  listVolumes() { return request("/api/volumes"); },
-  getVolume(id) { return request(`/api/volumes/${id}`); },
-  // XHR-based (not fetch) specifically to get real upload-progress events —
-  // see _uploadWithProgress above for why.
-  createVolumeWithProgress(formData, onProgress) {
-    return _uploadWithProgress("/api/volumes", formData, onProgress);
-  },
-  deleteVolume(id) { return request(`/api/volumes/${id}`, { method: "DELETE" }); },
-  uploadMesh(id, formData) {
-    return request(`/api/volumes/${id}/mesh`, { method: "POST", body: formData });
-  },
-  zarrAccessUrl(id, minLevel) {
-    const qs = minLevel != null ? `?min_level=${encodeURIComponent(minLevel)}` : "";
-    return request(`/api/volumes/${id}/zarr-access-url${qs}`);
-  },
-  // Signed base URL for the slice views: one finished plane per request (backend/app/helpers/slices.py)
-  sliceAccessUrl(id) { return request(`/api/volumes/${id}/slice-access-url`); },
-  meshAccessUrl(id) { return request(`/api/volumes/${id}/mesh-access-url`); },
-  volumeMeshViewUrl(id) { return request(`/api/volumes/${id}/mesh-view-url`); },
-  listAccess(id) { return request(`/api/volumes/${id}/access`); },
-  grantAccess(id, userId, canDownload) {
-    return request(`/api/volumes/${id}/access`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ user_id: userId, can_download: !!canDownload }),
-    });
-  },
-  revokeAccess(id, userId) {
-    return request(`/api/volumes/${id}/access/${userId}`, { method: "DELETE" });
-  },
+    // share links (editor / admin)
+    suggestShareCode() {
+        return request("/api/shares/suggest");
+    },
+    listShares(assetType, assetId) {
+        const q = new URLSearchParams();
+        if (assetType) q.set("asset_type", assetType);
+        if (assetId != null) q.set("asset_id", String(assetId));
+        return request(`/api/shares?${q.toString()}`);
+    },
+    createShare(payload) {
+        return request("/api/shares", {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify(payload),
+        });
+    },
+    deleteShare(shareId) {
+        return request(`/api/shares/${shareId}`, {method: "DELETE"});
+    },
 
-  // meshes
-  listMeshes() { return request("/api/meshes"); },
-  getMesh(id) { return request(`/api/meshes/${id}`); },
-  createMeshWithProgress(formData, onProgress) {
-    return _uploadWithProgress("/api/meshes", formData, onProgress);
-  },
-  deleteMesh(id) { return request(`/api/meshes/${id}`, { method: "DELETE" }); },
-  meshNxzAccessUrl(id) { return request(`/api/meshes/${id}/mesh-access-url`); },
-  meshDownloadAccessUrl(id) { return request(`/api/meshes/${id}/download-access-url`); },
-  listMeshAccess(id) { return request(`/api/meshes/${id}/access`); },
-  grantMeshAccess(id, userId, canDownload) {
-    return request(`/api/meshes/${id}/access`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ user_id: userId, can_download: !!canDownload }),
-    });
-  },
-  revokeMeshAccess(id, userId) {
-    return request(`/api/meshes/${id}/access/${userId}`, { method: "DELETE" });
-  },
 
-  // point clouds
-  listPointClouds() { return request("/api/pointclouds"); },
-  getPointCloud(id) { return request(`/api/pointclouds/${id}`); },
-  createPointCloudWithProgress(formData, onProgress) {
-    return _uploadWithProgress("/api/pointclouds", formData, onProgress);
-  },
-  deletePointCloud(id) { return request(`/api/pointclouds/${id}`, { method: "DELETE" }); },
-  pointCloudOctreeAccessUrl(id) { return request(`/api/pointclouds/${id}/octree-access-url`); },
-  pointCloudDownloadAccessUrl(id) { return request(`/api/pointclouds/${id}/download-access-url`); },
-  listPointCloudAccess(id) { return request(`/api/pointclouds/${id}/access`); },
-  grantPointCloudAccess(id, userId, canDownload) {
-    return request(`/api/pointclouds/${id}/access`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ user_id: userId, can_download: !!canDownload }),
-    });
-  },
-  revokePointCloudAccess(id, userId) {
-    return request(`/api/pointclouds/${id}/access/${userId}`, { method: "DELETE" });
-  },
+    // volumes
+    listVolumes() {
+        return request("/api/volumes");
+    },
+    getVolume(id) {
+        return request(`/api/volumes/${id}`);
+    },
+    // XHR-based (not fetch) specifically to get real upload-progress events —
+    // see _uploadWithProgress above for why.
+    createVolumeWithProgress(formData, onProgress) {
+        return _uploadWithProgress("/api/volumes", formData, onProgress);
+    },
+    deleteVolume(id) {
+        return request(`/api/volumes/${id}`, {method: "DELETE"});
+    },
+    uploadMesh(id, formData) {
+        return request(`/api/volumes/${id}/mesh`, {method: "POST", body: formData});
+    },
+    zarrAccessUrl(id, minLevel) {
+        const qs = minLevel != null ? `?min_level=${encodeURIComponent(minLevel)}` : "";
+        return request(`/api/volumes/${id}/zarr-access-url${qs}`);
+    },
+    // Signed base URL for the slice views: one finished plane per request (backend/app/helpers/slices.py)
+    sliceAccessUrl(id) {
+        return request(`/api/volumes/${id}/slice-access-url`);
+    },
+    meshAccessUrl(id) {
+        return request(`/api/volumes/${id}/mesh-access-url`);
+    },
+    volumeMeshViewUrl(id) {
+        return request(`/api/volumes/${id}/mesh-view-url`);
+    },
+    listAccess(id) {
+        return request(`/api/volumes/${id}/access`);
+    },
+    grantAccess(id, userId, canDownload) {
+        return request(`/api/volumes/${id}/access`, {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({user_id: userId, can_download: !!canDownload}),
+        });
+    },
+    revokeAccess(id, userId) {
+        return request(`/api/volumes/${id}/access/${userId}`, {method: "DELETE"});
+    },
 
-  // users (admin)
-  listUsers() { return request("/api/users"); },
-  createUser(payload) {
-    return request("/api/users", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
-  },
-  updateUser(id, payload) {
-    return request(`/api/users/${id}`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
-  },
-  deleteUser(id) { return request(`/api/users/${id}`, { method: "DELETE" }); },
+    // meshes
+    listMeshes() {
+        return request("/api/meshes");
+    },
+    getMesh(id) {
+        return request(`/api/meshes/${id}`);
+    },
+    createMeshWithProgress(formData, onProgress) {
+        return _uploadWithProgress("/api/meshes", formData, onProgress);
+    },
+    deleteMesh(id) {
+        return request(`/api/meshes/${id}`, {method: "DELETE"});
+    },
+    meshNxzAccessUrl(id) {
+        return request(`/api/meshes/${id}/mesh-access-url`);
+    },
+    meshDownloadAccessUrl(id) {
+        return request(`/api/meshes/${id}/download-access-url`);
+    },
+    listMeshAccess(id) {
+        return request(`/api/meshes/${id}/access`);
+    },
+    grantMeshAccess(id, userId, canDownload) {
+        return request(`/api/meshes/${id}/access`, {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({user_id: userId, can_download: !!canDownload}),
+        });
+    },
+    revokeMeshAccess(id, userId) {
+        return request(`/api/meshes/${id}/access/${userId}`, {method: "DELETE"});
+    },
+
+    // point clouds
+    listPointClouds() {
+        return request("/api/pointclouds");
+    },
+    getPointCloud(id) {
+        return request(`/api/pointclouds/${id}`);
+    },
+    createPointCloudWithProgress(formData, onProgress) {
+        return _uploadWithProgress("/api/pointclouds", formData, onProgress);
+    },
+    deletePointCloud(id) {
+        return request(`/api/pointclouds/${id}`, {method: "DELETE"});
+    },
+    pointCloudOctreeAccessUrl(id) {
+        return request(`/api/pointclouds/${id}/octree-access-url`);
+    },
+    pointCloudDownloadAccessUrl(id) {
+        return request(`/api/pointclouds/${id}/download-access-url`);
+    },
+    listPointCloudAccess(id) {
+        return request(`/api/pointclouds/${id}/access`);
+    },
+    grantPointCloudAccess(id, userId, canDownload) {
+        return request(`/api/pointclouds/${id}/access`, {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({user_id: userId, can_download: !!canDownload}),
+        });
+    },
+    revokePointCloudAccess(id, userId) {
+        return request(`/api/pointclouds/${id}/access/${userId}`, {method: "DELETE"});
+    },
+
+    // users (admin)
+    listUsers() {
+        return request("/api/users");
+    },
+    createUser(payload) {
+        return request("/api/users", {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify(payload),
+        });
+    },
+    updateUser(id, payload) {
+        return request(`/api/users/${id}`, {
+            method: "PATCH",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify(payload),
+        });
+    },
+    deleteUser(id) {
+        return request(`/api/users/${id}`, {method: "DELETE"});
+    },
 };
 
 // Theme preference: "light" | "dark" | absent (= follow the OS setting).
@@ -326,65 +451,68 @@ export const api = {
 const THEME_KEY = "vg_theme";
 
 export function getThemePref() {
-  const v = localStorage.getItem(THEME_KEY);
-  return v === "light" || v === "dark" ? v : "system";
+    const v = localStorage.getItem(THEME_KEY);
+    return v === "light" || v === "dark" ? v : "system";
 }
 
 export function setThemePref(pref) {
-  if (pref === "light" || pref === "dark") {
-    localStorage.setItem(THEME_KEY, pref);
-    document.documentElement.dataset.theme = pref;
-  } else {
-    localStorage.removeItem(THEME_KEY);
-    delete document.documentElement.dataset.theme;
-  }
+    if (pref === "light" || pref === "dark") {
+        localStorage.setItem(THEME_KEY, pref);
+        document.documentElement.dataset.theme = pref;
+    } else {
+        localStorage.removeItem(THEME_KEY);
+        delete document.documentElement.dataset.theme;
+    }
 }
 
 const THEME_ORDER = ["light", "system", "dark"]; // switch positions, left to right
 
 export function wireTheme() {
-  const sw = document.querySelector(".theme-switch");
-  if (!sw) return;
-  const buttons = [...sw.querySelectorAll("button[data-theme-pref]")];
-  const sync = () => {
-    const cur = getThemePref();
-    sw.dataset.pos = String(THEME_ORDER.indexOf(cur));
-    buttons.forEach((b) => {
-      const on = b.dataset.themePref === cur;
-      b.setAttribute("aria-checked", String(on));
-      b.tabIndex = on ? 0 : -1;
+    const sw = document.querySelector(".theme-switch");
+    if (!sw) return;
+    const buttons = [...sw.querySelectorAll("button[data-theme-pref]")];
+    const sync = () => {
+        const cur = getThemePref();
+        sw.dataset.pos = String(THEME_ORDER.indexOf(cur));
+        buttons.forEach((b) => {
+            const on = b.dataset.themePref === cur;
+            b.setAttribute("aria-checked", String(on));
+            b.tabIndex = on ? 0 : -1;
+        });
+    };
+    const choose = (pref) => {
+        setThemePref(pref);
+        sync();
+    };
+    buttons.forEach((b) => b.addEventListener("click", () => choose(b.dataset.themePref)));
+    sw.addEventListener("keydown", (e) => {
+        const step = e.key === "ArrowRight" || e.key === "ArrowDown" ? 1
+            : e.key === "ArrowLeft" || e.key === "ArrowUp" ? -1 : 0;
+        if (!step) return;
+        e.preventDefault();
+        const i = (THEME_ORDER.indexOf(getThemePref()) + step + THEME_ORDER.length) % THEME_ORDER.length;
+        choose(THEME_ORDER[i]);
+        buttons[i].focus();
     });
-  };
-  const choose = (pref) => { setThemePref(pref); sync(); };
-  buttons.forEach((b) => b.addEventListener("click", () => choose(b.dataset.themePref)));
-  sw.addEventListener("keydown", (e) => {
-    const step = e.key === "ArrowRight" || e.key === "ArrowDown" ? 1
-      : e.key === "ArrowLeft" || e.key === "ArrowUp" ? -1 : 0;
-    if (!step) return;
-    e.preventDefault();
-    const i = (THEME_ORDER.indexOf(getThemePref()) + step + THEME_ORDER.length) % THEME_ORDER.length;
-    choose(THEME_ORDER[i]);
-    buttons[i].focus();
-  });
-  sync();
+    sync();
 }
 
 export function renderShell(activePage, role, username) {
-  const navItems = [{ href: "/index.html", label: "Gallery", key: "gallery" }];
-  if (role === "editor" || role === "admin") {
-    navItems.push({ href: "/upload.html", label: "Upload", key: "upload" });
-  }
-  if (role === "admin") {
-    navItems.push({ href: "/admin.html", label: "Users", key: "admin" });
-  }
-  navItems.push({ href: "/account.html", label: "Account", key: "account" });
-  const nav = navItems
-    .map(
-      (item) =>
-        `<a href="${item.href}" class="${item.key === activePage ? "active" : ""}">${item.label}</a>`
-    )
-    .join("");
-  return `
+    const navItems = [{href: "/index.html", label: "Gallery", key: "gallery"}];
+    if (role === "editor" || role === "admin") {
+        navItems.push({href: "/upload.html", label: "Upload", key: "upload"});
+    }
+    if (role === "admin") {
+        navItems.push({href: "/admin.html", label: "Users", key: "admin"});
+    }
+    navItems.push({href: "/account.html", label: "Account", key: "account"});
+    const nav = navItems
+        .map(
+            (item) =>
+                `<a href="${item.href}" class="${item.key === activePage ? "active" : ""}">${item.label}</a>`
+        )
+        .join("");
+    return `
     <div class="rail">
       <div class="rail-top">
         <div class="rail-id">
@@ -417,21 +545,21 @@ export function renderShell(activePage, role, username) {
 }
 
 export function wireLogout() {
-  wireTheme(); // every page that renders the shell already calls this
-  applyBranding();
-  // On phones the side rail is a top bar whose menu opens with this button.
-  const rail = document.querySelector(".rail");
-  const toggle = document.querySelector(".rail-toggle");
-  if (rail && toggle) {
-    toggle.addEventListener("click", () => {
-      toggle.setAttribute("aria-expanded", String(rail.classList.toggle("open")));
-    });
-  }
-  const btn = document.getElementById("logout-btn");
-  if (btn) {
-    btn.addEventListener("click", () => {
-      clearSession();
-      window.location.href = "/login.html";
-    });
-  }
+    wireTheme(); // every page that renders the shell already calls this
+    applyBranding();
+    // On phones the side rail is a top bar whose menu opens with this button.
+    const rail = document.querySelector(".rail");
+    const toggle = document.querySelector(".rail-toggle");
+    if (rail && toggle) {
+        toggle.addEventListener("click", () => {
+            toggle.setAttribute("aria-expanded", String(rail.classList.toggle("open")));
+        });
+    }
+    const btn = document.getElementById("logout-btn");
+    if (btn) {
+        btn.addEventListener("click", () => {
+            clearSession();
+            window.location.href = "/login.html";
+        });
+    }
 }

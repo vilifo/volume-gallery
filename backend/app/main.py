@@ -10,7 +10,7 @@ from .security import hash_password
 from .config import settings
 from . import workdir
 from .utils import _now
-from .routers import auth, users, volumes, meshes, pointclouds, branding
+from .routers import auth, users, volumes, meshes, pointclouds, branding, shares
 
 
 def _bootstrap_admin():
@@ -78,6 +78,7 @@ app.include_router(users.router)
 app.include_router(volumes.router)
 app.include_router(meshes.router)
 app.include_router(pointclouds.router)
+app.include_router(shares.router)
 
 # Serve the frontend (single-page-ish static site) at the root.
 app.mount("/", StaticFiles(directory=settings.FRONTEND_DIR, html=True), name="frontend")

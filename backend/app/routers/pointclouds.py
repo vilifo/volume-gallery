@@ -35,6 +35,9 @@ def _work_dir(slug: str) -> Path:
 def _can_see_pointcloud(user: User, pc: PointCloud, session: Session) -> bool:
     if user.role in (Role.admin, Role.editor):
         return True
+    scope = getattr(user, "_share_scope", None)
+    if scope is not None:
+        return scope["asset_type"] == "pointcloud" and scope["asset_id"] == pc.id
     grant = session.exec(
         select(PointCloudAccess).where(PointCloudAccess.user_id == user.id, PointCloudAccess.pointcloud_id == pc.id)
     ).first()
