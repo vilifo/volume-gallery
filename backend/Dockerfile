@@ -40,17 +40,19 @@ RUN git clone --depth 1 --branch 2025.07 https://github.com/cnr-isti-vclab/vcgli
     && ldd /opt/nexus/bin/nxsbuild /opt/nexus/bin/nxscompress | awk '/=> \//{print $3}' \
        | grep -v -E '/lib(c|m)\.so' | sort -u | xargs -I{} cp -L {} /opt/nexus/lib/
 
-# kiln-render: pinned npm release + our patch (backend/kiln-patches). Its own
-# stage so it is cached independently and never depends on what happens to be
-# in frontend/vendor. The patch lifts the 10-slots-per-axis atlas cap.
-FROM python:3.12-slim AS kiln
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates git wget \
+# kiln-render: built from the v0.5.0 GitHub tag + our patch (backend/kiln-patches).
+# Its own stage so it is cached independently and never depends on what happens to
+# be in frontend/vendor. The patch lifts the 10-slots-per-axis atlas cap.
+FROM oven/bun:1-debian AS kiln
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates git wget unzip \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /kiln
-RUN wget -q https://registry.npmjs.org/kiln-render/-/kiln-render-0.5.0.tgz -O kiln-render.tgz \
-    && echo "c010380899828175fc685b691d693280c5cb086e0f73f3da2a60401e31435673  kiln-render.tgz" | sha256sum -c - \
-    && tar -xzf kiln-render.tgz --strip-components=1 package/lib/kiln-render.js \
-    && rm kiln-render.tgz
+RUN wget -q "https://github.com/MPanknin/kiln-render/archive/refs/tags/v0.5.0.zip" -O kiln-render.zip \
+    && unzip -q kiln-render.zip \
+    && mv kiln-render-0.5.0/* kiln-render-0.5.0/.[!.]* . 2>/dev/null || true \
+    && rm -rf kiln-render-0.5.0 kiln-render.zip \
+    && bun install --frozen-lockfile \
+    && bun run build:lib
 COPY backend/kiln-patches /tmp/kiln-patches
 RUN sed -i 's/\r$//' /tmp/kiln-patches/*.patch \
     && git apply --ignore-whitespace /tmp/kiln-patches/*.patch \
