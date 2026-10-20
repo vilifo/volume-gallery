@@ -329,6 +329,14 @@ export const api = {
     uploadMesh(id, formData) {
         return request(`/api/volumes/${id}/mesh`, {method: "POST", body: formData});
     },
+    // The volume's intensity histogram (JSON), or null when it has none yet.
+    async volumeHistogram(id) {
+        try {
+            return await (await request(`/api/volumes/${id}/histogram`)).json();
+        } catch (_) {
+            return null;
+        }
+    },
     zarrAccessUrl(id, minLevel) {
         const qs = minLevel != null ? `?min_level=${encodeURIComponent(minLevel)}` : "";
         return request(`/api/volumes/${id}/zarr-access-url${qs}`);

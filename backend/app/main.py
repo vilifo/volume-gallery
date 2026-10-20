@@ -1,5 +1,5 @@
 from contextlib import asynccontextmanager
-
+import threading
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from sqlmodel import Session, select
@@ -66,6 +66,8 @@ async def lifespan(app: FastAPI):
     init_db()
     _bootstrap_admin()
     _recover_interrupted_jobs()
+    if settings.HISTOGRAM_BACKFILL:  # not on the startup path: a big volume can take minutes
+        threading.Thread(target=volumes.backfill_missing_histograms, name="histogram-backfill", daemon=True).start()
     print(f"[volume-gallery] Processing uploads in {settings.PROCESSING_DIR}; results are stored in {settings.DATA_DIR}.")
     yield
 

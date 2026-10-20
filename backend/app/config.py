@@ -36,6 +36,11 @@ class Settings:
     # Largest accepted thumbnail upload (png / jpeg / webp)
     THUMBNAIL_MAX_MB: int = int(os.environ.get("VG_THUMBNAIL_MAX_MB", "5"))
 
+    # Histograms (transfer function backdrop): threads used for the computation, and whether
+    # volumes that lack one get it computed in the background at start-up.
+    HISTOGRAM_THREADS: int = int(os.environ.get("VG_HISTOGRAM_THREADS", str(min(4, os.cpu_count() or 2))))
+    HISTOGRAM_BACKFILL: bool = os.environ.get("VG_HISTOGRAM_BACKFILL", "1").lower() not in ("0", "false", "no", "off")
+
     # Folder with branding.toml and the logo files (see branding/branding.toml). The default is
     # <repo>/branding, which is /branding inside the Docker image.
     BRANDING_DIR: Path = Path(os.environ.get("VG_BRANDING_DIR") or Path(__file__).resolve().parents[2] / "branding")
