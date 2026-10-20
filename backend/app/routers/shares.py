@@ -84,14 +84,14 @@ def _share_read(s: ShareLink, request: Request) -> ShareLinkRead:
         url=f"{base}/s/{s.code}",
         asset_type=s.asset_type,
         asset_id=s.asset_id,
-        view_query=s.view_query or "",
-        can_download=s.can_download,
-        min_lod=s.min_lod,
-        created_at=_as_utc(s.created_at).isoformat(),
+        view_query=getattr(s, "view_query", "") or "",
+        can_download=bool(getattr(s, "can_download", False)),
+        min_lod=getattr(s, "min_lod", None),
+        created_at=s.created_at.isoformat(),
         expires_at=exp.isoformat(),
-        revoked=s.revoked,
+        revoked=bool(getattr(s, "revoked", False)),
         expired=exp <= now,
-        views_count=s.views_count,
+        views_count=int(getattr(s, "views_count", 0) or 0),
     )
 
 

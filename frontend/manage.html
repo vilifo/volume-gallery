@@ -163,18 +163,31 @@
           </thead>
           <tbody>
             ${shares
-              .map(
-                (s) => `<tr>
-                  <td class="mono"><a href="${escapeHtml(s.url)}" target="_blank" rel="noopener">${escapeHtml(s.code)}</a></td>
-                  <td>${s.expired ? '<span class="dim">expired</span>' : escapeHtml(new Date(s.expires_at).toLocaleString())}</td>
-                  <td>${s.views_count}</td>
+              .map((s) => {
+                const rawExp = s.expires_at ?? s.expiresAt ?? s.exp;
+                const expDate = rawExp
+                  ? new Date(typeof rawExp === "number" && rawExp < 1e12 ? rawExp * 1000 : rawExp)
+                  : null;
+                const expValid = expDate && !Number.isNaN(expDate.getTime());
+                const isExpired = s.expired ?? (expValid && expDate.getTime() <= Date.now());
+                const expLabel = isExpired
+                  ? '<span class="dim">expired</span>'
+                  : expValid
+                    ? escapeHtml(expDate.toLocaleString())
+                    : '<span class="dim">—</span>';
+                const views = s.views_count ?? s.views ?? 0;
+
+                return `<tr>
+                  <td class="mono"><a href="${escapeHtml(s.url || `/s/${s.code}`)}" target="_blank" rel="noopener">${escapeHtml(s.code)}</a></td>
+                  <td>${expLabel}</td>
+                  <td>${Number(views)}</td>
                   ${kind === "mesh" ? `<td>${s.can_download ? "yes" : "no"}</td>` : ""}
                   <td class="row-actions">
-                    <button type="button" data-copy-share="${escapeHtml(s.url)}">Copy URL</button>
+                    <button type="button" data-copy-share="${escapeHtml(s.url || `${window.location.origin}/s/${s.code}`)}">Copy URL</button>
                     <button type="button" class="danger" data-del-share="${s.id}">Revoke</button>
                   </td>
-                </tr>`
-              )
+                </tr>`;
+              })
               .join("") || `<tr><td colspan="${kind === "mesh" ? 5 : 4}" class="dim">No active share links.</td></tr>`}
           </tbody>
         </table>

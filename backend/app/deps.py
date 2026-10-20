@@ -43,7 +43,7 @@ def get_current_user(
                 id = -1,
             username = f"guest:{share.code}",
             password_hash = "",
-            role = Role.reader,
+            role = Role.guest,
             disabled = False,
         )
         guest.__dict__["_share_scope"] = {

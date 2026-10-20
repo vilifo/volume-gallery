@@ -110,7 +110,11 @@ class ShareLinkRead(BaseModel):
     url: str
     asset_type: str
     asset_id: int
-    view_query: str
-    can_download: bool
+    view_query: str = ""
+    can_download: bool = False
     min_lod: Optional[int] = None
     created_at: str
+    expires_at: str
+    revoked: bool = False
+    expired: bool = False
+    views_count: int = 0

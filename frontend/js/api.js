@@ -6,6 +6,7 @@ const ROLE_KEY = "vg_role";
 const USER_KEY = "vg_username";
 const SHARE_TOKEN_KEY = "vg_share_token";
 const SHARE_CODE_KEY = "vg_share_code";
+const RAIL_COLLAPSED_KEY = "vg_rail_collapsed";
 
 // Consume #vg_st=<token>&vg_sc=<code> from /s/<code> redirect immediately on module load
 (function _consumeShareHash() {
@@ -87,6 +88,14 @@ const DEFAULT_BRANDING = {
     app_name: "Volume Gallery", tagline: "", about: "", organization: "", copyright: "",
     logo_url: null, logo_dark_url: null, contact: {}, links: [],
 };
+
+const NAV_ICONS = {
+  gallery: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/></svg>`,
+  upload: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>`,
+  admin: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>`,
+  account: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>`,
+};
+
 let brandingPromise = null;
 
 // Resolves with the branding (never rejects: falls back to the defaults). Cached per page.
@@ -139,11 +148,17 @@ export function linkItems(b) {
 
 // Puts the configured name and logo into the side rail and the page title.
 export async function applyBranding() {
-    const b = await getBranding();
-    const brand = document.querySelector(".rail .brand");
-    if (brand) brand.innerHTML = `<div class="brand-logos">${brandLogoHtml(b)}</div><span>${escapeHtml(b.app_name)}</span>`;
-    document.title = document.title.replace(/ \u2014 Volume Gallery$/, ` \u2014 ${b.app_name}`);
-    return b;
+  const b = await getBranding();
+  const brand = document.querySelector(".rail .brand");
+  if (brand) {
+    const logos = brandLogoHtml(b);
+    const fallbackMonogram = !logos
+      ? `<span class="brand-monogram">${escapeHtml((b.app_name || "V").slice(0, 1).toUpperCase())}</span>`
+      : "";
+    brand.innerHTML = `<div class="brand-logos">${logos}${fallbackMonogram}</div><span class="brand-text">${escapeHtml(b.app_name)}</span>`;
+  }
+  document.title = document.title.replace(/ \u2014 Volume Gallery$/, ` \u2014 ${b.app_name}`);
+  return b;
 }
 
 // Login page URL that remembers the page the user was trying to reach (shared links!).
@@ -506,68 +521,121 @@ export function wireTheme() {
 }
 
 export function renderShell(activePage, role, username) {
-    const navItems = [{href: "/index.html", label: "Gallery", key: "gallery"}];
-    if (role === "editor" || role === "admin") {
-        navItems.push({href: "/upload.html", label: "Upload", key: "upload"});
-    }
-    if (role === "admin") {
-        navItems.push({href: "/admin.html", label: "Users", key: "admin"});
-    }
-    navItems.push({href: "/account.html", label: "Account", key: "account"});
-    const nav = navItems
-        .map(
-            (item) =>
-                `<a href="${item.href}" class="${item.key === activePage ? "active" : ""}">${item.label}</a>`
-        )
-        .join("");
-    return `
-    <div class="rail">
+    if (role !== "guest") {
+        const navItems = [{href: "/index.html", label: "Gallery", key: "gallery"}];
+        if (role === "editor" || role === "admin") {
+            navItems.push({href: "/upload.html", label: "Upload", key: "upload"});
+        }
+        if (role === "admin") {
+            navItems.push({href: "/admin.html", label: "Users", key: "admin"});
+        }
+        navItems.push({href: "/account.html", label: "Account", key: "account"});
+
+        const nav = navItems
+            .map(
+                (item) =>
+                    `<a href="${item.href}" class="${activePage === item.key ? "active" : ""}" title="${item.label}">
+          <span class="nav-icon">${NAV_ICONS[item.key] || ""}</span>
+          <span class="nav-label">${item.label}</span>
+        </a>`
+            )
+            .join("");
+        const isCollapsed = localStorage.getItem(RAIL_COLLAPSED_KEY) === "1";
+
+  return `
+    <div class="rail${isCollapsed ? " collapsed" : ""}">
       <div class="rail-top">
         <div class="rail-id">
-          <div class="brand">Volume Gallery</div>
+          <div class="brand"><span class="brand-text">Volume Gallery</span></div>
           <div class="role-tag">${role}</div>
         </div>
+        <button type="button" class="rail-collapse-btn" id="rail-collapse-btn" title="${isCollapsed ? "Expand sidebar" : "Minimize sidebar"}" aria-label="Toggle sidebar">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <polyline points="15 18 9 12 15 6"/>
+          </svg>
+        </button>
         <button type="button" class="rail-toggle" aria-label="Menu" aria-expanded="false" aria-controls="rail-menu">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
         </button>
       </div>
       <div class="rail-menu" id="rail-menu">
-      <nav>${nav}</nav>
-      <div class="spacer"></div>
-      <div class="theme-switch" role="radiogroup" aria-label="Theme" data-pos="1">
-        <button type="button" role="radio" data-theme-pref="light" aria-label="Light theme" title="Light">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
+        <nav>${nav}</nav>
+        <div class="spacer"></div>
+        <div class="theme-switch" role="radiogroup" aria-label="Theme" data-pos="1">
+            <button type="button" role="radio" data-theme-pref="light" aria-label="Light theme" title="Light">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
+            </button>
+            <button type="button" role="radio" data-theme-pref="system" aria-label="Follow system theme" title="System (follow PC setting)">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/></svg>
+            </button>
+            <button type="button" role="radio" data-theme-pref="dark" aria-label="Dark theme" title="Dark">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
+            </button>
+        </div>
+        <div class="signed-in-as">Signed in as <strong>${username}</strong></div>
+        <button id="logout-btn" title="Sign out" aria-label="Sign out">
+          <svg class="logout-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>
+            <polyline points="16 17 21 12 16 7"/>
+            <line x1="21" y1="12" x2="9" y2="12"/>
+          </svg>
+          <span class="logout-label">Sign out</span>
         </button>
-        <button type="button" role="radio" data-theme-pref="system" aria-label="Follow system theme" title="System (follow PC setting)">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/></svg>
-        </button>
-        <button type="button" role="radio" data-theme-pref="dark" aria-label="Dark theme" title="Dark">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
-        </button>
-      </div>
-      <div class="signed-in-as">Signed in as <strong>${username}</strong></div>
-      <button id="logout-btn">Sign out</button>
       </div>
     </div>
   `;
+    } else {
+     return `
+    <div class="rail collapsed">
+      <div class="rail-top">
+        <div class="rail-id">
+          <div class="brand"><span class="brand-text">Volume Gallery</span></div>
+        </div>
+      </div>
+      <div class="rail-menu" id="rail-menu">
+        <div class="spacer"></div>
+        <div class="theme-switch" role="radiogroup" aria-label="Theme" data-pos="1">
+            <button type="button" role="radio" data-theme-pref="light" aria-label="Light theme" title="Light">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
+            </button>
+            <button type="button" role="radio" data-theme-pref="system" aria-label="Follow system theme" title="System (follow PC setting)">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/></svg>
+            </button>
+            <button type="button" role="radio" data-theme-pref="dark" aria-label="Dark theme" title="Dark">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
+            </button>
+        </div>
+      </div>
+    </div>
+  `;
+    }
 }
 
 export function wireLogout() {
-    wireTheme(); // every page that renders the shell already calls this
-    applyBranding();
-    // On phones the side rail is a top bar whose menu opens with this button.
-    const rail = document.querySelector(".rail");
-    const toggle = document.querySelector(".rail-toggle");
-    if (rail && toggle) {
-        toggle.addEventListener("click", () => {
-            toggle.setAttribute("aria-expanded", String(rail.classList.toggle("open")));
-        });
-    }
-    const btn = document.getElementById("logout-btn");
-    if (btn) {
-        btn.addEventListener("click", () => {
-            clearSession();
-            window.location.href = "/login.html";
-        });
-    }
+  wireTheme(); // every page that renders the shell already calls this
+  applyBranding();
+  const rail = document.querySelector(".rail");
+  const toggle = document.querySelector(".rail-toggle");
+  if (rail && toggle) {
+    toggle.addEventListener("click", () => {
+      toggle.setAttribute("aria-expanded", String(rail.classList.toggle("open")));
+    });
+  }
+  const collapseBtn = document.getElementById("rail-collapse-btn");
+  if (rail && collapseBtn) {
+    collapseBtn.addEventListener("click", () => {
+      const collapsed = rail.classList.toggle("collapsed");
+      localStorage.setItem(RAIL_COLLAPSED_KEY, collapsed ? "1" : "0");
+      collapseBtn.title = collapsed ? "Expand sidebar" : "Minimize sidebar";
+      // Notify 3D viewers (kiln-render, 3DHOP, Potree) after the width transition
+      setTimeout(() => window.dispatchEvent(new Event("resize")), 220);
+    });
+  }
+  const btn = document.getElementById("logout-btn");
+  if (btn) {
+    btn.addEventListener("click", () => {
+      clearSession();
+      window.location.href = "/login.html";
+    });
+  }
 }

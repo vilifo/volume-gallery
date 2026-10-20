@@ -11,6 +11,7 @@ class Role(str, enum.Enum):
     admin = "admin"
     editor = "editor"
     reader = "reader"
+    guest = "guest"
 
 
 class AssetStatus(str, enum.Enum):
