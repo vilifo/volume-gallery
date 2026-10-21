@@ -87,6 +87,18 @@ async function maybeEvict() {
     return evictionInFlight;
 }
 
+// Tells the open pages that the access token in a chunk URL was rejected (expired), so they can
+// ask the user to reload. Chunk requests come in thousands: at most one notice per volume per 3 s.
+const lastAccessNotice = new Map();
+
+async function notifyAccessDenied(volumeId) {
+    const now = Date.now();
+    if (now - (lastAccessNotice.get(volumeId) || 0) < 3000) return;
+    lastAccessNotice.set(volumeId, now);
+    const windows = await self.clients.matchAll({type: "window", includeUncontrolled: true});
+    for (const client of windows) client.postMessage({type: "ZARR_ACCESS_DENIED", volumeId});
+}
+
 self.addEventListener("fetch", (event) => {
     const req = event.request;
     if (req.method !== "GET") return;
@@ -118,6 +130,7 @@ self.addEventListener("fetch", (event) => {
             if (hit) return hit;
 
             const resp = await fetch(req);
+            if (resp.status === 403) event.waitUntil(notifyAccessDenied(volumeId));
             if (resp.status === 200) {
                 cache.put(cacheKeyReq, resp.clone()).then(() => maybeEvict()).catch(() => {
                 });

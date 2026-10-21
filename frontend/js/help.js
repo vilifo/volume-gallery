@@ -168,6 +168,7 @@ function requirements() {
       <li><strong>Volumes</strong> need a browser with <strong>WebGPU</strong>: current Chrome or Edge (113 or newer), Safari 26 or newer, or Firefox 141 or newer. The page must be loaded over <strong>HTTPS</strong> (or from <code>localhost</code>); on a plain http:// address the volume viewer cannot start.</li>
       <li>Meshes and point clouds use WebGL, which every current browser supports.</li>
       <li>If a volume is slow or fails to load, make sure hardware acceleration is on, close other GPU-heavy tabs, and lower <em>Render scale</em> or <em>VRAM allocation</em> under Advanced.</li>
+      <li>Access to a volume\u2019s data is granted for a limited time. When it runs out, a \u201cSession expired\u201d dialog appears; press <strong>Reload page</strong> to continue.</li>
       <li>Items that are still <em>processing</em> cannot be opened yet. If a share link asks you to sign in, sign in with an account that has access to the item.</li>
     </ul>`;
 }

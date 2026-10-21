@@ -1,6 +1,9 @@
 from contextlib import asynccontextmanager
 import threading
+from pathlib import Path
+
 from fastapi import FastAPI
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from sqlmodel import Session, select
 
@@ -83,4 +86,15 @@ app.include_router(pointclouds.router)
 app.include_router(shares.router)
 
 # Serve the frontend (single-page-ish static site) at the root.
+@app.get("/js/sw.js", include_in_schema=False)
+def service_worker():
+    """The chunk-cache service worker lives in /js but is registered with scope "/" (it has to
+    control the viewer page); browsers refuse that unless the script is served with this header."""
+    return FileResponse(
+        Path(settings.FRONTEND_DIR) / "js" / "sw.js",
+        media_type="text/javascript",
+        headers={"Service-Worker-Allowed": "/", "Cache-Control": "no-cache"},
+    )
+
+
 app.mount("/", StaticFiles(directory=settings.FRONTEND_DIR, html=True), name="frontend")
