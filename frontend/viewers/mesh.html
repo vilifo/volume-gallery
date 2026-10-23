@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Mesh Viewer — Volume Gallery</title>
 <script src="/js/theme-init.js?v=hist1"></script>
-<link rel="stylesheet" href="/css/style.css?v=brand2" />
+<link rel="stylesheet" href="/css/style.css?v=theme1" />
 <link rel="stylesheet" href="/vendor/3dhop/stylesheet/3dhop.css" />
 <style>
   body.viewer-page { overflow: hidden; }
@@ -36,9 +36,9 @@
     position: absolute; top: 12px; right: 12px; z-index: 5;
     display: flex; flex-direction: column; gap: 4px;
     max-height: calc(100% - 24px); overflow-y: auto;
-    background: rgba(26, 29, 35, 0.92);
+    background: var(--viewer-surface);
     backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
-    border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 10px;
+    border: 1px solid var(--viewer-border); border-radius: 10px;
     padding: 6px;
     box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
     scrollbar-width: none;
@@ -48,11 +48,11 @@
     width: 30px; height: 30px; flex-shrink: 0; display: flex; align-items: center; justify-content: center;
     padding: 0; background: transparent; border: none; border-radius: 6px; color: var(--text-dim); cursor: pointer;
   }
-  .mesh-toolbar button:hover:not(:disabled) { background: rgba(255, 255, 255, 0.08); color: var(--text); border: none; }
-  .mesh-toolbar button.active { color: var(--accent); background: rgba(232, 163, 61, 0.14); }
+  .mesh-toolbar button:hover:not(:disabled) { background: var(--viewer-hover); color: var(--text); border: none; }
+  .mesh-toolbar button.active { color: var(--accent); background: color-mix(in srgb, var(--accent) 16%, transparent); }
   .mesh-toolbar button:disabled { opacity: 0.35; cursor: not-allowed; }
   .mesh-toolbar svg { width: 16px; height: 16px; }
-  .mesh-toolbar .tb-sep { height: 1px; flex-shrink: 0; margin: 2px 4px; background: rgba(255, 255, 255, 0.1); }
+  .mesh-toolbar .tb-sep { height: 1px; flex-shrink: 0; margin: 2px 4px; background: var(--viewer-border); }
 
   /* ---- tool panels (left edge) ---- */
   .mesh-panels {
@@ -62,9 +62,9 @@
   }
   .mesh-panel {
     pointer-events: auto; color: var(--text); font-size: 0.82em;
-    background: rgba(26, 29, 35, 0.92);
+    background: var(--viewer-surface);
     backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
-    border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 10px;
+    border: 1px solid var(--viewer-border); border-radius: 10px;
     padding: 10px 12px 12px; box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
   }
   .mesh-panel[hidden] { display: none; }
@@ -115,8 +115,7 @@
   }
   .mesh-help[hidden] { display: none; }
   .mesh-help .card {
-    --text: #e7e5e0; --text-dim: #8b919b; --accent: #e8a33d; --line: #2b3038;
-    background: #1c2026; color: var(--text); border: 1px solid var(--line); border-radius: 10px;
+    background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 10px;
     padding: 18px 22px; max-width: 460px; width: calc(100% - 40px); font-size: 0.88em; line-height: 1.5;
     box-shadow: 0 20px 48px rgba(0, 0, 0, 0.6);
   }

@@ -1,0 +1,44 @@
+diff --git a/lib/kiln-render.js b/lib/kiln-render.js
+index c45068c..4ae3556 100644
+--- a/lib/kiln-render.js
++++ b/lib/kiln-render.js
+@@ -6149,7 +6149,10 @@ function defineUniformStruct(fields) {
+   offset = alignUp(offset, maxAlign);
+   return { fields: lines.join("\n"), offsets, size: offset };
+ }
+-const MAX_LOD_LEVELS = 12;
++// Local patch: raised from 12. Fine LOD ladders (several levels per 2x octave,
++// see errorScale below) need more levels. Only costs 16 B per level in the
++// lodScales uniform arrays; the indirection texel stores lod+1 in 8 bits.
++const MAX_LOD_LEVELS = 32;
+ const COMPUTE_UNIFORMS = defineUniformStruct([
+   { name: "inverseViewProj", type: "mat4x4f" },
+   { name: "cameraPos", type: "vec3f" },
+@@ -9468,6 +9471,12 @@ class StreamingManager {
+   getVoxelWorldSize(lod) {
+     const normalizedSize = this.config.normalizedSize;
+     const dims = this.config.dimensions;
++    // Local patch: converter-supplied scale (lets levels that coarsen one axis at a
++    // time switch at distinct distances instead of all sharing the max-axis error).
++    const errorScale = this.config.levels?.[lod]?.errorScale;
++    if (errorScale !== void 0) {
++      return Math.max(...[0, 1, 2].map((a) => normalizedSize[a] / dims[a])) * errorScale;
++    }
+     const exponent = this.config.levelExponent(lod);
+     const improvable = [0, 1, 2].filter((a) => exponent[a] > 0);
+     const axes = improvable.length > 0 ? improvable : [0, 1, 2];
+@@ -11705,6 +11714,14 @@ class ShardedDataProvider {
+     const pyramidBuild = buildPyramid(
+       raw.levels.map((level, i) => ({ dims: level.dimensions, scale: i === 0 ? raw.voxelSpacing : void 0 }))
+     );
++    // Local patch: optional per-level LOD-selection scale written by the converter
++    // (effective voxel size relative to the largest level-0 voxel). Absent = old behaviour.
++    raw.levels.forEach((level, i) => {
++      const es = level.errorScale;
++      if (pyramidBuild.levels[i] && typeof es === "number" && Number.isFinite(es) && es > 0) {
++        pyramidBuild.levels[i].errorScale = es;
++      }
++    });
+     if (this.pyramidPolicy === "native" && pyramidBuild.issues.length > 0) {
+       throw new UnsupportedDatasetError([...pyramidBuild.issues, LEGACY_HINT]);
+     }

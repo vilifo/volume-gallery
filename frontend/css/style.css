@@ -22,14 +22,10 @@
   OS (prefers-color-scheme); the rail's theme switch writes data-theme="light"
   or "dark" on <html> (see js/api.js, js/theme-init.js) to override it.
 
-  Floating viewer chrome that sits on top of the always-black 3D canvas keeps the
-  dark palette in either theme (it is listed in the first selector, which
-  re-declares the dark values on those elements themselves).
+  Viewer controls inherit the same palette as the application shell. The render
+  canvas may remain black, but control surfaces must not pin their own dark theme.
 */
-:root,
-.theme-dark,
-.ctl-panel, .ctl-chip, .viewer-load-chip, .viewer-stats-hud,
-.mesh-toolbar, .viewer-status {
+:root {
   --bg: #14171c;
   --panel: #1c2026;
   --panel-raised: #22262d;
@@ -45,6 +41,11 @@
   --row-hover: rgba(255, 255, 255, 0.02);
   --swatch-a: #2b3038;
   --swatch-b: #1c2026;
+  --viewer-surface: rgba(28, 32, 38, 0.96);
+  --viewer-surface-raised: rgba(34, 38, 45, 0.96);
+  --viewer-border: rgba(255, 255, 255, 0.10);
+  --viewer-hover: rgba(255, 255, 255, 0.08);
+  --viewer-track: rgba(255, 255, 255, 0.12);
   color-scheme: dark;
 }
 
@@ -64,6 +65,11 @@
   --row-hover: rgba(0, 0, 0, 0.03);
   --swatch-a: #e4e1da;
   --swatch-b: #f4f3ef;
+  --viewer-surface: rgba(255, 255, 255, 0.96);
+  --viewer-surface-raised: rgba(238, 236, 231, 0.98);
+  --viewer-border: rgba(29, 33, 39, 0.16);
+  --viewer-hover: rgba(29, 33, 39, 0.07);
+  --viewer-track: rgba(29, 33, 39, 0.16);
   color-scheme: light;
 }
 
@@ -84,6 +90,11 @@
     --row-hover: rgba(0, 0, 0, 0.03);
     --swatch-a: #e4e1da;
     --swatch-b: #f4f3ef;
+    --viewer-surface: rgba(255, 255, 255, 0.96);
+    --viewer-surface-raised: rgba(238, 236, 231, 0.98);
+    --viewer-border: rgba(29, 33, 39, 0.16);
+    --viewer-hover: rgba(29, 33, 39, 0.07);
+    --viewer-track: rgba(29, 33, 39, 0.16);
     color-scheme: light;
   }
 }

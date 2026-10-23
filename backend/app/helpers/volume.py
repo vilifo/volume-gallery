@@ -278,7 +278,7 @@ def decompose_tiff_stack(input_path: Path,
             next_mm = None
             next_path = None
             if lod < max_lod:
-                next_path = os.path.join(output_dir, f"_tmp_lod{lod + 1}.npy")
+                next_path = os.path.join(input_path, f"_tmp_lod{lod + 1}.npy") # Use the input path here, because it is in the fast directory
                 next_mm = np.lib.format.open_memmap(
                     next_path, mode="w+", dtype=dtype,
                     shape=((cd + 1) // 2, (ch + 1) // 2, (cw + 1) // 2))

@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Point Cloud Viewer — Volume Gallery</title>
 <script src="/js/theme-init.js?v=hist1"></script>
-<link rel="stylesheet" href="/css/style.css?v=brand2" />
+<link rel="stylesheet" href="/css/style.css?v=theme1" />
 <link rel="stylesheet" href="/vendor/potree/potree.css" />
 <link rel="stylesheet" href="/vendor/libs/jquery-ui/jquery-ui.min.css" />
 <link rel="stylesheet" href="/vendor/libs/openlayers3/ol.css" />
@@ -41,6 +41,101 @@
     position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
     color: var(--text-dim); font-family: var(--mono); font-size: 0.85em;
     background: rgba(0, 0, 0, 0.6); padding: 1.5em; text-align: left; line-height: 1.5;
+  }
+
+  /* Potree's GUI is injected asynchronously and its vendor CSS has highly
+     specific dark rules. Override the generated DOM (not the render canvas),
+     including jQuery UI widgets, after the app's theme variables are active. */
+  #potree_sidebar_container,
+  #potree_sidebar_container #sidebar_root,
+  #potree_sidebar_container #sidebar_header,
+  #potree_sidebar_container .potree_sidebar,
+  #potree_sidebar_container .accordion,
+  #potree_sidebar_container .accordion > h3,
+  #potree_sidebar_container .accordion > div,
+  #potree_sidebar_container .divider,
+  #potree_sidebar_container .property,
+  #potree_sidebar_container .pv-menu-list,
+  #potree_sidebar_container .pv-menu-list > li {
+    color: var(--text) !important;
+    background-color: var(--panel) !important;
+    border-color: var(--line) !important;
+  }
+  #potree_sidebar_container input:not([type="range"]),
+  #potree_sidebar_container select,
+  #potree_sidebar_container textarea,
+  #potree_sidebar_container button,
+  #potree_sidebar_container .ui-widget,
+  #potree_sidebar_container .ui-widget-content,
+  #potree_sidebar_container .ui-widget-header,
+  #potree_sidebar_container .ui-selectmenu-button,
+  #potree_sidebar_container .ui-selectmenu-menu,
+  #potree_sidebar_container .jstree-default .jstree-anchor {
+    color: var(--text) !important;
+    background-color: var(--panel-raised) !important;
+    border-color: var(--line) !important;
+  }
+  #potree_sidebar_container input[type="range"] { accent-color: var(--accent); }
+  #potree_sidebar_container a,
+  #potree_sidebar_container .ui-widget-content a { color: var(--accent) !important; }
+  #potree_sidebar_container .ui-state-active,
+  #potree_sidebar_container .ui-state-hover,
+  #potree_sidebar_container .ui-state-focus,
+  #potree_sidebar_container .accordion > h3:hover,
+  #potree_sidebar_container .jstree-default .jstree-clicked,
+  #potree_sidebar_container .jstree-default .jstree-hovered {
+    color: var(--text) !important;
+    background: var(--viewer-hover) !important;
+    border-color: var(--accent-dim) !important;
+  }
+  #potree_sidebar_container .ui-slider,
+  #potree_sidebar_container .ui-progressbar {
+    background: var(--line) !important;
+    border-color: var(--line) !important;
+  }
+  #potree_sidebar_container .ui-slider-range,
+  #potree_sidebar_container .ui-slider-handle {
+    background: var(--accent) !important;
+    border-color: var(--accent-dim) !important;
+  }
+  #potree_sidebar_container .spectrum-container,
+  #potree_sidebar_container .sp-container,
+  #potree_sidebar_container .sp-picker-container,
+  #potree_sidebar_container .sp-button-container {
+    color: var(--text) !important;
+    background: var(--panel) !important;
+    border-color: var(--line) !important;
+  }
+
+  /* Potree's menu subsections contain nested labels/spans and vendor rules
+     that set text colors on descendants (not only on the parent widget).
+     Explicitly inherit the active app text color throughout the sidebar. */
+  #potree_sidebar_container,
+  #potree_sidebar_container #sidebar_root,
+  #potree_sidebar_container #sidebar_root * {
+    color: var(--text) !important;
+  }
+  #potree_sidebar_container a,
+  #potree_sidebar_container a *,
+  #potree_sidebar_container .ui-widget-content a,
+  #potree_sidebar_container .ui-widget-content a * {
+    color: var(--accent) !important;
+  }
+  #potree_sidebar_container input,
+  #potree_sidebar_container select,
+  #potree_sidebar_container textarea,
+  #potree_sidebar_container option {
+    color: var(--text) !important;
+    background-color: var(--panel-raised) !important;
+  }
+  #potree_sidebar_container .jstree-default .jstree-anchor,
+  #potree_sidebar_container .jstree-default .jstree-anchor * {
+    color: var(--text) !important;
+  }
+  #potree_sidebar_container .jstree-default .jstree-clicked,
+  #potree_sidebar_container .jstree-default .jstree-hovered {
+    color: var(--text) !important;
+    background: var(--viewer-hover) !important;
   }
 </style>
 </head>
