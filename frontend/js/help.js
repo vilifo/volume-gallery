@@ -16,13 +16,13 @@ const ENGINES = [
   {
     name: "kiln-render",
     usedFor: "CT volumes",
-    text: "A WebGPU-native, out-of-core volume renderer. It streams large OME-Zarr datasets over HTTP into a fixed-size " +
+    text: "A WebGPU-native, out-of-core volume renderer. It streams large kiln sharded binary datasets over HTTP into a fixed-size " +
           "GPU cache, using virtual texturing and compute-shader ray marching, so volumes much larger than the GPU memory " +
           "can still be explored interactively. This gallery uses a patched build.",
     refs: [
       ["https://github.com/MPanknin/kiln-render", "kiln-render on GitHub (M. Panknin)"],
       ["https://dev.to/mpanknin/kiln-webgpu-native-out-of-core-volume-rendering-for-multi-gb-datasets-2alb", "Kiln: WebGPU-Native Out-of-Core Volume Rendering for Multi-GB Datasets"],
-      ["https://ngff.openmicroscopy.org", "OME-Zarr (OME-NGFF) specification, the volume storage format"],
+      ["https://github.com/MPanknin/kiln-render", "kiln-render sharded binary format"],
     ],
     papers: [],
   },
@@ -120,8 +120,7 @@ function pointcloudViewer() {
 function uploading() {
   return `<p>Open <strong>Upload</strong> in the side menu and choose what you are adding:</p>
     <ul>
-      <li><strong>OME-Zarr (.zip)</strong>: a zip containing the <code>.ome.zarr</code> (or <code>.zarr</code>) folder. It is unpacked on the server.</li>
-      <li><strong>TIFF stack (.zip of .tif files)</strong>: a flat zip of single-slice <code>.tif</code>/<code>.tiff</code> files, one per Z position. Slice order follows the file names alphabetically (for example <code>slice_0001.tif</code>, <code>slice_0002.tif</code>), so number them with leading zeros. The stack is converted to OME-Zarr and the TIFF files are then deleted. Large stacks are loaded into memory while converting.</li>
+      <li><strong>TIFF stack (.zip or multiple files)</strong>: single-slice <code>.tif</code>/<code>.tiff</code> files, one per Z position. Slice order follows the filenames naturally (for example <code>slice_0001.tif</code>, <code>slice_0002.tif</code>), so use leading zeros. The server converts the stack to kiln sharded binary with out-of-core processing, then deletes the extracted TIFF files.</li>
       <li><strong>Mesh file</strong>: <code>.stl</code>, <code>.3mf</code>, <code>.ply</code>, <code>.obj</code> or <code>.glb</code>. Added to a volume upload, a mesh becomes the volume\u2019s attached mesh.</li>
       <li><strong>Point cloud file</strong>: <code>.laz</code>, <code>.las</code>, <code>.ply</code>, <code>.xyz</code>, <code>.ptx</code>, <code>.pts</code> or <code>.e57</code>.</li>
     </ul>

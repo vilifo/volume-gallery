@@ -284,8 +284,7 @@
           <p class="dim" style="font-size:0.9em">Processed like any other mesh, but not listed separately: access follows this volume, and it is viewed and downloaded from the volume's viewer.</p>
           <p class="dim" style="font-size:0.9em">${
             item.has_mesh
-              ? escapeHtml(item.mesh_filename) +
-                (item.mesh_status && item.mesh_status !== "ready"
+              ? (item.mesh_status && item.mesh_status !== "ready"
                   ? ` \u2014 ${escapeHtml(item.mesh_status)}${
                       item.mesh_status === "failed" && item.mesh_status_log.length
                         ? `: ${escapeHtml(item.mesh_status_log[item.mesh_status_log.length - 1])}`

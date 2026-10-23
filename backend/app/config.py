@@ -25,13 +25,12 @@ class Settings:
     POINTCLOUDS_DIR: Path = DATA_DIR / "pointclouds"
     DB_PATH: Path = DATA_DIR / "gallery.db"
 
-    # Offload OME-Zarr chunk file delivery to nginx via X-Accel-Redirect.
-    # Off by default so bare `uvicorn` local development works out of the box.
-    ZARR_ACCEL_REDIRECT: bool = os.environ.get("VG_ZARR_ACCEL_REDIRECT", "").lower() in (
+    # Offload sharded binary delivery to nginx via X-Accel-Redirect.
+    SHARD_ACCEL_REDIRECT: bool = os.environ.get("VG_SHARD_ACCEL_REDIRECT", "").lower() in (
         "1", "true", "yes", "on"
     )
-    ZARR_ACCEL_PREFIX: str = os.environ.get("VG_ZARR_ACCEL_PREFIX", "/_internal_volumes")
-    ZARR_META_CACHE_TTL_SECONDS: int = int(os.environ.get("VG_ZARR_META_CACHE_TTL_SECONDS", "60"))
+    SHARD_ACCEL_PREFIX: str = os.environ.get("VG_SHARD_ACCEL_PREFIX", "/_internal_volumes")
+    FILE_META_CACHE_TTL_SECONDS: int = int(os.environ.get("VG_FILE_META_CACHE_TTL_SECONDS", "60"))
 
     # Largest accepted thumbnail upload (png / jpeg / webp)
     THUMBNAIL_MAX_MB: int = int(os.environ.get("VG_THUMBNAIL_MAX_MB", "5"))
@@ -52,7 +51,7 @@ class Settings:
     # 16-bit volume is ~512 MB, so ~4 slabs fit the default; 0 disables caching
     # (every plane is then read straight from the chunks, ~10-50x slower).
     SLICE_CACHE_MB: int = int(os.environ.get("VG_SLICE_CACHE_MB", "2048"))
-    # Slabs decoded in parallel (each decode is itself multi-threaded by zarr)
+    # Slabs decoded in parallel from sharded binary bricks
     SLICE_BUILD_THREADS: int = int(os.environ.get("VG_SLICE_BUILD_THREADS", "2"))
     # zstd level for planes sent to browsers that accept it (1 = fastest)
     SLICE_ZSTD_LEVEL: int = int(os.environ.get("VG_SLICE_ZSTD_LEVEL", "1"))

@@ -55,52 +55,32 @@ def load_zarr_as_dask(
     return vol, (w, h, d), dtype
 
 
-@dask.delayed
-def process_and_compress_brick(
-        brick_block: np.ndarray,
-        bx: int,
-        by: int,
-        bz: int
-) -> Tuple[int, int, int, bytes, int, int, int]:
-    """
-    Compute core statistics (64^3) and gzip-compress the physical brick (66^3).
-    Executed in parallel threads by Dask workers (both NumPy and gzip release the GIL).
-    """
-    # Ensure contiguous C-order layout: (Z, Y, X) in C-order matches
-    # lx + ly * physicalSize + lz * physicalSize^2 in linear byte memory
-    brick_block = np.ascontiguousarray(brick_block)
-
-    # Extract 64^3 logical core (excluding 1-voxel border on each side)
-    core = brick_block[1:-1, 1:-1, 1:-1]
+def _compress_brick(slab, z_off, y0, x0, ps, bx, by, bz, level):
+    """Stats (core) + gzip of one physical brick, cut out of an in-RAM slab."""
+    block = np.ascontiguousarray(slab[z_off:z_off + ps, y0:y0 + ps, x0:x0 + ps])
+    core = block[1:-1, 1:-1, 1:-1]
     min_val = int(core.min())
     max_val = int(core.max())
     avg_val = int(np.floor(float(core.mean()) + 0.5))
-
-    compressed = gzip.compress(brick_block.tobytes(), compresslevel=6)
+    compressed = gzip.compress(block.tobytes(), compresslevel=level)
     return bx, by, bz, compressed, min_val, max_val, avg_val
 
 
-def downsample_dask_volume(vol: da.Array) -> da.Array:
-    """
-    Lazily downsample a (D, H, W) Dask array by 2x using a 2x2x2 average.
-    Pads odd dimensions by edge-clamping, matching the TypeScript behavior.
-    """
-    d, h, w = vol.shape
-    pad_d = d % 2
-    pad_h = h % 2
-    pad_w = w % 2
-
-    if pad_d or pad_h or pad_w:
-        vol = da.pad(vol, ((0, pad_d), (0, pad_h), (0, pad_w)), mode='edge')
-
-    nd, nh, nw = vol.shape[0] // 2, vol.shape[1] // 2, vol.shape[2] // 2
-
-    # Reshape into 2x2x2 blocks and compute mean with standard half-up rounding
-    reshaped = vol.reshape((nd, 2, nh, 2, nw, 2))
-    summed = reshaped.astype(np.float32).sum(axis=(1, 3, 5))
-    downsampled = da.floor((summed / 8.0) + 0.5).astype(vol.dtype)
-
-    return downsampled
+def _downsample2x_block(a):
+    """2x2x2 mean (half-up rounding, edge-clamped on odd dims) of a numpy block."""
+    d, h, w = a.shape
+    if d % 2 or h % 2 or w % 2:
+        a = np.pad(a, ((0, d % 2), (0, h % 2), (0, w % 2)), mode="edge")
+    acc = a[0::2, 0::2, 0::2].astype(np.float32)
+    for oz in (0, 1):
+        for oy in (0, 1):
+            for ox in (0, 1):
+                if oz or oy or ox:
+                    acc += a[oz::2, oy::2, ox::2]
+    acc *= 0.125
+    acc += 0.5
+    np.floor(acc, out=acc)
+    return acc.astype(a.dtype)
 
 
 def decompose_zarr(zarr_path: Path,
@@ -109,12 +89,27 @@ def decompose_zarr(zarr_path: Path,
                      brick_size=64,
                      max_lod=-1,
                      workers=4,
-                     batch_size=128,
+                     slab_gb=8.0,
+                     compresslevel=6,
                      log=None,
                      ):
-    # Configure Dask to use a multithreaded pool for shared-memory parallelism
+    """
+        Slab-streaming version: each LOD is processed in Z slabs of k brick layers
+        (+2 halo slices) held in RAM as one numpy array. Every source voxel is read
+        once per LOD, bricks are cut from the slab and compressed on a thread pool,
+        and the next LOD is downsampled from the same slab into an on-disk temp
+        array (no lazy dask chain that re-reads / recomputes everything per batch).
+        slab_gb is the RAM budget for one slab; raise it to use more memory.
+        """
+    from concurrent.futures import ThreadPoolExecutor
+
+    # Dask is only used to read LOD 0 from Zarr (parallel chunk decompression)
+
+
     dask.config.set(scheduler="threads", num_workers=workers)
-    if log is None: log = print
+    log = log if log else print
+    if brick_size % 2:
+        raise ValueError("brick_size must be even")
 
     physical_size = brick_size + 2
     os.makedirs(output_dir, exist_ok=True)
@@ -135,109 +130,150 @@ def decompose_zarr(zarr_path: Path,
         max_lod = max(0, min(10, int(math.floor(math.log2(max(1, min_dim / brick_size))))))
 
     output_format = "uint16" if bit_depth == 16 else "uint8"
+    itemsize = np.dtype(dtype).itemsize
 
     lod_levels_meta = []
-    current_vol = vol
+    current_vol = vol  # dask array for LOD 0, np.memmap afterwards
+    tmp_path = None
 
-    for lod in range(max_lod + 1):
-        cd, ch, cw = current_vol.shape
-        nx = math.ceil(cw / brick_size)
-        ny = math.ceil(ch / brick_size)
-        nz = math.ceil(cd / brick_size)
-        total_bricks = nx * ny * nz
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        for lod in range(max_lod + 1):
+            cd, ch, cw = current_vol.shape
+            nx = math.ceil(cw / brick_size)
+            ny = math.ceil(ch / brick_size)
+            nz = math.ceil(cd / brick_size)
+            total_bricks = nx * ny * nz
 
-        log(f"\nProcessing & Packing LOD {lod}: {cw}x{ch}x{cd} ({nx}x{ny}x{nz} = {total_bricks} bricks)")
+            log(f"\nProcessing & Packing LOD {lod}: {cw}x{ch}x{cd} ({nx}x{ny}x{nz} = {total_bricks} bricks)")
 
-        # Pad volume with edge-clamped borders so all bricks slice cleanly to 66x66x66
-        pad_x_after = max(0, nx * brick_size - cw) + 1
-        pad_y_after = max(0, ny * brick_size - ch) + 1
-        pad_z_after = max(0, nz * brick_size - cd) + 1
+            # Padded in-plane size: 1 voxel edge-clamped border before, >=1 after
+            ph = ny * brick_size + 2
+            pw = nx * brick_size + 2
+            plane_bytes = ph * pw * itemsize
+            k = int((int(slab_gb * 2 ** 30) - 2 * plane_bytes) // (brick_size * plane_bytes))
+            k = max(1, min(nz, k))
 
-        padded_vol = da.pad(
-            current_vol,
-            ((1, pad_z_after), (1, pad_y_after), (1, pad_x_after)),
-            mode="edge",
-        )
+            bin_path = os.path.join(output_dir, f"lod{lod}.bin")
+            index_path = os.path.join(output_dir, f"lod{lod}_index.json")
 
-        bin_path = os.path.join(output_dir, f"lod{lod}.bin")
-        index_path = os.path.join(output_dir, f"lod{lod}_index.json")
+            index_data = {
+                "lod": lod,
+                "brickSize": brick_size,
+                "physicalSize": physical_size,
+                "bricks": [nx, ny, nz],
+                "totalBricks": total_bricks,
+                "totalBytes": 0,
+                "compressed": True,
+                "entries": {},
+            }
 
-        index_data = {
-            "lod": lod,
-            "brickSize": brick_size,
-            "physicalSize": physical_size,
-            "bricks": [nx, ny, nz],
-            "totalBricks": total_bricks,
-            "totalBytes": 0,
-            "compressed": True,
-            "entries": {},
-        }
+            next_mm = None
+            next_path = None
+            if lod < max_lod:
+                next_path = os.path.join(output_dir, f"_tmp_lod{lod + 1}.npy")
+                next_mm = np.lib.format.open_memmap(
+                    next_path, mode="w+", dtype=dtype,
+                    shape=((cd + 1) // 2, (ch + 1) // 2, (cw + 1) // 2))
 
-        # Build list of brick coordinates in Z -> Y -> X order
-        coords = [(bx, by, bz) for bz in range(nz) for by in range(ny) for bx in range(nx)]
+            offset = 0
+            processed = 0
 
-        offset = 0
-        processed = 0
+            with open(bin_path, "wb") as bf:
+                for bz0 in range(0, nz, k):
+                    kz = min(k, nz - bz0)
+                    depth = kz * brick_size + 2
+                    z_start = bz0 * brick_size - 1  # source z of slab row 0
 
-        with open(bin_path, "wb") as bf:
-            for i in range(0, len(coords), batch_size):
-                batch_coords = coords[i: i + batch_size]
-                tasks = []
+                    # ---- load slab (single read of the source) ----
+                    slab = np.empty((depth, ph, pw), dtype=dtype)
+                    src0 = max(0, z_start)
+                    src1 = min(cd, z_start + depth)
+                    dst0 = src0 - z_start
+                    dst1 = dst0 + (src1 - src0)
+                    target = slab[dst0:dst1, 1:1 + ch, 1:1 + cw]
+                    if isinstance(current_vol, da.Array):
+                        da.store(current_vol[src0:src1], target, lock=False)
+                    else:
+                        target[...] = current_vol[src0:src1]
 
-                for bx, by, bz in batch_coords:
-                    z0 = bz * brick_size
-                    y0 = by * brick_size
-                    x0 = bx * brick_size
-                    brick_slice = padded_vol[
-                        z0: z0 + physical_size,
-                        y0: y0 + physical_size,
-                        x0: x0 + physical_size,
-                    ]
-                    tasks.append(process_and_compress_brick(brick_slice, bx, by, bz))
+                    # ---- edge-clamp borders (equivalent to np.pad(mode="edge")) ----
+                    if dst0 > 0:
+                        slab[:dst0, 1:1 + ch, 1:1 + cw] = slab[dst0:dst0 + 1, 1:1 + ch, 1:1 + cw]
+                    if dst1 < depth:
+                        slab[dst1:, 1:1 + ch, 1:1 + cw] = slab[dst1 - 1:dst1, 1:1 + ch, 1:1 + cw]
+                    slab[:, 0, 1:1 + cw] = slab[:, 1, 1:1 + cw]
+                    slab[:, 1 + ch:, 1:1 + cw] = slab[:, ch:ch + 1, 1:1 + cw]
+                    slab[:, :, 0] = slab[:, :, 1]
+                    slab[:, :, 1 + cw:] = slab[:, :, cw:cw + 1]
 
-                # Compute the batch of bricks in parallel using Dask threads
-                results = dask.compute(*tasks)
+                    # ---- compress bricks in parallel, write in order ----
+                    coords = [(bx, by, bz) for bz in range(bz0, bz0 + kz)
+                              for by in range(ny) for bx in range(nx)]
 
-                # Write compressed bytes sequentially to lodN.bin
-                for bx, by, bz, compressed_bytes, b_min, b_max, b_avg in results:
-                    comp_size = len(compressed_bytes)
-                    bf.write(compressed_bytes)
+                    def work(c, slab=slab, bz0=bz0):
+                        bx, by, bz = c
+                        return _compress_brick(
+                            slab, (bz - bz0) * brick_size, by * brick_size, bx * brick_size,
+                            physical_size, bx, by, bz, compresslevel)
 
-                    index_data["entries"][f"{bx}/{by}/{bz}"] = {
-                        "offset": offset,
-                        "size": comp_size,
-                        "min": b_min,
-                        "max": b_max,
-                        "avg": b_avg,
-                    }
+                    for bx, by, bz, compressed_bytes, b_min, b_max, b_avg in pool.map(work, coords):
+                        comp_size = len(compressed_bytes)
+                        bf.write(compressed_bytes)
+                        index_data["entries"][f"{bx}/{by}/{bz}"] = {
+                            "offset": offset,
+                            "size": comp_size,
+                            "min": b_min,
+                            "max": b_max,
+                            "avg": b_avg,
+                        }
+                        offset += comp_size
+                        processed += 1
 
-                    offset += comp_size
-                    processed += 1
+                    log(f"Packed {processed}/{total_bricks} bricks")
 
-                log(f"Packed {processed}/{total_bricks} bricks")
+                    # ---- downsample this slab into the next LOD (while it is in RAM) ----
+                    if next_mm is not None:
+                        rz = min(cd, (bz0 + kz) * brick_size) - bz0 * brick_size
+                        core = slab[1:1 + rz, 1:1 + ch, 1:1 + cw]
+                        parts = [(s, min(s + brick_size, rz)) for s in range(0, rz, brick_size)]
+                        for s, out in pool.map(lambda p: (p[0], _downsample2x_block(core[p[0]:p[1]])), parts):
+                            zo = (bz0 * brick_size + s) // 2
+                            next_mm[zo:zo + out.shape[0]] = out
+                    del slab, target
 
-        index_data["totalBytes"] = offset
-        with open(index_path, "w", encoding="utf-8") as jf:
-            json.dump(index_data, jf, indent=2)
+            index_data["totalBytes"] = offset
+            with open(index_path, "w", encoding="utf-8") as jf:
+                json.dump(index_data, jf, indent=2)
 
-        lod_levels_meta.append({
-            "lod": lod,
-            "dimensions": [cw, ch, cd],
-            "bricks": [nx, ny, nz],
-            "brickCount": total_bricks,
-            "binFile": f"lod{lod}.bin",
-            "indexFile": f"lod{lod}_index.json",
-        })
+            lod_levels_meta.append({
+                "lod": lod,
+                "dimensions": [cw, ch, cd],
+                "bricks": [nx, ny, nz],
+                "brickCount": total_bricks,
+                "binFile": f"lod{lod}.bin",
+                "indexFile": f"lod{lod}_index.json",
+            })
 
-        # Setup lazy 2x downsample graph for the next LOD level
-        if lod < max_lod:
-            current_vol = downsample_dask_volume(current_vol)
-            # Rechunk downsampled array so deeper LODs don't suffer from tiny fragmented chunks
-            current_vol = current_vol.rechunk((
-                min(current_vol.shape[0], brick_size * 2),
-                min(current_vol.shape[1], brick_size * 4),
-                min(current_vol.shape[2], brick_size * 4),
-            ))
+            # Switch to the freshly written LOD and drop the previous temp file
+            if next_mm is not None:
+                next_mm.flush()
+            old_path = tmp_path
+            current_vol = next_mm
+            tmp_path = next_path
+            if old_path:
+                try:
+                    os.remove(old_path)
+                except OSError:
+                    pass
+
+    del current_vol
+    if tmp_path:
+        import gc
+        gc.collect()
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
 
     # Write final volume.json
     volume_json = {

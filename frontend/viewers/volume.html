@@ -432,7 +432,6 @@
   <script type="module">
     import { api, requireLogin, getRole, getUsername, renderShell, wireLogout } from "/js/api.js?v=brand2";
     import { syncHistogram } from "/js/histogram.js?v=hist1";
-    import { watchZarrAccess, resetZarrAccessWatch } from "/js/zarr-access.js?v=exp1";
     import { KilnViewer } from "/vendor/kiln-render/lib/kiln-render.js?v=atlas2";
     import {
       ATLAS_VRAM_OPTIONS_MB,
@@ -500,29 +499,14 @@
       return { ok: true };
     }
 
-    // Prompts for a reload when the chunk requests start failing with 403 (expired access token).
-    watchZarrAccess(volumeId);
-
-    async function registerZarrServiceWorker(volId, version) {
-      if (!("serviceWorker" in navigator) || !("caches" in window)) return;
+    async function retireLegacyServiceWorker() {
+      if (!("serviceWorker" in navigator)) return;
       try {
-        const reg = await navigator.serviceWorker.register("/js/sw.js", { scope: "/" });
-        await navigator.serviceWorker.ready;
-        const target = navigator.serviceWorker.controller || reg.active;
-        if (target && version) {
-          await new Promise((resolve) => {
-            const ch = new MessageChannel();
-            const timer = setTimeout(resolve, 300);
-            ch.port1.onmessage = () => { clearTimeout(timer); resolve(); };
-            target.postMessage(
-              { type: "SET_VOLUME_VERSION", volumeId: String(volId), version: String(version) },
-              [ch.port2]
-            );
-          });
-        }
-      } catch (err) {
-        console.warn("[sw] Service worker registration skipped:", err);
-      }
+        const registrations = await navigator.serviceWorker.getRegistrations();
+        await Promise.all(registrations.filter((r) =>
+          [r.active, r.waiting, r.installing].some((w) => w?.scriptURL?.includes("/js/sw.js"))
+        ).map((r) => r.unregister()));
+      } catch (err) { console.warn("Could not retire legacy volume cache worker:", err); }
     }
 
     // ------------------------------------------------------------------
@@ -747,7 +731,7 @@
         return;
       }
 
-      // Levels are OME-NGFF multiscale indices: 0 = full resolution, higher
+      // Levels are sharded-volume LOD indices: 0 = full resolution, higher
       // = coarser. Defaulting to the middle of the pyramid means the finest
       // (most memory/bandwidth-hungry) half is never streamed unless the
       // user explicitly asks for it — see the "Max detail level" control.
@@ -828,9 +812,8 @@
           histogramPromise = histogramPromise || api.volumeHistogram(volumeId); // fetched once, in parallel
           const access = await api.volumeDataAccessUrl(volumeId, minLevel);
           if (token !== loadToken) return;
-          resetZarrAccessWatch(); // fresh token: a later expiry may prompt again
+          await retireLegacyServiceWorker();
 
-          await registerZarrServiceWorker(volumeId, access.version);
           if (token !== loadToken) return;
 
           // The atlas gets the VRAM the user selected, but no more than this

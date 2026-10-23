@@ -1,7 +1,6 @@
 import json
 import hashlib
 import re
-import posixpath
 import shutil
 import time
 from pathlib import Path
@@ -21,13 +20,13 @@ from .. import workdir
 from ..helpers.slices import SliceError, open_volume_slices, plane_response_parts
 from ..helpers import volume_meta_path, process_zip, decompose_tiff_stack
 from ..helpers import read_thumbnail, write_thumbnail, store_thumbnail, remove_thumbnail, thumbnail_response
-from ..helpers import compute_histogram, histogram_path
+from ..helpers import histogram_path
 from ..utils import SLUG_RE, _now  # noqa: F401 - re-exported for the other asset routers
 from .meshes import attach_mesh_to_volume, delete_volume_mesh, get_volume_mesh, volume_mesh_source, volume_mesh_file
 
 router = APIRouter(prefix="/api/volumes", tags=["volumes"])
 
-# In-memory caches to keep serve_zarr_file async and avoid threadpool/DB/JWT
+# In-memory caches to keep serve_sharded_file async and avoid threadpool/DB/JWT
 # overhead on every 64^3 brick request.
 _TOKEN_CACHE: Dict[str, Tuple[float, dict]] = {}
 _VOLUME_LOC_CACHE: Dict[int, Tuple[float, str, str, Path]] = {}
@@ -40,7 +39,7 @@ def _invalidate_volume_cache(volume_id: int) -> None:
 
 
 def _validate_rel_path(path: str) -> str:
-    """Validates and normalizes a relative path inside a Zarr store.
+    """Validates and normalizes a relative path inside a sharded volume.
     Rejects empty paths, leading slashes, backslashes, null bytes, empty
     segments ('//'), and '.' or '..' traversal segments before any filesystem
     '%', '?' and '#' are interpreted again by nginx when the path is placed in an
@@ -68,7 +67,7 @@ def _check_file_token_cached(token: str, volume_id: int, kind: str) -> dict:
 
     payload = _check_file_token(token, volume_id, kind)
     token_exp = float(payload.get("exp", 0))
-    ttl = max(1.0, float(settings.ZARR_META_CACHE_TTL_SECONDS))
+    ttl = max(1.0, float(settings.FILE_META_CACHE_TTL_SECONDS))
     exp_ts = min(token_exp, now + ttl) if token_exp > now else now
     if exp_ts > now:
         if len(_TOKEN_CACHE) >= _CACHE_MAX_SIZE:
@@ -112,7 +111,6 @@ def _volume_read(v: Volume, mesh: Optional[Mesh] = None) -> VolumeRead:
         description=v.description,
         has_thumbnail=bool(v.thumbnail_path),
         has_mesh=v.has_mesh,
-        mesh_filename=v.mesh_filename,
         mesh_status=mesh.status if mesh else None,
         mesh_status_log=mesh_log,
         created_at=v.created_at.isoformat(),
@@ -222,7 +220,7 @@ def create_volume(
         title=title,
         description=description,
         thumbnail_path=thumbnail_name,
-        data_path="",  # filled in by _process_upload once conversion/extraction finishes
+        data_path="",  # legacy DB field; kiln files live directly in the slug directory
         created_by=editor.id,
         status=AssetStatus.processing,
         status_log=f"{_now()}  Upload received, queued for processing\n",
@@ -304,23 +302,16 @@ def _process_upload(volume_id: int, vol_dir_str: str, source_kind: str, upload_f
 
 
 def backfill_missing_histograms() -> None:
-    """Start-up job, run in a background thread: computes the histogram of every ready volume
-    that has none (volumes from before histograms existed, or whose computation failed).
-    One volume at a time; failures are only logged and retried at the next start."""
+    """Report missing histograms; sharded conversion writes them during ingestion.
+
+    Reconstructing a histogram from the compressed brick store is intentionally not
+    attempted at startup because it would require decompressing the full dataset.
+    """
     with Session(engine) as session:
         ready = session.exec(select(Volume).where(Volume.status == AssetStatus.ready)).all()
-        todo = [(v.slug, v.data_path) for v in ready if v.data_path]
-    missing = [(slug, rel) for slug, rel in todo if not histogram_path(_volume_dir(slug)).exists()]
-    if not missing:
-        return
-    print(f"[volume-gallery] Computing {len(missing)} missing histogram(s) in the background")
-    for slug, zarr_rel in missing:
-        vol_dir = _volume_dir(slug)
-        try:
-            compute_histogram(vol_dir / zarr_rel, histogram_path(vol_dir))
-            print(f"[Volume {slug}] Histogram computed")
-        except Exception as exc:  # noqa: BLE001 - e.g. the volume was deleted meanwhile
-            print(f"[Volume {slug}] Histogram skipped: {exc}")
+        missing = [v.slug for v in ready if not histogram_path(_volume_dir(v.slug)).is_file()]
+    if missing:
+        print(f"[volume-gallery] {len(missing)} sharded volume(s) have no histogram: {', '.join(missing)}")
 
 
 @router.get("/{volume_id}/histogram")
@@ -471,7 +462,7 @@ def revoke_access(
 
 
 # ---------- File access (kiln-render + mesh download) ----------
-# kiln-render's KilnViewer fetches the zarr root by plain URL, so we hand it a
+# kiln-render fetches the sharded volume metadata by plain URL, so we hand it a
 # short-lived signed URL instead of requiring an Authorization header.
 
 @router.get("/{volume_id}/volume-data-access-url", response_model=FileAccessUrl)
@@ -480,7 +471,7 @@ def volume_data_access_url(
     request: Request,
     min_level: Optional[int] = Query(
         None, ge=0,
-        description="Finest OME-NGFF multiscale level index to load (0 = full resolution; "
+        description="Finest sharded LOD index to load (0 = full resolution; "
                      "higher = coarser). Levels below this are never streamed. Omit for no cap.",
     ),
     session: Session = Depends(get_session),
@@ -563,9 +554,7 @@ def mesh_view_url(
 
 
 # ---------- Slice views: planes extracted server-side ----------
-# The browser asks for one finished plane at a time instead of streaming zarr
-# chunks (a plane needs a whole column of chunks: ~1000 requests for a 2000^3
-# volume). See helpers/slices.py for the cache that keeps scrolling fast.
+# The browser asks for one finished plane at a time, read directly from sharded bricks. See helpers/slices.py for the cache that keeps scrolling fast.
 
 @router.get("/{volume_id}/slice-access-url", response_model=FileAccessUrl)
 def slice_access_url(
@@ -597,12 +586,14 @@ def _slice_store(volume_id: int, token: str, level: int, session: Session):
     volume = session.get(Volume, volume_id)
     if not volume:
         raise HTTPException(status_code=404, detail="Volume not found")
-    zarr_root = (_volume_dir(volume.slug) / volume.data_path).resolve()
+    # Kiln files live directly in the volume slug directory. Do not append the
+    # legacy data_path column: it is not a subdirectory in this storage layout.
+    shard_root = _volume_dir(volume.slug).resolve()
     # Plane reads can take a while: give the DB connection back first so a
     # burst of slice requests cannot exhaust the connection pool.
     session.close()
     try:
-        return open_volume_slices(zarr_root, level)
+        return open_volume_slices(shard_root, level)
     except SliceError as exc:
         raise HTTPException(status_code=exc.status, detail=str(exc))
 
@@ -643,9 +634,26 @@ def slice_plane(
         body, headers = plane_response_parts(vs, axis, index, channel, stride, enc)
     except SliceError as exc:
         raise HTTPException(status_code=exc.status, detail=str(exc))
-    # Same reasoning as serve_zarr_file: the bytes are fixed by the token's claims.
+    # The bytes are fixed by the token's claims.
     headers["Cache-Control"] = f"public, max-age={settings.FILE_TOKEN_EXPIRE_MINUTES * 60}, immutable"
     return Response(content=body, media_type="application/octet-stream", headers=headers)
+
+
+def _get_volume_shard_loc(volume_id: int):
+    """Resolve the canonical sharded dataset location for a ready volume."""
+    with Session(engine) as session:
+        volume = session.get(Volume, volume_id)
+        if volume is None:
+            raise HTTPException(status_code=404, detail="Volume not found")
+        slug = volume.slug
+    # The canonical dataset layout is flat: all kiln files are directly under
+    # /data/volumes/<slug>/. Ignore data_path, which is retained only for DB
+    # compatibility with older versions of the application.
+    data_rel = ""
+    root = _volume_dir(slug).resolve()
+    if not (root / "volume.json").is_file():
+        raise HTTPException(status_code=404, detail="Volume data not found")
+    return slug, data_rel, root
 
 
 def _check_file_token(token: str, volume_id: int, kind: str) -> dict:
@@ -673,11 +681,11 @@ async def serve_sharded_file(volume_id: int, token: str, path: str):
     match = _SHARDED_FILE_RE.match(clean_path)
     if not match:
         raise HTTPException(status_code=404, detail="Not found")
-    slug, data_rel, data_root = _get_volume_zarr_loc(volume_id)
+    slug, data_rel, data_root = _get_volume_shard_loc(volume_id)
 
     min_lod = payload.get("min_lod")
     lod = match.group(1) or match.group(2)
-    # Unlike the zarr store (where capping only changes which levels the metadata lists), a level's
+    # Unlike metadata-only level capping, a level's
     # files are named after it, so the cap can be enforced outright: kiln never asks for the
     # finer levels once volume.json no longer lists them.
     if min_lod and lod is not None and int(lod) < min_lod:
@@ -686,12 +694,12 @@ async def serve_sharded_file(volume_id: int, token: str, path: str):
     # volume.json is the only file that lists the levels, so it is the only one rewritten.
     rewrite_meta = bool(min_lod) and clean_path == "volume.json"
 
-    # Same reasoning as serve_zarr_file: the bytes are fixed by the token's claims.
+    # The bytes are fixed by the token's claims.
     cache_headers = {"Cache-Control": f"public, max-age={settings.FILE_TOKEN_EXPIRE_MINUTES * 60}, immutable"}
     is_json = clean_path.endswith(".json")
 
-    if settings.ZARR_ACCEL_REDIRECT and not rewrite_meta:
-        prefix = settings.ZARR_ACCEL_PREFIX.rstrip("/")
+    if settings.SHARD_ACCEL_REDIRECT and not rewrite_meta:
+        prefix = settings.SHARD_ACCEL_PREFIX.rstrip("/")
         rel_parts = [p for p in (slug, data_rel, clean_path) if p]
         headers = {
             **cache_headers,
@@ -790,7 +798,7 @@ def serve_mesh_file(
         raise HTTPException(status_code=404, detail="Not found")
     mesh = get_volume_mesh(session, volume_id)
     mesh_path = volume_mesh_source(mesh)
-    filename = volume.mesh_filename or f"{volume.slug}.{mesh.file_extension}"
+    filename = f"{volume.slug}.{mesh.file_extension}"
     if mesh_path is None or not mesh_path.exists():
         raise HTTPException(status_code=404, detail="Not found")
     return FileResponse(
@@ -806,7 +814,7 @@ def serve_mesh_view_file(
 ):
     _check_file_token(token, volume_id, "volume-mesh-view")
     mesh = get_volume_mesh(session, volume_id)
-    if mesh is None or not mesh.mesh_filename:
+    if mesh is None:
         raise HTTPException(status_code=404, detail="Not found")
     nxz_path = volume_mesh_file(mesh)
     if not nxz_path.exists():

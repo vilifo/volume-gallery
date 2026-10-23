@@ -5,7 +5,7 @@ A plane is named by the two physical axes it spans and indexed along the third:
 
 Why the server does this
 ------------------------
-Volumes are stored as OME-Zarr with cubic 64^3 chunks. Showing ONE plane of a
+Volumes are stored as kiln sharded binary with cubic 64^3 bricks. Showing ONE plane of a
 chunked 3D array needs every chunk the plane crosses (for a 2000^3 volume:
 32 x 32 = 1024 chunks), whichever axis is chosen. Done in the browser that is
 1024 HTTP requests plus 1024 decodes per plane, and ~0.5 GB per 64-plane slab.
@@ -33,10 +33,8 @@ import gzip
 import json
 import os
 import numpy as np
-import zarr
 
 from ..config import settings
-from .volume import get_multiscales
 
 AXIS_NORMAL = {"xy": "z", "xz": "y", "yz": "x"}
 AXES = tuple(AXIS_NORMAL)
@@ -168,159 +166,6 @@ class VolumeSlices:
 
     def get_plane(self, axis: str, index: int, channel: int = 0) -> Tuple[np.ndarray, str]:
         raise NotImplementedError()
-
-
-class VolumeSlicesZarr(VolumeSlices):
-    """Read access to the planes of one OME-Zarr volume (one resolution level)."""
-
-    def __init__(self, dataset_root: Path, level: int = 0, cache: Optional[SlabCache] = None):
-        self.root = Path(dataset_root)
-        self.level = level
-        self._cache = cache
-        try:
-            group = zarr.open_group(str(self.root), mode="r")
-        except Exception as exc:  # missing / unreadable store
-            raise SliceError(f"Cannot open the volume's zarr store: {exc}", 404) from exc
-        attrs = dict(group.attrs)
-        multiscales = get_multiscales(attrs)
-        if not multiscales:
-            raise SliceError("No OME-NGFF multiscales metadata found")
-        ms = multiscales[0]
-        datasets = ms.get("datasets") or []
-        if not 0 <= level < len(datasets):
-            raise SliceError(f"Level {level} does not exist (volume has {len(datasets)} levels)")
-        self.level_count = len(datasets)
-        ds = datasets[level]
-        self.arr = group[ds["path"]]
-
-        names = [(a["name"] if isinstance(a, dict) else str(a)).lower() for a in ms.get("axes", [])]
-        if not names:
-            names = ["t", "c", "z", "y", "x"][-self.arr.ndim:]
-        for needed in ("z", "y", "x"):
-            if needed not in names:
-                raise SliceError(f"Array has no '{needed}' axis")
-        self.names = names
-        self._idx = {n: names.index(n) for n in names}
-
-        shape = self.arr.shape
-        self.dims = {a: int(shape[self._idx[a]]) for a in "xyz"}
-        self.chunk = {a: int(min(self.arr.chunks[self._idx[a]], self.dims[a])) for a in "xyz"}
-        self.channels = int(shape[self._idx["c"]]) if "c" in self._idx else 1
-
-        src = np.dtype(self.arr.dtype)
-        if src.name in _NATIVE:
-            self.dtype = src.name
-        elif src.kind in "iuf":
-            self.dtype = "float32"  # wider types are sent as float32
-        else:
-            raise SliceError(f"Unsupported data type {src}")
-        self.source_dtype = src.name
-
-        self.spacing = {"x": 1.0, "y": 1.0, "z": 1.0}
-        for t in ds.get("coordinateTransformations", []):
-            if t.get("type") == "scale" and len(t.get("scale", [])) == len(names):
-                for a in "xyz":
-                    self.spacing[a] = float(t["scale"][self._idx[a]] or 1.0)
-        unit = next((a.get("unit") for a in ms.get("axes", []) if isinstance(a, dict) and a.get("name", "").lower() == "x"), None)
-        self.unit = unit
-
-        ome = attrs.get("ome") if isinstance(attrs.get("ome"), dict) else attrs
-        omero = ome.get("omero") or attrs.get("omero") or {}
-        win = (omero.get("channels") or [{}])[0].get("window") or {}
-        start, end = win.get("start"), win.get("end")
-        self._omero_window = (float(start), float(end)) if start is not None and end is not None and end > start else None
-        self._window: Optional[dict] = None
-        self._window_lock = threading.Lock()
-
-        meta_file = self.root / ("zarr.json" if (self.root / "zarr.json").exists() else ".zattrs")
-        self.stamp = meta_file.stat().st_mtime_ns if meta_file.exists() else 0
-
-    # ------------------------------------------------------------------ metadata
-
-    def info(self) -> dict:
-        lo, hi = _NATIVE.get(self.dtype, (None, (0.0, 1.0)))[1]
-        return {
-            "level": self.level,
-            "levelCount": self.level_count,
-            "dims": self.dims,
-            "chunk": self.chunk,
-            "spacing": self.spacing,
-            "unit": self.unit,
-            "dtype": self.dtype,
-            "sourceDtype": self.source_dtype,
-            "channels": self.channels,
-            "range": [lo, hi],
-            "window": self.suggested_window(),
-        }
-
-    def suggested_window(self) -> dict:
-        """OME `omero` window if present, else robust percentiles of the middle xy plane."""
-        with self._window_lock:
-            if self._window is None:
-                if self._omero_window:
-                    start, end = self._omero_window
-                    self._window = {"center": (start + end) / 2, "width": end - start, "source": "omero"}
-                else:
-                    plane = self._read_direct("xy", self.dims["z"] // 2, 0)
-                    self._window = {**percentile_window(plane), "source": "auto"}
-            return self._window
-
-    # --------------------------------------------------------------------- reads
-
-    def _selector(self, sel: dict, channel: int) -> tuple:
-        out = []
-        for n in self.names:
-            if n in sel:
-                out.append(sel[n])
-            elif n == "c":
-                out.append(channel)
-            else:
-                out.append(0)
-        return tuple(out)
-
-    def _read_direct(self, axis: str, index: int, channel: int) -> np.ndarray:
-        sel = {"z": slice(None), "y": slice(None), "x": slice(None)}
-        sel[AXIS_NORMAL[axis]] = index
-        return np.asarray(self.arr[self._selector(sel, channel)])
-
-    def _read_slab(self, axis: str, k: int, channel: int) -> np.ndarray:
-        n = AXIS_NORMAL[axis]
-        sel = {"z": slice(None), "y": slice(None), "x": slice(None)}
-        sel[n] = slice(k * self.chunk[n], min((k + 1) * self.chunk[n], self.dims[n]))
-        return np.asarray(self.arr[self._selector(sel, channel)])  # (z, y, x) order, thin along n
-
-    @staticmethod
-    def _plane_from_slab(slab: np.ndarray, axis: str, local: int) -> np.ndarray:
-        if axis == "xy":
-            return slab[local]
-        if axis == "xz":
-            return slab[:, local, :]
-        return slab[:, :, local]
-
-    def get_plane(self, axis: str, index: int, channel: int = 0) -> Tuple[np.ndarray, str]:
-        """The plane as a 2D array (rows = v, columns = u) and where it came from.
-
-        xy: (y, x); xz: (z, x); yz: (z, y).
-        """
-        if axis not in AXIS_NORMAL:
-            raise SliceError(f"axis must be one of {', '.join(AXES)}")
-        n = AXIS_NORMAL[axis]
-        if not 0 <= index < self.dims[n]:
-            raise SliceError(f"{axis} index must be in 0..{self.dims[n] - 1}")
-        if not 0 <= channel < self.channels:
-            raise SliceError(f"channel must be in 0..{self.channels - 1}")
-
-        cache = self._cache if self._cache is not None else slab_cache()
-        k = index // self.chunk[n]
-        thickness = min(self.chunk[n], self.dims[n] - k * self.chunk[n])
-        slab_bytes = (
-            self.dims["x"] * self.dims["y"] * self.dims["z"] // self.dims[n] * thickness * self.arr.dtype.itemsize
-        )
-        if cache.fits(slab_bytes):
-            key = (str(self.root), self.stamp, self.level, channel, axis, k)
-            slab = cache.get_or_build(key, slab_bytes, lambda: self._read_slab(axis, k, channel))
-            return self._plane_from_slab(slab, axis, index - k * self.chunk[n]), "slab"
-        return self._read_direct(axis, index, channel), "direct"
 
 
 class VolumeSlicesKiln(VolumeSlices):
@@ -609,8 +454,9 @@ _REGISTRY_SIZE = 16
 def open_volume_slices(dataset_root: Path, level: int = 0) -> VolumeSlices:
     """Cached VolumeSlices for a store (a replaced store gets a new entry via its mtime)."""
     root = Path(dataset_root)
-    json_files = [f for f in os.listdir(root) if f.endswith(".json")]
-    meta = root / json_files[0] if len(json_files) > 0 else None
+    meta = root / "volume.json"
+    if not meta.is_file():
+        raise SliceError(f"Cannot open volume metadata: {meta} not found", 404)
     stamp = meta.stat().st_mtime_ns if meta is not None else 0
     key = (str(root), stamp, level)
     with _registry_lock:
@@ -618,7 +464,7 @@ def open_volume_slices(dataset_root: Path, level: int = 0) -> VolumeSlices:
         if vs is not None:
             _registry.move_to_end(key)
             return vs
-    vs = VolumeSlices(root, level)  # may raise; built outside the lock
+    vs = VolumeSlicesKiln(root, level)  # may raise; built outside the lock
     with _registry_lock:
         _registry[key] = vs
         while len(_registry) > _REGISTRY_SIZE:
