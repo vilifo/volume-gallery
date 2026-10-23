@@ -1,8 +1,8 @@
 import enum
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Optional
 
-from sqlmodel import Field, SQLModel, Column, DateTime
+from sqlmodel import Field, SQLModel, DateTime
 
 from .utils import get_utc_now
 
@@ -59,9 +59,7 @@ class AssetAccessBase(SQLModel):
 
 class Volume(AssetBase, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
-    zarr_path: str = Field(default="data.ome.zarr")
     has_mesh: bool = Field(default=False)
-    mesh_filename: Optional[str] = Field(default=None)
     num_lod_levels: Optional[int] = Field(default=None)
 
 
@@ -73,7 +71,6 @@ class VolumeAccess(AssetAccessBase, table=True):
 
 class Mesh(AssetBase, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
-    mesh_filename: Optional[str] = Field(default=None)
     file_extension: Optional[str] = Field(default="stl")  # file extension, e.g. "stl" or "ply"
     volume_id: Optional[int] = Field(default=None, foreign_key="volume.id", index=True)
 
@@ -87,9 +84,7 @@ class MeshAccess(AssetAccessBase, table=True):
 
 class PointCloud(AssetBase, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
-    pc_path: str = Field(default="potree")
     has_mesh: bool = Field(default=False)
-    mesh_filename: Optional[str] = Field(default=None)
 
 
 class PointCloudAccess(AssetAccessBase, table=True):

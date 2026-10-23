@@ -43,7 +43,7 @@ processing/ (optional, created at runtime) scratch space for uploads being proce
   range-reads directly against the zarr store, so it can't send an
   `Authorization` header the way a normal API client would. Instead, when
   you open a volume the backend hands the page a short-lived signed URL
-  (`/api/volumes/{id}/zarr-access-url`, default 30 min) that kiln-render
+  (`/api/volumes/{id}/volume-data-access-url`, default 30 min) that kiln-render
   fetches chunks from directly. Mesh downloads work the same way. Anyone with
   the raw URL can use it until it expires, but they can't get one without
   first authenticating as a user with access to that volume.

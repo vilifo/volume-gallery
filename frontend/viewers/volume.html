@@ -826,7 +826,7 @@
 
         try {
           histogramPromise = histogramPromise || api.volumeHistogram(volumeId); // fetched once, in parallel
-          const access = await api.zarrAccessUrl(volumeId, minLevel);
+          const access = await api.volumeDataAccessUrl(volumeId, minLevel);
           if (token !== loadToken) return;
           resetZarrAccessWatch(); // fresh token: a later expiry may prompt again
 

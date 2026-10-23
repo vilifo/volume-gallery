@@ -1,6 +1,6 @@
 // Tells the user when the volume's data access link has expired.
 //
-// The chunk URLs carry a short-lived signed token (see zarr-access-url). When it expires the
+// The chunk URLs carry a short-lived signed token (see volume-data-access-url). When it expires the
 // server answers every further chunk request with 403, and kiln-render treats that like a
 // missing brick: no error, the view just stops filling in. This module notices those 403s and
 // asks the user to reload the page, which fetches a fresh token.

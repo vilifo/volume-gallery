@@ -1,3 +1,7 @@
+# The stock image's nginx.conf (which sets this) is replaced by this template, so without
+# it nginx runs a single worker process.
+worker_processes auto;
+
 events {
     worker_connections 1024;
 }
@@ -8,6 +12,11 @@ http {
     sendfile      on;
     tcp_nopush    on;
     tcp_nodelay   on;
+    # Don't let one large sendfile() monopolise a worker while many chunk requests wait.
+    sendfile_max_chunk 1m;
+    # Chunk loading issues thousands of requests per connection; the default (1000)
+    # forces a reconnect + TLS handshake every few seconds of panning.
+    keepalive_requests 100000;
 
     open_file_cache          max=4096 inactive=60s;
     open_file_cache_valid    30s;
@@ -75,7 +84,8 @@ http {
 			internal;
 			gzip off;
 			alias /data/volumes/;
-			 add_header Cache-Control $upstream_http_cache_control always;
+            # Cache-Control / Content-Type set by the backend are carried over automatically
+			# on X-Accel-Redirect; adding them again here duplicated the header.
 		}
 
 		location ~ ^/api/volumes/[0-9]+/dataset\.ome\.zarr/ {

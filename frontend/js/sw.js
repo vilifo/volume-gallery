@@ -5,13 +5,49 @@ const CACHE_NAME = "vg-zarr-chunks-v1";
 // Match /api/volumes/{id}/dataset.ome.zarr/{token}/{path}
 const ZARR_URL_RE = /^\/api\/volumes\/(\d+)\/dataset\.ome\.zarr\/[^/]+\/(.+)$/;
 
-// Maps volumeId (string) -> version hash supplied by zarr-access-url
+// Maps volumeId (string) -> version hash supplied by volume-data-access-url
 const volumeVersions = new Map();
+
+// The service worker is stopped after ~30 s idle and restarted by the next fetch, which empties
+// volumeVersions. Without persisting it, chunks fetched after such a restart were looked up (and
+// stored) under the "default" version, missing everything cached earlier. The map is therefore
+// kept in the cache itself and reloaded on demand.
+const META_URL = `${self.location.origin}/__vg_zarr_cache__/meta/versions`;
+let versionsLoaded = null;
+
+function loadVersions() {
+    if (!versionsLoaded) {
+        versionsLoaded = (async () => {
+            try {
+                const cache = await caches.open(CACHE_NAME);
+                const r = await cache.match(META_URL);
+                if (!r) return;
+                const stored = await r.json();
+                for (const [k, v] of Object.entries(stored)) {
+                    if (!volumeVersions.has(k)) volumeVersions.set(k, String(v));
+                }
+            } catch (_) {
+            }
+        })();
+    }
+    return versionsLoaded;
+}
+
+async function saveVersions() {
+    try {
+        const cache = await caches.open(CACHE_NAME);
+        await cache.put(META_URL, new Response(JSON.stringify(Object.fromEntries(volumeVersions)), {
+            headers: {"Content-Type": "application/json"},
+        }));
+    } catch (_) {
+    }
+}
 
 // Eviction hysteresis: evict oldest entries when storage exceeds high-water mark
 const MAX_CACHE_BYTES_FALLBACK = 512 * 1024 * 1024; // 512 MB fallback if estimate() unavailable
 const QUOTA_FRACTION_LIMIT = 0.5;
 let opsSinceCheck = 0;
+let entryCount = null; // chunk entries in the cache; counted once, then tracked
 let evictionInFlight = null;
 
 self.addEventListener("install", () => {
@@ -27,17 +63,22 @@ self.addEventListener("message", (event) => {
     if (!data || typeof data !== "object") return;
 
     if (data.type === "SET_VOLUME_VERSION" && data.volumeId != null && data.version) {
-        const volId = String(data.volumeId);
-        const prev = volumeVersions.get(volId);
-        volumeVersions.set(volId, String(data.version));
-        if (prev && prev !== String(data.version)) {
-            event.waitUntil(purgeVolumeStaleVersions(volId, String(data.version)));
-        }
-        if (event.ports && event.ports[0]) {
-            event.ports[0].postMessage({ok: true});
-        }
+        const port = event.ports && event.ports[0];
+        event.waitUntil((async () => {
+            await loadVersions();
+            const volId = String(data.volumeId);
+            const version = String(data.version);
+            const prev = volumeVersions.get(volId);
+            volumeVersions.set(volId, version);
+            if (prev !== version) {
+                await saveVersions();
+                if (prev) await purgeVolumeStaleVersions(volId, version);
+            }
+            if (port) port.postMessage({ok: true});
+        })());
     } else if (data.type === "CLEAR_ZARR_CACHE") {
         volumeVersions.clear();
+        entryCount = null;
         event.waitUntil(caches.delete(CACHE_NAME));
     }
 });
@@ -70,8 +111,12 @@ async function maybeEvict() {
                 const cap = quota > 0 ? Math.min(quota * QUOTA_FRACTION_LIMIT, 2 * 1024 * 1024 * 1024) : MAX_CACHE_BYTES_FALLBACK;
                 overLimit = usage > cap;
             }
+            // cache.keys() walks every entry, so it is only called when needed (first run, to
+            // count the entries, or when a limit is hit) rather than on every check.
+            if (!overLimit && entryCount !== null && entryCount <= 8000) return;
             const cache = await caches.open(CACHE_NAME);
-            const keys = await cache.keys();
+            const keys = (await cache.keys()).filter((req) => req.url !== META_URL);
+            entryCount = keys.length;
             if (overLimit || keys.length > 8000) {
                 // Delete oldest ~20% of cached chunk entries (Cache API keys() returns insertion order)
                 const removeCount = Math.max(1, Math.floor(keys.length * 0.2));
@@ -119,12 +164,12 @@ self.addEventListener("fetch", (event) => {
         return;
     }
 
-    const ver = volumeVersions.get(volumeId) || url.searchParams.get("v") || "default";
-    const cacheKeyUrl = `${self.location.origin}/__vg_zarr_cache__/v/${volumeId}/${ver}/${innerPath}`;
-    const cacheKeyReq = new Request(cacheKeyUrl, {method: "GET"});
-
     event.respondWith(
         (async () => {
+            await loadVersions();
+            const ver = volumeVersions.get(volumeId) || url.searchParams.get("v") || "default";
+            const cacheKeyUrl = `${self.location.origin}/__vg_zarr_cache__/v/${volumeId}/${ver}/${innerPath}`;
+            const cacheKeyReq = new Request(cacheKeyUrl, {method: "GET"});
             const cache = await caches.open(CACHE_NAME);
             const hit = await cache.match(cacheKeyReq);
             if (hit) return hit;
@@ -132,7 +177,7 @@ self.addEventListener("fetch", (event) => {
             const resp = await fetch(req);
             if (resp.status === 403) event.waitUntil(notifyAccessDenied(volumeId));
             if (resp.status === 200) {
-                cache.put(cacheKeyReq, resp.clone()).then(() => maybeEvict()).catch(() => {
+                cache.put(cacheKeyReq, resp.clone()).then(() => { if (entryCount !== null) entryCount++; return maybeEvict(); }).catch(() => {
                 });
             }
             return resp;

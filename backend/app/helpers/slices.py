@@ -29,7 +29,9 @@ from collections import OrderedDict
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from typing import Dict, Optional, Tuple
-
+import gzip
+import json
+import os
 import numpy as np
 import zarr
 
@@ -153,12 +155,26 @@ def slab_cache() -> SlabCache:
 
 # ----------------------------------------------------------------------- the store
 
-
 class VolumeSlices:
+    def __init__(self, dataset_root: Path, level: int = 0, cache: Optional[SlabCache] = None):
+        self.dtype = np.uint16
+        raise NotImplementedError()
+
+    def info(self) -> dict:
+        raise NotImplementedError()
+
+    def suggested_window(self) -> dict:
+        raise NotImplementedError()
+
+    def get_plane(self, axis: str, index: int, channel: int = 0) -> Tuple[np.ndarray, str]:
+        raise NotImplementedError()
+
+
+class VolumeSlicesZarr(VolumeSlices):
     """Read access to the planes of one OME-Zarr volume (one resolution level)."""
 
-    def __init__(self, zarr_root: Path, level: int = 0, cache: Optional[SlabCache] = None):
-        self.root = Path(zarr_root)
+    def __init__(self, dataset_root: Path, level: int = 0, cache: Optional[SlabCache] = None):
+        self.root = Path(dataset_root)
         self.level = level
         self._cache = cache
         try:
@@ -307,6 +323,273 @@ class VolumeSlices:
         return self._read_direct(axis, index, channel), "direct"
 
 
+class VolumeSlicesKiln(VolumeSlices):
+    """Read access to the planes of one binary-sharded volume (one resolution level)."""
+
+    def __init__(self, dataset_root: Path, level: int = 0, cache: Optional[SlabCache] = None):
+        self.root = Path(dataset_root)
+        self.level = level
+        self._cache = cache
+
+        vol_json_path = self.root / "volume.json"
+        if not vol_json_path.exists():
+            raise SliceError(f"Cannot open volume metadata: {vol_json_path} not found", 404)
+
+        try:
+            with open(vol_json_path, "r", encoding="utf-8") as f:
+                vol_meta = json.load(f)
+        except Exception as exc:
+            raise SliceError(f"Cannot read volume.json: {exc}", 404) from exc
+
+        levels = vol_meta.get("levels") or []
+        if not 0 <= level < len(levels):
+            raise SliceError(f"Level {level} does not exist (volume has {len(levels)} levels)")
+        self.level_count = len(levels)
+
+        lvl_meta = next((l for l in levels if l.get("lod") == level), levels[level])
+
+        self.brick_size = int(vol_meta.get("brickSize", 64))
+        self.physical_size = int(vol_meta.get("physicalSize", self.brick_size + 2))
+
+        # Dimensions in volume.json are [W, H, D] -> [x, y, z]
+        w, h, d = lvl_meta["dimensions"]
+        self.dims = {"x": int(w), "y": int(h), "z": int(d)}
+        self.chunk = {a: int(min(self.brick_size, self.dims[a])) for a in "xyz"}
+
+        bx, by, bz = lvl_meta["bricks"]
+        self.bricks = {"x": int(bx), "y": int(by), "z": int(bz)}
+        self.channels = 1  # Sharded format is single-channel scalar volume
+
+        fmt = vol_meta.get("format", "uint8")
+        src = np.dtype(fmt)
+        if src.name in _NATIVE:
+            self.dtype = src.name
+        elif src.kind in "iuf":
+            self.dtype = "float32"
+        else:
+            raise SliceError(f"Unsupported data type {src}")
+        self.source_dtype = src.name
+        self._np_dtype = src
+
+        # Scale base voxelSpacing [sx, sy, sz] by 2^level for downsampled LODs
+        base_spacing = vol_meta.get("voxelSpacing") or [1.0, 1.0, 1.0]
+        scale_factor = float(1 << level)
+        self.spacing = {
+            "x": float(base_spacing[0] or 1.0) * scale_factor,
+            "y": float(base_spacing[1] or 1.0) * scale_factor,
+            "z": float(base_spacing[2] or 1.0) * scale_factor,
+        }
+        self.unit = vol_meta.get("unit", None)
+
+        # Load brick index (lodN_index.json) and verify shard binary (lodN.bin)
+        index_file = self.root / lvl_meta.get("indexFile", f"lod{level}_index.json")
+        self.bin_file = self.root / lvl_meta.get("binFile", f"lod{level}.bin")
+
+        if not index_file.exists() or not self.bin_file.exists():
+            raise SliceError(f"Missing shard binary or index file for level {level}", 404)
+
+        try:
+            with open(index_file, "r", encoding="utf-8") as f:
+                idx_meta = json.load(f)
+        except Exception as exc:
+            raise SliceError(f"Cannot read {index_file.name}: {exc}", 404) from exc
+
+        self._compressed = bool(idx_meta.get("compressed", vol_meta.get("compressed", True)))
+        self._entries: dict = idx_meta.get("entries") or {}
+
+        self._omero_window = None
+        self._window: Optional[dict] = None
+        self._window_lock = threading.Lock()
+
+        self.stamp = vol_json_path.stat().st_mtime_ns
+
+    # ------------------------------------------------------------------ metadata
+
+    def info(self) -> dict:
+        lo, hi = _NATIVE.get(self.dtype, (None, (0.0, 1.0)))[1]
+        return {
+            "level": self.level,
+            "levelCount": self.level_count,
+            "dims": self.dims,
+            "chunk": self.chunk,
+            "spacing": self.spacing,
+            "unit": self.unit,
+            "dtype": self.dtype,
+            "sourceDtype": self.source_dtype,
+            "channels": self.channels,
+            "range": [lo, hi],
+            "window": self.suggested_window(),
+        }
+
+    def suggested_window(self) -> dict:
+        """Robust percentiles of the middle xy plane."""
+        with self._window_lock:
+            if self._window is None:
+                if self._omero_window:
+                    start, end = self._omero_window
+                    self._window = {"center": (start + end) / 2, "width": end - start, "source": "omero"}
+                else:
+                    plane = self._read_direct("xy", self.dims["z"] // 2, 0)
+                    self._window = {**percentile_window(plane), "source": "auto"}
+            return self._window
+
+    # --------------------------------------------------------------------- reads
+
+    def _read_brick_core(self, fd: int, bx: int, by: int, bz: int) -> Optional[np.ndarray]:
+        """Read a single physical brick (66^3) from lodN.bin and return its logical core (64^3) in (z, y, x) order."""
+        entry = self._entries.get(f"{bx}/{by}/{bz}")
+        if not entry:
+            return None
+
+        raw_bytes = os.pread(fd, int(entry["size"]), int(entry["offset"]))
+        if self._compressed:
+            raw_bytes = gzip.decompress(raw_bytes)
+
+        p = self.physical_size
+        # Bricks are stored in x-fastest, y-middle, z-slowest order -> shape (z, y, x) in C order
+        brick = np.frombuffer(raw_bytes, dtype=self._np_dtype).reshape((p, p, p))
+        # Strip the 1-voxel border on all sides to get the logical 64^3 core
+        return brick[1:-1, 1:-1, 1:-1]
+
+    def _read_slab(self, axis: str, k: int, channel: int) -> np.ndarray:
+        """Assemble a full brick-thick 3D slab in (z, y, x) order along normal axis `n`."""
+        n = AXIS_NORMAL[axis]
+        bs = self.brick_size
+        start_n = k * bs
+        end_n = min((k + 1) * bs, self.dims[n])
+        thickness = end_n - start_n
+
+        slab_shape = {
+            "z": thickness if n == "z" else self.dims["z"],
+            "y": thickness if n == "y" else self.dims["y"],
+            "x": thickness if n == "x" else self.dims["x"],
+        }
+        slab = np.zeros((slab_shape["z"], slab_shape["y"], slab_shape["x"]), dtype=self._np_dtype)
+
+        bz_range = [k] if n == "z" else range(self.bricks["z"])
+        by_range = [k] if n == "y" else range(self.bricks["y"])
+        bx_range = [k] if n == "x" else range(self.bricks["x"])
+
+        fd = os.open(self.bin_file, os.O_RDONLY)
+        try:
+            for bz in bz_range:
+                z0 = 0 if n == "z" else bz * bs
+                dz = thickness if n == "z" else min(bs, self.dims["z"] - z0)
+                for by in by_range:
+                    y0 = 0 if n == "y" else by * bs
+                    dy = thickness if n == "y" else min(bs, self.dims["y"] - y0)
+                    for bx in bx_range:
+                        x0 = 0 if n == "x" else bx * bs
+                        dx = thickness if n == "x" else min(bs, self.dims["x"] - x0)
+
+                        core = self._read_brick_core(fd, bx, by, bz)
+                        if core is not None:
+                            slab[z0 : z0 + dz, y0 : y0 + dy, x0 : x0 + dx] = core[:dz, :dy, :dx]
+        finally:
+            os.close(fd)
+
+        if self.dtype != self.source_dtype:
+            slab = slab.astype(self.dtype, copy=False)
+        return slab
+
+    def _read_direct(self, axis: str, index: int, channel: int) -> np.ndarray:
+        """Read a single 2D plane directly without allocating the full 64-slice slab in RAM."""
+        n = AXIS_NORMAL[axis]
+        bs = self.brick_size
+        k = index // bs
+        local = index - k * bs
+
+        if axis == "xy":  # (y, x) at fixed z = index
+            plane = np.zeros((self.dims["y"], self.dims["x"]), dtype=self._np_dtype)
+            fd = os.open(self.bin_file, os.O_RDONLY)
+            try:
+                for by in range(self.bricks["y"]):
+                    y0 = by * bs
+                    dy = min(bs, self.dims["y"] - y0)
+                    for bx in range(self.bricks["x"]):
+                        x0 = bx * bs
+                        dx = min(bs, self.dims["x"] - x0)
+                        core = self._read_brick_core(fd, bx, by, k)
+                        if core is not None:
+                            plane[y0 : y0 + dy, x0 : x0 + dx] = core[local, :dy, :dx]
+            finally:
+                os.close(fd)
+
+        elif axis == "xz":  # (z, x) at fixed y = index
+            plane = np.zeros((self.dims["z"], self.dims["x"]), dtype=self._np_dtype)
+            fd = os.open(self.bin_file, os.O_RDONLY)
+            try:
+                for bz in range(self.bricks["z"]):
+                    z0 = bz * bs
+                    dz = min(bs, self.dims["z"] - z0)
+                    for bx in range(self.bricks["x"]):
+                        x0 = bx * bs
+                        dx = min(bs, self.dims["x"] - x0)
+                        core = self._read_brick_core(fd, bx, k, bz)
+                        if core is not None:
+                            plane[z0 : z0 + dz, x0 : x0 + dx] = core[:dz, local, :dx]
+            finally:
+                os.close(fd)
+
+        else:  # "yz" -> (z, y) at fixed x = index
+            plane = np.zeros((self.dims["z"], self.dims["y"]), dtype=self._np_dtype)
+            fd = os.open(self.bin_file, os.O_RDONLY)
+            try:
+                for bz in range(self.bricks["z"]):
+                    z0 = bz * bs
+                    dz = min(bs, self.dims["z"] - z0)
+                    for by in range(self.bricks["y"]):
+                        y0 = by * bs
+                        dy = min(bs, self.dims["y"] - y0)
+                        core = self._read_brick_core(fd, k, by, bz)
+                        if core is not None:
+                            plane[z0 : z0 + dz, y0 : y0 + dy] = core[:dz, :dy, local]
+            finally:
+                os.close(fd)
+
+        if self.dtype != self.source_dtype:
+            plane = plane.astype(self.dtype, copy=False)
+        return plane
+
+    @staticmethod
+    def _plane_from_slab(slab: np.ndarray, axis: str, local: int) -> np.ndarray:
+        if axis == "xy":
+            return slab[local]
+        if axis == "xz":
+            return slab[:, local, :]
+        return slab[:, :, local]
+
+    def get_plane(self, axis: str, index: int, channel: int = 0) -> Tuple[np.ndarray, str]:
+        """The plane as a 2D array (rows = v, columns = u) and where it came from.
+
+        xy: (y, x); xz: (z, x); yz: (z, y).
+        """
+        if axis not in AXIS_NORMAL:
+            raise SliceError(f"axis must be one of {', '.join(AXES)}")
+        n = AXIS_NORMAL[axis]
+        if not 0 <= index < self.dims[n]:
+            raise SliceError(f"{axis} index must be in 0..{self.dims[n] - 1}")
+        if not 0 <= channel < self.channels:
+            raise SliceError(f"channel must be in 0..{self.channels - 1}")
+
+        cache = self._cache if self._cache is not None else slab_cache()
+        k = index // self.chunk[n]
+        thickness = min(self.chunk[n], self.dims[n] - k * self.chunk[n])
+        slab_bytes = (
+            self.dims["x"]
+            * self.dims["y"]
+            * self.dims["z"]
+            // self.dims[n]
+            * thickness
+            * self._np_dtype.itemsize
+        )
+        if cache.fits(slab_bytes):
+            key = (str(self.root), self.stamp, self.level, channel, axis, k)
+            slab = cache.get_or_build(key, slab_bytes, lambda: self._read_slab(axis, k, channel))
+            return self._plane_from_slab(slab, axis, index - k * self.chunk[n]), "slab"
+        return self._read_direct(axis, index, channel), "direct"
+
+
 def percentile_window(plane: np.ndarray, lo: float = 1.0, hi: float = 99.0) -> dict:
     sample = np.asarray(plane).ravel()
     if sample.size > 400_000:
@@ -323,11 +606,12 @@ _registry_lock = threading.Lock()
 _REGISTRY_SIZE = 16
 
 
-def open_volume_slices(zarr_root: Path, level: int = 0) -> VolumeSlices:
+def open_volume_slices(dataset_root: Path, level: int = 0) -> VolumeSlices:
     """Cached VolumeSlices for a store (a replaced store gets a new entry via its mtime)."""
-    root = Path(zarr_root)
-    meta = root / ("zarr.json" if (root / "zarr.json").exists() else ".zattrs")
-    stamp = meta.stat().st_mtime_ns if meta.exists() else 0
+    root = Path(dataset_root)
+    json_files = [f for f in os.listdir(root) if f.endswith(".json")]
+    meta = root / json_files[0] if len(json_files) > 0 else None
+    stamp = meta.stat().st_mtime_ns if meta is not None else 0
     key = (str(root), stamp, level)
     with _registry_lock:
         vs = _registry.get(key)

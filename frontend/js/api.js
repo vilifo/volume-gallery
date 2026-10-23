@@ -395,9 +395,9 @@ export const api = {
             console.debug("No histogram for this volume:", err.message);
         }
     },
-    zarrAccessUrl(id, minLevel) {
+    volumeDataAccessUrl(id, minLevel) {
         const qs = minLevel != null ? `?min_level=${encodeURIComponent(minLevel)}` : "";
-        return request(`/api/volumes/${id}/zarr-access-url${qs}`);
+        return request(`/api/volumes/${id}/volume-data-access-url${qs}`);
     },
     // Signed base URL for the slice views: one finished plane per request (backend/app/helpers/slices.py)
     sliceAccessUrl(id) {

@@ -126,7 +126,6 @@ def attach_mesh_to_volume(session: Session, volume, mesh_file: UploadFile, edito
     )
     session.add(mesh)
     volume.has_mesh = True
-    volume.mesh_filename = Path(mesh_file.filename or "").name or f"mesh.{source_ext}"
     session.add(volume)
     session.commit()
     session.refresh(mesh)
