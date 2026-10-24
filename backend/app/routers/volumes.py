@@ -171,25 +171,39 @@ def create_volume(
     spacing: Annotated[list[str], Form()] = None,
     mesh_file: Optional[UploadFile] = File(None),
     thumbnail_file: Optional[UploadFile] = File(None, description="Optional PNG/JPEG/WebP thumbnail"),
+    # Instead of the file fields above: ids returned by PUT /api/uploads/volume|mesh, for files
+    # nginx has already written to disk (see routers/uploads.py). Order matters for tiff_upload_ids.
+    tiff_upload_id: Optional[str] = Form(None),
+    tiff_upload_ids: Annotated[list[str], Form()] = None,
+    mesh_upload_id: Optional[str] = Form(None),
     session: Session = Depends(get_session),
     editor: User = Depends(require_editor),
 ):
     if not SLUG_RE.match(slug):
         raise HTTPException(status_code=400, detail="Slug must be lowercase alphanumeric/-/_ (2-63 chars)")
 
-    has_zip = tiff_zip is not None
-    n_sources = int(has_zip) + int(bool(tiff_files))
+    has_zip = tiff_zip is not None or bool(tiff_upload_id)
+    n_sources = int(has_zip) + int(bool(tiff_files)) + int(bool(tiff_upload_ids))
 
     if n_sources == 0:
         raise HTTPException(status_code=400, detail="Provide either tiff_zip or tiff_files")
     if n_sources > 1:
         raise HTTPException(status_code=400, detail="Provide only one of tiff_zip or tiff_files")
+    if mesh_file is not None and mesh_upload_id:
+        raise HTTPException(status_code=400, detail="Provide only one of mesh_file or mesh_upload_id")
     if session.exec(select(Volume).where(Volume.slug == slug)).first():
         raise HTTPException(status_code=409, detail="A volume with this slug already exists")
     thumbnail = read_thumbnail(thumbnail_file) if thumbnail_file is not None else None  # validate before creating anything
-    if isinstance(spacing, tuple | list):
-        raise HTTPException(status_code=400, detail="Spacing must be a list or tuple")
-    spacing = [float(s) for s in spacing]
+    if not isinstance(spacing, tuple | list) or len(spacing) != 3:  # was inverted: every upload got a 400
+        raise HTTPException(status_code=400, detail="Spacing must be three numbers (x, y, z)")
+    try:
+        spacing = [float(s) for s in spacing]
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Spacing must be three numbers (x, y, z)")
+    # Uploads nginx already wrote to disk: checked now, moved into place below.
+    staged_zip = workdir.claim_upload(tiff_upload_id, "volume", editor.id) if tiff_upload_id else None
+    staged_files = [workdir.claim_upload(i, "volume", editor.id) for i in tiff_upload_ids or []]
+    staged_mesh = workdir.claim_upload(mesh_upload_id, "mesh", editor.id) if mesh_upload_id else None
 
     vol_dir = _volume_dir(slug)
     vol_dir.mkdir(parents=True, exist_ok=False)
@@ -198,12 +212,18 @@ def create_volume(
     upload_fd = None
     upload_fds = []
     try:
-        workdir.prepare_work_dir("volumes", slug, vol_dir)
+        work_dir = workdir.prepare_work_dir("volumes", slug, vol_dir)
         thumbnail_name = write_thumbnail(vol_dir, *thumbnail) if thumbnail else None
-        # The upload is copied into the scratch folder by the background task, so
-        # the response isn't held up by it (see workdir.detach_upload).
+        # A multipart upload is copied into the scratch folder by the background task, so
+        # the response isn't held up by it (see workdir.detach_upload). One that nginx already
+        # wrote to the processing directory is simply renamed into the scratch folder here.
         if has_zip:
-            upload_fd = workdir.detach_upload(tiff_zip)
+            upload_fd = workdir.accept_upload(tiff_zip, staged_zip, work_dir / ZIP_NAME)
+        elif staged_files:
+            upload_fds = [
+                workdir.accept_upload(None, staged, work_dir / f"flice_{i:05d}.tiff")
+                for i, staged in enumerate(staged_files)
+            ]
         else:
             upload_fds = [workdir.detach_upload(f) for f in tiff_files]
     except Exception as exc:  # noqa: BLE001 - surface save errors to the caller
@@ -220,7 +240,6 @@ def create_volume(
         title=title,
         description=description,
         thumbnail_path=thumbnail_name,
-        data_path="",  # legacy DB field; kiln files live directly in the slug directory
         created_by=editor.id,
         status=AssetStatus.processing,
         status_log=f"{_now()}  Upload received, queued for processing\n",
@@ -232,9 +251,9 @@ def create_volume(
     # An optional mesh uploaded together with the volume is processed like any
     # other mesh (see routers/meshes.py) but is owned by the volume.
     mesh = None
-    if mesh_file is not None:
+    if mesh_file is not None or staged_mesh is not None:
         try:
-            mesh = attach_mesh_to_volume(session, volume, mesh_file, editor, background_tasks)
+            mesh = attach_mesh_to_volume(session, volume, mesh_file, editor, background_tasks, staged_mesh)
         except Exception:
             if upload_fd is not None:
                 workdir.close_detached(upload_fd)
@@ -337,14 +356,18 @@ def get_histogram(
 def upload_or_replace_mesh(
     volume_id: int,
     background_tasks: BackgroundTasks,
-    mesh_file: UploadFile = File(...),
+    mesh_file: Optional[UploadFile] = File(None),
+    mesh_upload_id: Optional[str] = Form(None),  # instead of mesh_file: see routers/uploads.py
     session: Session = Depends(get_session),
     editor: User = Depends(require_editor),
 ):
+    if (mesh_file is None) == (not mesh_upload_id):
+        raise HTTPException(status_code=400, detail="Provide exactly one of mesh_file or mesh_upload_id")
     volume = session.get(Volume, volume_id)
     if not volume:
         raise HTTPException(status_code=404, detail="Volume not found")
-    mesh = attach_mesh_to_volume(session, volume, mesh_file, editor, background_tasks)
+    staged = workdir.claim_upload(mesh_upload_id, "mesh", editor.id) if mesh_upload_id else None
+    mesh = attach_mesh_to_volume(session, volume, mesh_file, editor, background_tasks, staged)
     session.refresh(volume)
     return _volume_read(volume, mesh)
 
@@ -587,7 +610,6 @@ def _slice_store(volume_id: int, token: str, level: int, session: Session):
     if not volume:
         raise HTTPException(status_code=404, detail="Volume not found")
     # Kiln files live directly in the volume slug directory. Do not append the
-    # legacy data_path column: it is not a subdirectory in this storage layout.
     shard_root = _volume_dir(volume.slug).resolve()
     # Plane reads can take a while: give the DB connection back first so a
     # burst of slice requests cannot exhaust the connection pool.

@@ -241,19 +241,21 @@ async function request(path, options = {}) {
 
 // XHR-based (not fetch) specifically to get real upload-progress events —
 // fetch has no stable cross-browser API for tracking request-body upload
-// progress, only response-download progress. onProgress(fraction 0..1)
-// fires as bytes actually leave the browser; it does NOT track server-side
-// processing (that's what /status polling is for, since processing happens
-// in a background task after this request already returned). Shared by
-// volumes/meshes/point clouds — same upload shape for all three.
-function _uploadWithProgress(path, formData, onProgress) {
+// progress, only response-download progress. onProgress(loaded, total) in
+// bytes fires as bytes actually leave the browser; it does NOT track
+// server-side processing (that's what /status polling is for, since
+// processing happens in a background task after the request already
+// returned). Shared by volumes/meshes/point clouds — same upload shape for
+// all three.
+function _xhrWithProgress(method, path, body, onProgress, headers = {}) {
     return new Promise((resolve, reject) => {
         const xhr = new XMLHttpRequest();
-        xhr.open("POST", path);
+        xhr.open(method, path);
         const token = getToken();
         if (token) xhr.setRequestHeader("Authorization", `Bearer ${token}`);
+        for (const [name, value] of Object.entries(headers)) xhr.setRequestHeader(name, value);
         xhr.upload.addEventListener("progress", (evt) => {
-            if (evt.lengthComputable && onProgress) onProgress(evt.loaded / evt.total);
+            if (evt.lengthComputable && onProgress) onProgress(evt.loaded, evt.total);
         });
         xhr.addEventListener("load", () => {
             if (xhr.status === 401) {
@@ -275,8 +277,99 @@ function _uploadWithProgress(path, formData, onProgress) {
         });
         xhr.addEventListener("error", () => reject(new Error("Network error during upload")));
         xhr.addEventListener("abort", () => reject(new Error("Upload cancelled")));
-        xhr.send(formData);
+        xhr.send(body);
     });
+}
+
+// Each big file goes to the server as the raw body of its own request, PUT /api/uploads/<kind>:
+// nginx writes such a body to disk exactly once, in the processing directory (the data directory for
+// meshes), and the server just renames that file into place. The multipart form is then only
+// sent with the small fields and the ids of the staged files (see backend/app/routers/uploads.py).
+// A multipart form carrying the files would have to be parsed and spooled to a temp file and copied
+// from there. The thumbnail is small and stays in the form.
+//   form field -> [upload kind, id field of the create request]
+const _STAGED_FIELDS = {
+    tiff_zip: ["volume", "tiff_upload_id"],
+    tiff_files: ["volume", "tiff_upload_ids"],
+    mesh_file: ["mesh", "mesh_upload_id"],
+    pointcloud_file: ["pointcloud", "pointcloud_upload_id"],
+};
+const _STAGE_CONCURRENCY = 3;  // only matters for stacks of many small slice files
+
+// File -> upload id of the copy already staged on the server. When the create request is
+// refused (slug taken, ...) the form is shown again, and sending it once more must not upload
+// a 20 GB file a second time. Forgotten once the server has consumed the upload, or when it says
+// it no longer has it (staged uploads that are never claimed expire after a day).
+const _stagedIds = new WeakMap();
+
+function _forgetStaged(formData) {
+    for (const [key, value] of formData.entries()) {
+        if (key in _STAGED_FIELDS && value instanceof File) _stagedIds.delete(value);
+    }
+}
+
+async function _createWithStaged(formData, send, onProgress) {
+    const staged = await _stageFiles(formData, onProgress);
+    try {
+        const result = await send(staged);
+        _forgetStaged(formData);
+        return result;
+    } catch (err) {
+        if (/Unknown or expired upload/.test(err.message)) _forgetStaged(formData);
+        throw err;
+    }
+}
+
+async function _stageFiles(formData, onProgress) {
+    const jobs = [];
+    const staged = new FormData();
+    for (const [key, value] of formData.entries()) {
+        if (key in _STAGED_FIELDS && value instanceof File) {
+            jobs.push({file: value, field: key, id: null, loaded: 0});
+        } else {
+            staged.append(key, value);
+        }
+    }
+    if (jobs.length === 0) return formData;
+
+    const total = jobs.reduce((sum, job) => sum + job.file.size, 0) || 1;
+    const report = () => onProgress && onProgress(jobs.reduce((sum, job) => sum + job.loaded, 0) / total);
+    let next = 0;
+    let failed = false;
+    const worker = async () => {
+        while (!failed && next < jobs.length) {
+            const job = jobs[next++];
+            const [kind] = _STAGED_FIELDS[job.field];
+            if (_stagedIds.has(job.file)) {  // already on the server from an earlier attempt
+                job.id = _stagedIds.get(job.file);
+                job.loaded = job.file.size;
+                report();
+                continue;
+            }
+            let res;
+            try {
+                res = await _xhrWithProgress(
+                    "PUT", `/api/uploads/${kind}?name=${encodeURIComponent(job.file.name)}`, job.file,
+                    (loaded) => { job.loaded = loaded; report(); },
+                    {"Content-Type": "application/octet-stream"},
+                );
+            } catch (err) {
+                failed = true;  // the other workers take no further files
+                throw err;
+            }
+            job.id = res.upload_id;
+            _stagedIds.set(job.file, job.id);
+            job.loaded = job.file.size;
+            report();
+        }
+    };
+    await Promise.all(Array.from({length: Math.min(_STAGE_CONCURRENCY, jobs.length)}, worker));
+    for (const job of jobs) staged.append(_STAGED_FIELDS[job.field][1], job.id);  // keeps the files' order
+    return staged;
+}
+
+function _uploadWithProgress(path, formData, onProgress) {
+    return _createWithStaged(formData, (staged) => _xhrWithProgress("POST", path, staged, null), onProgress);
 }
 
 // URL segment of each asset kind's API (used by the kind-agnostic thumbnail calls)
@@ -368,7 +461,9 @@ export const api = {
         return request(`/api/volumes/${id}`, {method: "DELETE"});
     },
     uploadMesh(id, formData) {
-        return request(`/api/volumes/${id}/mesh`, {method: "POST", body: formData});
+        return _createWithStaged(
+            formData, (staged) => request(`/api/volumes/${id}/mesh`, {method: "POST", body: staged}),
+        );
     },
     // The volume's intensity histogram (JSON), or null when it has none yet.
     async volumeHistogram(id) {

@@ -46,6 +46,12 @@ class Settings:
 
     PROCESSING_DIR: Path = Path(os.environ.get("VG_PROCESSING_DIR") or "/processing")  # "" (unset in compose) -> default
 
+    # Uploads that nginx has already written to disk and handed over by path (see
+    # nginx/nginx.conf.template and routers/uploads.py) wait in <processing>/.uploads (volumes, point
+    # clouds) or <data>/.uploads (meshes: the original is kept in the data folder) until the create
+    # request claims them. Unclaimed ones (abandoned or failed uploads) are deleted after this long.
+    UPLOAD_STAGING_MAX_AGE_HOURS: float = float(os.environ.get("VG_UPLOAD_STAGING_MAX_AGE_HOURS", "24"))
+
     # --- Slice views (server-extracted planes, see helpers/slices.py) ---
     # RAM for decoded 64-plane slabs, shared by every viewer. A slab of a 2000^3
     # 16-bit volume is ~512 MB, so ~4 slabs fit the default; 0 disables caching
@@ -86,5 +92,7 @@ settings.POINTCLOUDS_DIR.mkdir(parents=True, exist_ok=True)
 
 _tmp = settings.PROCESSING_DIR / ".tmp"
 _tmp.mkdir(parents=True, exist_ok=True)
+(settings.PROCESSING_DIR / ".uploads").mkdir(parents=True, exist_ok=True)
+(settings.DATA_DIR / ".uploads").mkdir(parents=True, exist_ok=True)
 tempfile.tempdir = str(_tmp)
 os.environ["TMPDIR"] = str(_tmp)

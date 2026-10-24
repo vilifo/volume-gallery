@@ -86,17 +86,21 @@ def create_pointcloud(
     slug: str = Form(...),
     title: str = Form(...),
     description: str = Form(""),
-    pointcloud_file: UploadFile = File(..., description="las, laz, ply, xyz, ptx, pts, or e57"),
+    pointcloud_file: Optional[UploadFile] = File(None, description="las, laz, ply, xyz, ptx, pts, or e57"),
     thumbnail_file: Optional[UploadFile] = File(None, description="Optional PNG/JPEG/WebP thumbnail"),
+    pointcloud_upload_id: Optional[str] = Form(None, description="Instead of pointcloud_file: an id from PUT /api/uploads/pointcloud"),
     session: Session = Depends(get_session),
     editor: User = Depends(require_editor),
 ):
     if not SLUG_RE.match(slug):
         raise HTTPException(status_code=400, detail="Slug must be lowercase alphanumeric/-/_ (2-63 chars)")
+    if (pointcloud_file is None) == (not pointcloud_upload_id):
+        raise HTTPException(status_code=400, detail="Provide exactly one of pointcloud_file or pointcloud_upload_id")
     if session.exec(select(PointCloud).where(PointCloud.slug == slug)).first():
         raise HTTPException(status_code=409, detail="A point cloud with this slug already exists")
 
-    source_ext = Path(pointcloud_file.filename or "").suffix.lower()
+    staged = workdir.claim_upload(pointcloud_upload_id, "pointcloud", editor.id) if pointcloud_upload_id else None
+    source_ext = Path((staged.filename if staged else pointcloud_file.filename) or "").suffix.lower()
     if source_ext not in _POINTCLOUD_SOURCE_EXTS:
         raise HTTPException(
             status_code=400,
@@ -112,7 +116,8 @@ def create_pointcloud(
         work_dir = workdir.prepare_work_dir("pointclouds", slug, pc_dir)
         thumbnail_name = write_thumbnail(pc_dir, *thumbnail) if thumbnail else None
         upload_path = work_dir / f"_upload{source_ext}"  # upload stays in scratch; never copied into data
-        upload_fd = workdir.detach_upload(pointcloud_file)  # copied to upload_path by the background task
+        # multipart: copied to upload_path by the background task; staged: renamed there now
+        upload_fd = workdir.accept_upload(pointcloud_file, staged, upload_path)
     except Exception as exc:  # noqa: BLE001
         shutil.rmtree(pc_dir, ignore_errors=True)
         workdir.discard_job("pointclouds", slug)

@@ -27,7 +27,7 @@ frontend/   Static HTML/CSS/JS gallery UI + vendored kiln-render library
 nginx/      Reverse proxy config + self-signed cert generator (see below)
 .github/    GitHub Actions workflow that builds & publishes to Docker Hub
 data/       (created at runtime) SQLite DB + one folder per volume
-processing/ (optional, created at runtime) scratch space for uploads being processed
+processing/ (created at runtime) scratch space: uploads are written here by nginx and processed here
 ```
 
 - Each volume slug directory contains the kiln sharded-binary dataset files directly (no dataset subdirectories) and an
@@ -133,51 +133,81 @@ set — nginx redirects plain `http://` to `https://` automatically). See
 "Putting it behind HTTPS" below for what that cert script does and your
 options if you'd rather use a real certificate.
 
-### Processing directory (optional)
+### Processing directory
 
-By default an upload is saved, unpacked and converted inside its own folder
-under `/data`. If `/data` sits on slow or precious storage (a NAS dataset with
-snapshots, say), you can have all of that happen in a separate scratch
-directory instead — the data is still stored in `/data`; only the *processing*
-moves. Set these in `.env`:
+Uploads are received, unpacked and converted in a scratch directory
+(`/processing` in the containers), and only the finished result is written to
+`/data`. Point `VG_HOST_PROCESSING_DIR` in `.env` at a fast disk that isn't the
+data dataset (a tmpfs/RAM disk works too if it is big enough):
 
 ```bash
-VG_PROCESSING_DIR=/processing                      # blank (the default) = process inside /data
-VG_HOST_PROCESSING_DIR=/mnt/scratch/volume-gallery  # host folder mounted at /processing
+VG_HOST_PROCESSING_DIR=/mnt/scratch/volume-gallery   # host folder mounted at /processing
 ```
 
-then `docker compose up -d`. `VG_HOST_PROCESSING_DIR` is a plain bind mount,
-so it can be any host directory — ideally on a fast disk that isn't the data
-dataset (a tmpfs/RAM disk works too if it is big enough).
+**Every upload byte is written to disk once.** The browser sends each file as
+the raw body of `PUT /api/uploads/<volume|mesh|pointcloud>`. For those requests
+nginx
 
-What happens with it enabled:
+1. asks the app whether the caller may upload (`auth_request`) — before it
+   reads a single byte of the body, so nobody else can fill your disk;
+2. writes the body to `<processing>/.uploads` (meshes: `<data>/.uploads`, because
+   the mesh original is kept in the data folder) — this is the one and only write;
+3. calls the app *without* the body, telling it just the file's name.
 
-- Uploads (zip archives, individually uploaded TIFF slices, meshes, point
-  clouds) are staged in `<processing>/<volumes|meshes|pointclouds>/<slug>/`,
-  extraction and conversion run there, and the finished kiln sharded-binary dataset, mesh
-  files or Potree octree are then moved into `/data`. The volume's folder in
-  `/data` is created at upload time, so slugs are still reserved there.
-- The spooled temp files of large uploads and the temp files of the external
-  converters (`nxsbuild`, `PotreeConverter`) go to `<processing>/.tmp`, so none
-  of it ends up in the container's `/tmp`.
-- The scratch folder of a job is deleted when it finishes, whether it
-  succeeded or failed. The status log shows a "Moving … into the data
-  directory" step while the result is being copied across.
-- Leave room for roughly 2–3× the size of your largest upload.
+The app renames the file to an upload id, and the `POST` that creates the
+volume / mesh / point cloud (`tiff_upload_id`, `tiff_upload_ids`,
+`mesh_upload_id`, `pointcloud_upload_id` instead of the file fields) renames it
+again into the asset's scratch folder. Renames inside one filesystem are
+instant, whatever the file size. The old multipart form fields keep working
+(curl, scripts, a bare `uvicorn` without nginx), they just cost one more copy.
+
+What lives where afterwards:
+
+| asset        | upload                        | temp files / extraction    | result                |
+|--------------|-------------------------------|----------------------------|-----------------------|
+| volume       | scratch (`.uploads` → slug)   | scratch                    | written to `/data`    |
+| mesh         | `/data` (`.uploads` → slug)   | scratch (`.ply`, `.nxs`)   | compressed into `/data` |
+| point cloud  | scratch                       | —                          | octree exported to `/data` |
+
+- The scratch folder of a job is deleted when it finishes, whether it succeeded
+  or failed. Leave room for roughly 2–3× the size of your largest upload.
+- Uploads that were never turned into an asset (browser closed, slug already
+  taken, …) are deleted from the `.uploads` folders after
+  `VG_UPLOAD_STAGING_MAX_AGE_HOURS` (default 24). An upload that is aborted
+  half-way is removed by nginx immediately.
 - On startup, scratch folders left behind by a crash or restart are removed.
   Assets that were still processing at that point (a restart kills the
   background job) are marked `failed` with an explanatory log line — delete
   and re-upload them. Volumes still waiting for their TIFF slices keep theirs.
+- Spooled temp files of the app and of the external converters (`nxsbuild`,
+  `PotreeConverter`) go to `<processing>/.tmp`, nginx's own spool directories
+  to `<processing>/.nginx_*`, so none of it ends up in a container's writable layer.
 
-The same option works without Docker: `export VG_PROCESSING_DIR=/some/dir`.
+Two things must hold for the hand-over to work, and the compose files take care
+of both:
 
-### Running as a non-root user (optional)
+- nginx and the app mount **the same host directory** at `/processing` (and
+  nginx mounts `<data>/.uploads` at `/data/.uploads`). Otherwise a rename would
+  have to copy — the app does fall back to copying then, and says so in its log.
+- nginx and the app run as **the same uid:gid**. nginx creates the files with
+  mode `0600`, so only that user (or root) can read and rename them. If they
+  differ, uploads fail with "the app cannot see the file nginx wrote".
+
+### Running as a non-root user
 
 The app container runs as root by default. To run it as another user — on
-TrueNAS SCALE typically the `apps` user — set `VG_UID` and `VG_GID` in `.env`
-(see `.env.example`) and make the host folders behind `VG_HOST_DATA_DIR` (and
-`VG_HOST_PROCESSING_DIR`, if you use it) writable by that user, e.g.
-`chown -R 568:568 /mnt/tank/apps/volume-gallery/data`.
+TrueNAS SCALE the `apps` user, 568:568 — set `VG_UID` and `VG_GID` in `.env`
+(see `.env.example`). That one setting does everything:
+
+- the app container runs as that user;
+- the nginx container's worker processes run as that user too (its entrypoint
+  recreates the image's `nginx` account with these ids; the master process stays
+  root to bind the ports and read the TLS key);
+- the one-shot `volume-gallery-init` container (runs first, as root) creates the
+  directories and `chown`s anything under `VG_HOST_DATA_DIR` /
+  `VG_HOST_PROCESSING_DIR` that has another owner, so you don't have to prepare
+  the host folders by hand (it only touches files with a wrong owner, so it is
+  quick after the first run).
 
 ---
 

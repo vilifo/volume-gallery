@@ -36,9 +36,11 @@ http {
     # into this container at /processing, see docker-compose.yml), never into the
     # container's writable layer. That covers an upload body when request buffering is
     # on (see proxy_request_buffering below) and large proxied responses. nginx creates
-    # these directories itself at startup, so the parent (/processing) must be writable.
-    client_body_temp_path /tmp/.nginx_client_body 1 2;
-    proxy_temp_path       /tmp/.nginx_proxy 1 2;
+    # these directories itself at startup (as root, then hands them to the worker user,
+    # see docker-entrypoint.d/05-worker-user.sh), so the parent (/processing) must be
+    # writable. The direct-upload locations further down set their own temp paths.
+    client_body_temp_path /processing/.nginx_client_body 1 2;
+    proxy_temp_path       /processing/.nginx_proxy 1 2;
 
     proxy_read_timeout 1200s;
     proxy_send_timeout 1200s;
@@ -77,6 +79,10 @@ http {
 		ssl_protocols       TLSv1.2 TLSv1.3;
 		ssl_ciphers         HIGH:!aNULL:!MD5;
 		ssl_prefer_server_ciphers on;
+		# Chunk loading opens several connections; resume their TLS sessions instead of
+		# running a full handshake each time.
+		ssl_session_cache   shared:SSL:10m;
+		ssl_session_timeout 1d;
 
 		# Internal location used by serve_sharded_file's X-Accel-Redirect response.
 		# Marked `internal;` so direct client requests to /_internal_volumes/... return 404.
@@ -86,6 +92,77 @@ http {
 			alias /data/volumes/;
             # Cache-Control / Content-Type set by the backend are carried over automatically
 			# on X-Accel-Redirect; adding them again here duplicated the header.
+		}
+
+		# ---- Direct uploads: the file is written to disk once, by nginx ----
+		# The browser PUTs each big file as a raw request body (frontend/js/api.js). nginx
+		# stores that body in a temp file inside the directory the file is going to be
+		# processed in, then calls the app WITHOUT the body, telling it only the temp file's
+		# path in X-Upload-File. The app renames the file (backend/app/routers/uploads.py), and
+		# later renames it again into the asset's folder: no byte is copied after it
+		# arrived. That needs
+		#  - the same filesystem: /processing here and in the app container is one mount, and
+		#    for meshes (whose original is kept in the data folder) so is /data/.uploads;
+		#  - the same user: nginx creates the temp file with mode 0600, so the app can only
+		#    read it if the workers run as the app's uid (VG_UID / VG_GID, see the
+		#    entrypoint script), or if the app runs as root.
+		# `clean`: nginx deletes the file when the request ends, so an upload that is
+		# aborted half-way leaves nothing behind (after the app's rename there is nothing
+		# left to delete, which nginx quietly accepts).
+		# The auth_request check runs before nginx reads the first byte of the body, so
+		# nobody who may not create assets can make nginx write to the disk.
+		location = /_vg_upload_auth {
+			internal;
+			proxy_pass http://volume_gallery_backend/api/uploads/auth;
+			proxy_http_version 1.1;
+			proxy_set_header Connection "";
+			proxy_pass_request_body off;
+			proxy_set_header Content-Length "";
+			proxy_set_header X-Upload-File "";
+		}
+
+		location ~ ^/api/uploads/(volume|pointcloud)$ {
+			if ($request_method != PUT) { return 405; }
+			auth_request /_vg_upload_auth;
+
+			client_body_temp_path /processing/.uploads;
+			client_body_in_file_only clean;
+			client_body_buffer_size 1m;
+			proxy_pass_request_body off;
+			proxy_set_header Content-Length "";
+			proxy_set_header X-Upload-File $request_body_file;
+
+			proxy_pass http://volume_gallery_backend;
+			proxy_http_version 1.1;
+			proxy_set_header Connection "";
+			proxy_set_header Host $host:${VG_HTTPS_PORT};
+			proxy_set_header X-Real-IP $remote_addr;
+			proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+			proxy_set_header X-Forwarded-Proto https;
+			proxy_set_header X-Forwarded-Port ${VG_HTTPS_PORT};
+		}
+
+		# Meshes land in the data folder's own staging directory (mounted rw at
+		# /data/.uploads, see docker-compose.yml): the mesh original stays there.
+		location = /api/uploads/mesh {
+			if ($request_method != PUT) { return 405; }
+			auth_request /_vg_upload_auth;
+
+			client_body_temp_path /data/.uploads;
+			client_body_in_file_only clean;
+			client_body_buffer_size 1m;
+			proxy_pass_request_body off;
+			proxy_set_header Content-Length "";
+			proxy_set_header X-Upload-File $request_body_file;
+
+			proxy_pass http://volume_gallery_backend;
+			proxy_http_version 1.1;
+			proxy_set_header Connection "";
+			proxy_set_header Host $host:${VG_HTTPS_PORT};
+			proxy_set_header X-Real-IP $remote_addr;
+			proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+			proxy_set_header X-Forwarded-Proto https;
+			proxy_set_header X-Forwarded-Port ${VG_HTTPS_PORT};
 		}
 
 		location ~ ^/api/volumes/[0-9]+/dataset/ {
@@ -113,7 +190,10 @@ http {
 			#      then forwards it, so the app never waits on a slow client.
 			# Set with VG_NGINX_REQUEST_BUFFERING in .env (default: off).
 			proxy_request_buffering ${VG_NGINX_REQUEST_BUFFERING};
-			
+
+			# Only the upload locations above may tell the app where a file is.
+			proxy_set_header X-Upload-File "";
+
 			proxy_set_header Host $host:${VG_HTTPS_PORT};
 			
 			proxy_set_header X-Real-IP $remote_addr;
