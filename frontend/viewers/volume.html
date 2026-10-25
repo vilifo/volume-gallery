@@ -439,7 +439,7 @@
   <div class="app-shell" id="shell"></div>
 
   <script type="module">
-    import { api, requireLogin, getRole, getUsername, renderShell, wireLogout } from "/js/api.js?v=brand2";
+    import { api, requireLogin, getRole, getUsername, renderShell, wireLogout } from "/js/api.js?v=help2";
     import { syncHistogram } from "/js/histogram.js?v=hist1";
     import { KilnViewer } from "/vendor/kiln-render/lib/kiln-render.js?v=atlas2";
     import {
@@ -451,6 +451,7 @@
     } from "/js/atlas-budget.js?v=atlas3";
     import { setupSliceIntegration } from "/js/slice/slice-integration.js?v=slice2";
     import { niceScaleLength } from "/js/scalebar.js?v=sb1";
+    import { toggleHelpPanel } from "/js/help.js?v=help2";
 
     requireLogin();
     const role = getRole();
@@ -463,6 +464,7 @@
     const EXPAND_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M21 16v3a2 2 0 0 1-2 2h-3M3 16v3a2 2 0 0 0 2 2h3"/></svg>`;
     const COLLAPSE_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3v3a2 2 0 0 1-2 2H4M15 3v3a2 2 0 0 0 2 2h3M4 16h3a2 2 0 0 1 2 2v3M20 16h-3a2 2 0 0 0-2 2v3"/></svg>`;
     const CUBE_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8 12 3 3 8m18 0v8l-9 5m9-13-9 5m0 8-9-5V8m9 13v-8M3 8l9 5"/></svg>`;
+    const HELP_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.1 9a3 3 0 0 1 5.8 1c0 2-3 3-3 3M12 17h.01"/></svg>`;
     const LINK_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>`;
 
     document.getElementById("shell").innerHTML = `
@@ -691,6 +693,7 @@
               <button type="button" data-layout="xz" title="XZ plane: slices along Y">XZ</button>
               <button type="button" data-layout="yz" title="YZ plane: slices along X">YZ</button>
             </div>
+            <button id="help-btn" class="icon-btn" aria-pressed="false" title="Show help for this viewer next to the view">${HELP_ICON}<span class="icon-btn-label">Help</span></button>
             <button id="share-btn" class="icon-btn" title="Copy a link to this exact view">${LINK_ICON}<span class="icon-btn-label">Share</span></button>
             ${
               volume.mesh_status === "ready"
@@ -884,6 +887,13 @@
       loadVolume(activeMinLevel);
 
       // Share view URL button
+      // Help: a floating panel, not a dialog, so the view stays usable while it is open.
+      const helpBtn = document.getElementById("help-btn");
+      helpBtn.addEventListener("click", () => {
+        const open = toggleHelpPanel({ topic: "volume", role: getRole(), onClose: () => helpBtn.setAttribute("aria-pressed", "false") });
+        helpBtn.setAttribute("aria-pressed", String(open));
+      });
+
       document.getElementById("share-btn").addEventListener("click", async () => {
         const currentViewQuery =
           window.location.search.replace(/^\?/, "") +

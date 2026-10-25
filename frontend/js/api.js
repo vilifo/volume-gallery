@@ -76,6 +76,7 @@ const NAV_ICONS = {
   gallery: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/></svg>`,
   upload: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>`,
   admin: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>`,
+  help: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M9.1 9a3 3 0 0 1 5.8 1c0 2-3 3-3 3M12 17h.01"/></svg>`,
   account: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>`,
 };
 
@@ -656,12 +657,15 @@ export function renderShell(activePage, role, username) {
         if (role === "admin") {
             navItems.push({href: "/admin.html", label: "Users", key: "admin"});
         }
+        // In a viewer the full Help opens in a new tab, so the viewer keeps its state (the viewer's own
+        // Help button shows a small panel next to the view).
+        navItems.push({href: "/help.html", label: "Help", key: "help", newTab: window.location.pathname.startsWith("/viewers/")});
         navItems.push({href: "/account.html", label: "Account", key: "account"});
 
         const nav = navItems
             .map(
                 (item) =>
-                    `<a href="${item.href}" class="${activePage === item.key ? "active" : ""}" title="${item.label}">
+                    `<a href="${item.href}" class="${activePage === item.key ? "active" : ""}" title="${item.label}"${item.newTab ? ' target="_blank" rel="noopener"' : ""}>
           <span class="nav-icon">${NAV_ICONS[item.key] || ""}</span>
           <span class="nav-label">${item.label}</span>
         </a>`

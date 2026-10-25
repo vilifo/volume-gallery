@@ -125,7 +125,8 @@
   <script src="/vendor/potree/potree.js"></script>
 
   <script type="module">
-    import { api, requireLogin, getRole, getUsername, renderShell, wireLogout } from "/js/api.js?v=brand2";
+    import { api, requireLogin, getRole, getUsername, renderShell, wireLogout } from "/js/api.js?v=help2";
+    import { toggleHelpPanel } from "/js/help.js?v=help2";
 
     requireLogin();
     const role = getRole();
@@ -133,6 +134,7 @@
     const pcId = params.get("id");
 
     const EXPAND_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M21 16v3a2 2 0 0 1-2 2h-3M3 16v3a2 2 0 0 0 2 2h3"/></svg>`;
+    const HELP_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.1 9a3 3 0 0 1 5.8 1c0 2-3 3-3 3M12 17h.01"/></svg>`;
     const LINK_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>`;
 
     document.getElementById("shell").innerHTML = `
@@ -170,6 +172,7 @@
             ${pc.description ? `<div class="viewer-desc">${escapeHtml(pc.description)}</div>` : ""}
           </div>
           <div class="viewer-topbar-actions">
+            <button id="help-btn" class="icon-btn" aria-pressed="false" title="Show help for this viewer next to the view">${HELP_ICON}<span class="icon-btn-label">Help</span></button>
             <button id="share-btn" class="icon-btn" title="Copy a link to this exact view">${LINK_ICON}<span class="icon-btn-label">Share</span></button>
             <button id="fullscreen-btn" class="icon-btn primary">${EXPAND_ICON}<span>Fullscreen</span></button>
           </div>
@@ -194,6 +197,13 @@
 
 
       // Share view URL button
+      // Help: a floating panel, not a dialog, so the view stays usable while it is open.
+      const helpBtn = document.getElementById("help-btn");
+      helpBtn.addEventListener("click", () => {
+        const open = toggleHelpPanel({ topic: "pointcloud", role: getRole(), onClose: () => helpBtn.setAttribute("aria-pressed", "false") });
+        helpBtn.setAttribute("aria-pressed", String(open));
+      });
+
       document.getElementById("share-btn").addEventListener("click", async () => {
         const btn = document.getElementById("share-btn");
         const origHtml = btn.innerHTML;

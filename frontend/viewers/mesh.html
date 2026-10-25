@@ -108,23 +108,6 @@
   }
   .bg-swatches button[aria-pressed="true"] { border-color: var(--accent); }
 
-  /* ---- help ---- */
-  .mesh-help {
-    position: absolute; inset: 0; z-index: 8; display: flex; align-items: center; justify-content: center;
-    background: rgba(0, 0, 0, 0.55);
-  }
-  .mesh-help[hidden] { display: none; }
-  .mesh-help .card {
-    background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 10px;
-    padding: 18px 22px; max-width: 460px; width: calc(100% - 40px); font-size: 0.88em; line-height: 1.5;
-    box-shadow: 0 20px 48px rgba(0, 0, 0, 0.6);
-  }
-  .mesh-help h2 { margin: 0 0 10px; font-size: 1.05em; }
-  .mesh-help dl { display: grid; grid-template-columns: max-content 1fr; gap: 6px 16px; margin: 0; }
-  .mesh-help dt { color: var(--accent); font-family: var(--mono); font-size: 0.95em; }
-  .mesh-help dd { margin: 0; color: var(--text); }
-  .mesh-help .close-hint { margin-top: 12px; color: var(--text-dim); font-size: 0.92em; }
-
   .viewer-status {
     position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
     color: var(--text-dim); font-family: var(--mono); font-size: 0.85em;
@@ -146,7 +129,8 @@
   <script src="/vendor/3dhop/js/trackball_turntable_pan.js"></script>
 
   <script type="module">
-    import { api, requireLogin, getRole, getUsername, renderShell, wireLogout } from "/js/api.js?v=brand2";
+    import { api, requireLogin, getRole, getUsername, renderShell, wireLogout } from "/js/api.js?v=help2";
+    import { toggleHelpPanel } from "/js/help.js?v=help2";
 
     requireLogin();
     const role = getRole();
@@ -316,27 +300,6 @@
             ${tool("appearance-btn", "Appearance", ICON.appearance)}
             ${tool("screenshot-btn", "Save screenshot", ICON.camera)}
             ${tool("help-btn", "Help", ICON.help)}
-          </div>
-
-          <div class="mesh-help" id="help" hidden>
-            <div class="card" role="dialog" aria-label="Mesh viewer help">
-              <h2>Navigating the model</h2>
-              <dl>
-                <dt>Left drag</dt><dd>Rotate</dd>
-                <dt>Right / middle drag</dt><dd>Pan (or Ctrl + left drag)</dd>
-                <dt>Mouse wheel</dt><dd>Zoom</dd>
-                <dt>H</dt><dd>Reset the view</dd>
-                <dt>Esc</dt><dd>Switch off the active measuring tool / close this help</dd>
-              </dl>
-              <h2 style="margin-top:14px">Tools</h2>
-              <dl>
-                <dt>Measure</dt><dd>Click two points to get their distance.</dd>
-                <dt>Pick point</dt><dd>Click to read XYZ coordinates.</dd>
-                <dt>Sections</dt><dd>Cut the model with X / Y / Z planes.</dd>
-                <dt>Light</dt><dd>While active, dragging moves the light, not the camera.</dd>
-              </dl>
-              <div class="close-hint">Click anywhere to close.</div>
-            </div>
           </div>
 
           <div class="viewer-status" id="status">Loading mesh viewer\u2026</div>
@@ -818,9 +781,11 @@
         $("screenshot-btn").addEventListener("click", saveScreenshot);
 
         // ---------------------------------------------------------------- help + keys
-        const help = $("help");
-        $("help-btn").addEventListener("click", () => { help.hidden = !help.hidden; });
-        help.addEventListener("click", () => { help.hidden = true; });
+        // Help: a floating panel, not a dialog, so the model stays usable while it is open.
+        $("help-btn").addEventListener("click", () => {
+          const open = toggleHelpPanel({ topic: "mesh", role, onClose: () => setActive("help-btn", false) });
+          setActive("help-btn", open);
+        });
 
         document.querySelectorAll("[data-close]").forEach((b) => b.addEventListener("click", () => {
           const which = b.dataset.close;
@@ -834,8 +799,7 @@
           if (e.target.closest && e.target.closest("input, select, textarea")) return;
           if (e.ctrlKey || e.metaKey || e.altKey) return;
           if (e.key === "Escape") {
-            if (!help.hidden) help.hidden = true;
-            else if (presenter.isMeasurementToolEnabled()) setMeasure(false);
+            if (presenter.isMeasurementToolEnabled()) setMeasure(false);
             else if (presenter.isPickpointModeEnabled()) setPick(false);
           } else if (e.key === "h" || e.key === "H") {
             presenter.resetTrackball();

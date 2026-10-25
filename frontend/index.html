@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Gallery — Volume Gallery</title>
 <script src="/js/theme-init.js?v=hist1"></script>
-<link rel="stylesheet" href="/css/style.css?v=brand2" />
+<link rel="stylesheet" href="/css/style.css?v=help2" />
 <style>
   .status-badge {
     display: inline-flex;
@@ -51,8 +51,8 @@
   <div class="app-shell" id="shell"></div>
 
   <script type="module">
-    import { api, requireLogin, getRole, getUsername, renderShell, wireLogout, getBranding, contactItems } from "/js/api.js?v=brand2";
-    import { openHelp } from "/js/help.js?v=exp1";
+    import { api, requireLogin, getRole, getUsername, renderShell, wireLogout } from "/js/api.js?v=help2";
+    import { pageHint } from "/js/help.js?v=help2";
 
     requireLogin();
     const role = getRole();
@@ -71,29 +71,15 @@
             <h1>Gallery</h1>
             <p class="subtitle">Assets you can view.</p>
           </div>
-          <button type="button" id="help-btn" title="How to use the gallery">? Help</button>
         </div>
+        ${pageHint("gallery", role)}
         <div id="list"></div>
       </main>
     `;
     wireLogout();
 
-    // Help: opened by the button or by a link ending in #help. The content follows the user's role.
-    let helpOpen = false;
-    async function showHelp() {
-      if (helpOpen) return;
-      helpOpen = true;
-      const branding = await getBranding();
-      openHelp({
-        role, branding, contactItems: contactItems(branding),
-        onClose: () => {
-          helpOpen = false;
-          if (window.location.hash === "#help") history.replaceState({}, "", window.location.pathname + window.location.search);
-        },
-      });
-    }
-    document.getElementById("help-btn").addEventListener("click", showHelp);
-    if (window.location.hash === "#help") showHelp();
+    // Old links ending in #help: the help is a page of its own now.
+    if (window.location.hash === "#help") window.location.replace("/help.html");
 
     function escapeHtml(s) {
       const d = document.createElement("div");

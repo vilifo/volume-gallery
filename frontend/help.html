@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Help</title>
+<script src="/js/theme-init.js?v=hist1"></script>
+<link rel="stylesheet" href="/css/style.css?v=help2" />
+</head>
+<body>
+  <div class="app-shell" id="shell"></div>
+
+  <script type="module">
+    import { requireLogin, getRole, getUsername, renderShell, wireLogout, getBranding, contactItems } from "/js/api.js?v=help2";
+    import { helpPageHtml, wireHelpPage } from "/js/help.js?v=help2";
+
+    requireLogin();
+    const role = getRole();
+
+    document.getElementById("shell").innerHTML = `
+      ${renderShell("help", role, getUsername())}
+      <main class="help-page">
+        <h1>Help</h1>
+        <p class="subtitle">How to use the gallery. What you see depends on your role (<strong>${role}</strong>).</p>
+        <div id="help-root"><p class="dim">Loading\u2026</p></div>
+        <p class="help-footnote">Short notes at the top of the pages link here. Hidden one?
+          <button type="button" class="link-btn" data-show-hints>Show the page notes again</button></p>
+      </main>
+    `;
+    wireLogout();
+
+    const branding = await getBranding();
+    const root = document.getElementById("help-root");
+    root.innerHTML = helpPageHtml({ role, branding, contactItems: contactItems(branding) });
+    wireHelpPage(document.querySelector("main"));
+  </script>
+</body>
+</html>

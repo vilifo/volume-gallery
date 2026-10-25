@@ -5,13 +5,14 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Users — Volume Gallery</title>
 <script src="/js/theme-init.js?v=hist1"></script>
-<link rel="stylesheet" href="/css/style.css?v=brand2" />
+<link rel="stylesheet" href="/css/style.css?v=help2" />
 </head>
 <body>
   <div class="app-shell" id="shell"></div>
 
   <script type="module">
-    import { api, requireLogin, getRole, getUsername, renderShell, wireLogout } from "/js/api.js?v=brand2";
+    import { api, requireLogin, getRole, getUsername, renderShell, wireLogout } from "/js/api.js?v=help2";
+    import { pageHint } from "/js/help.js?v=help2";
 
     requireLogin();
     const role = getRole();
@@ -24,6 +25,7 @@
           <h1>Users</h1>
           <button class="primary" id="new-user-btn">Add user</button>
         </div>
+        ${pageHint("admin", role)}
         <div id="error" style="display:none" class="error-box"></div>
         <table class="responsive">
           <thead><tr><th>Username</th><th>Role</th><th>Status</th><th></th></tr></thead>
