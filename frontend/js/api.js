@@ -57,29 +57,12 @@ export function setSession(token, role, username) {
     localStorage.setItem(USER_KEY, username);
 }
 
-export function clearZarrChunkCache() {
-    try {
-        if ("serviceWorker" in navigator && navigator.serviceWorker.controller) {
-            navigator.serviceWorker.controller.postMessage({type: "CLEAR_ZARR_CACHE"});
-        }
-        if ("caches" in window) {
-            caches.keys().then((names) => {
-                for (const name of names) {
-                    if (name.startsWith("vg-zarr-chunks-")) caches.delete(name);
-                }
-            }).catch(() => {
-            });
-        }
-    } catch (_) {
-    }
-}
 
 export function clearSession() {
     localStorage.removeItem(TOKEN_KEY);
     localStorage.removeItem(ROLE_KEY);
     localStorage.removeItem(USER_KEY);
     clearShareSession();
-    clearZarrChunkCache();
 }
 
 // ---- branding (branding/branding.toml on the server; see the README) ----
@@ -93,6 +76,7 @@ const NAV_ICONS = {
   gallery: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/></svg>`,
   upload: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>`,
   admin: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>`,
+  help: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M9.1 9a3 3 0 0 1 5.8 1c0 2-3 3-3 3M12 17h.01"/></svg>`,
   account: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>`,
 };
 
@@ -258,19 +242,21 @@ async function request(path, options = {}) {
 
 // XHR-based (not fetch) specifically to get real upload-progress events —
 // fetch has no stable cross-browser API for tracking request-body upload
-// progress, only response-download progress. onProgress(fraction 0..1)
-// fires as bytes actually leave the browser; it does NOT track server-side
-// processing (that's what /status polling is for, since processing happens
-// in a background task after this request already returned). Shared by
-// volumes/meshes/point clouds — same upload shape for all three.
-function _uploadWithProgress(path, formData, onProgress) {
+// progress, only response-download progress. onProgress(loaded, total) in
+// bytes fires as bytes actually leave the browser; it does NOT track
+// server-side processing (that's what /status polling is for, since
+// processing happens in a background task after the request already
+// returned). Shared by volumes/meshes/point clouds — same upload shape for
+// all three.
+function _xhrWithProgress(method, path, body, onProgress, headers = {}) {
     return new Promise((resolve, reject) => {
         const xhr = new XMLHttpRequest();
-        xhr.open("POST", path);
+        xhr.open(method, path);
         const token = getToken();
         if (token) xhr.setRequestHeader("Authorization", `Bearer ${token}`);
+        for (const [name, value] of Object.entries(headers)) xhr.setRequestHeader(name, value);
         xhr.upload.addEventListener("progress", (evt) => {
-            if (evt.lengthComputable && onProgress) onProgress(evt.loaded / evt.total);
+            if (evt.lengthComputable && onProgress) onProgress(evt.loaded, evt.total);
         });
         xhr.addEventListener("load", () => {
             if (xhr.status === 401) {
@@ -292,8 +278,99 @@ function _uploadWithProgress(path, formData, onProgress) {
         });
         xhr.addEventListener("error", () => reject(new Error("Network error during upload")));
         xhr.addEventListener("abort", () => reject(new Error("Upload cancelled")));
-        xhr.send(formData);
+        xhr.send(body);
     });
+}
+
+// Each big file goes to the server as the raw body of its own request, PUT /api/uploads/<kind>:
+// nginx writes such a body to disk exactly once, in the processing directory (the data directory for
+// meshes), and the server just renames that file into place. The multipart form is then only
+// sent with the small fields and the ids of the staged files (see backend/app/routers/uploads.py).
+// A multipart form carrying the files would have to be parsed and spooled to a temp file and copied
+// from there. The thumbnail is small and stays in the form.
+//   form field -> [upload kind, id field of the create request]
+const _STAGED_FIELDS = {
+    tiff_zip: ["volume", "tiff_upload_id"],
+    tiff_files: ["volume", "tiff_upload_ids"],
+    mesh_file: ["mesh", "mesh_upload_id"],
+    pointcloud_file: ["pointcloud", "pointcloud_upload_id"],
+};
+const _STAGE_CONCURRENCY = 3;  // only matters for stacks of many small slice files
+
+// File -> upload id of the copy already staged on the server. When the create request is
+// refused (slug taken, ...) the form is shown again, and sending it once more must not upload
+// a 20 GB file a second time. Forgotten once the server has consumed the upload, or when it says
+// it no longer has it (staged uploads that are never claimed expire after a day).
+const _stagedIds = new WeakMap();
+
+function _forgetStaged(formData) {
+    for (const [key, value] of formData.entries()) {
+        if (key in _STAGED_FIELDS && value instanceof File) _stagedIds.delete(value);
+    }
+}
+
+async function _createWithStaged(formData, send, onProgress) {
+    const staged = await _stageFiles(formData, onProgress);
+    try {
+        const result = await send(staged);
+        _forgetStaged(formData);
+        return result;
+    } catch (err) {
+        if (/Unknown or expired upload/.test(err.message)) _forgetStaged(formData);
+        throw err;
+    }
+}
+
+async function _stageFiles(formData, onProgress) {
+    const jobs = [];
+    const staged = new FormData();
+    for (const [key, value] of formData.entries()) {
+        if (key in _STAGED_FIELDS && value instanceof File) {
+            jobs.push({file: value, field: key, id: null, loaded: 0});
+        } else {
+            staged.append(key, value);
+        }
+    }
+    if (jobs.length === 0) return formData;
+
+    const total = jobs.reduce((sum, job) => sum + job.file.size, 0) || 1;
+    const report = () => onProgress && onProgress(jobs.reduce((sum, job) => sum + job.loaded, 0) / total);
+    let next = 0;
+    let failed = false;
+    const worker = async () => {
+        while (!failed && next < jobs.length) {
+            const job = jobs[next++];
+            const [kind] = _STAGED_FIELDS[job.field];
+            if (_stagedIds.has(job.file)) {  // already on the server from an earlier attempt
+                job.id = _stagedIds.get(job.file);
+                job.loaded = job.file.size;
+                report();
+                continue;
+            }
+            let res;
+            try {
+                res = await _xhrWithProgress(
+                    "PUT", `/api/uploads/${kind}?name=${encodeURIComponent(job.file.name)}`, job.file,
+                    (loaded) => { job.loaded = loaded; report(); },
+                    {"Content-Type": "application/octet-stream"},
+                );
+            } catch (err) {
+                failed = true;  // the other workers take no further files
+                throw err;
+            }
+            job.id = res.upload_id;
+            _stagedIds.set(job.file, job.id);
+            job.loaded = job.file.size;
+            report();
+        }
+    };
+    await Promise.all(Array.from({length: Math.min(_STAGE_CONCURRENCY, jobs.length)}, worker));
+    for (const job of jobs) staged.append(_STAGED_FIELDS[job.field][1], job.id);  // keeps the files' order
+    return staged;
+}
+
+function _uploadWithProgress(path, formData, onProgress) {
+    return _createWithStaged(formData, (staged) => _xhrWithProgress("POST", path, staged, null), onProgress);
 }
 
 // URL segment of each asset kind's API (used by the kind-agnostic thumbnail calls)
@@ -385,7 +462,9 @@ export const api = {
         return request(`/api/volumes/${id}`, {method: "DELETE"});
     },
     uploadMesh(id, formData) {
-        return request(`/api/volumes/${id}/mesh`, {method: "POST", body: formData});
+        return _createWithStaged(
+            formData, (staged) => request(`/api/volumes/${id}/mesh`, {method: "POST", body: staged}),
+        );
     },
     // The volume's intensity histogram (JSON), or null when it has none yet.
     async volumeHistogram(id) {
@@ -395,9 +474,9 @@ export const api = {
             console.debug("No histogram for this volume:", err.message);
         }
     },
-    zarrAccessUrl(id, minLevel) {
+    volumeDataAccessUrl(id, minLevel) {
         const qs = minLevel != null ? `?min_level=${encodeURIComponent(minLevel)}` : "";
-        return request(`/api/volumes/${id}/zarr-access-url${qs}`);
+        return request(`/api/volumes/${id}/volume-data-access-url${qs}`);
     },
     // Signed base URL for the slice views: one finished plane per request (backend/app/helpers/slices.py)
     sliceAccessUrl(id) {
@@ -578,12 +657,15 @@ export function renderShell(activePage, role, username) {
         if (role === "admin") {
             navItems.push({href: "/admin.html", label: "Users", key: "admin"});
         }
+        // In a viewer the full Help opens in a new tab, so the viewer keeps its state (the viewer's own
+        // Help button shows a small panel next to the view).
+        navItems.push({href: "/help.html", label: "Help", key: "help", newTab: window.location.pathname.startsWith("/viewers/")});
         navItems.push({href: "/account.html", label: "Account", key: "account"});
 
         const nav = navItems
             .map(
                 (item) =>
-                    `<a href="${item.href}" class="${activePage === item.key ? "active" : ""}" title="${item.label}">
+                    `<a href="${item.href}" class="${activePage === item.key ? "active" : ""}" title="${item.label}"${item.newTab ? ' target="_blank" rel="noopener"' : ""}>
           <span class="nav-icon">${NAV_ICONS[item.key] || ""}</span>
           <span class="nav-label">${item.label}</span>
         </a>`

@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Manage — Volume Gallery</title>
 <script src="/js/theme-init.js?v=hist1"></script>
-<link rel="stylesheet" href="/css/style.css?v=brand2" />
+<link rel="stylesheet" href="/css/style.css?v=help2" />
 <style>
   .cd-toggle { display: inline-flex; align-items: center; gap: 0.4em; font-size: 0.85em; color: var(--text-dim); }
 </style>
@@ -14,7 +14,8 @@
   <div class="app-shell" id="shell"></div>
 
   <script type="module">
-    import { api, requireLogin, getRole, getUsername, renderShell, wireLogout } from "/js/api.js?v=brand2";
+    import { api, requireLogin, getRole, getUsername, renderShell, wireLogout } from "/js/api.js?v=help2";
+    import { pageHint } from "/js/help.js?v=help2";
 
     requireLogin();
     const role = getRole();
@@ -75,6 +76,7 @@
       content.innerHTML = `
         <h1>${escapeHtml(item.title)}</h1>
         <p class="subtitle mono">${KIND.label} \u00b7 ${escapeHtml(item.slug)}</p>
+        ${pageHint("manage", role)}
         ${
           item.status !== "ready"
             ? `<div class="${item.status === "failed" ? "error-box" : "dim"}" style="margin-bottom:1.2em">
@@ -284,8 +286,7 @@
           <p class="dim" style="font-size:0.9em">Processed like any other mesh, but not listed separately: access follows this volume, and it is viewed and downloaded from the volume's viewer.</p>
           <p class="dim" style="font-size:0.9em">${
             item.has_mesh
-              ? escapeHtml(item.mesh_filename) +
-                (item.mesh_status && item.mesh_status !== "ready"
+              ? (item.mesh_status && item.mesh_status !== "ready"
                   ? ` \u2014 ${escapeHtml(item.mesh_status)}${
                       item.mesh_status === "failed" && item.mesh_status_log.length
                         ? `: ${escapeHtml(item.mesh_status_log[item.mesh_status_log.length - 1])}`

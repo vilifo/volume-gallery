@@ -86,17 +86,21 @@ def create_pointcloud(
     slug: str = Form(...),
     title: str = Form(...),
     description: str = Form(""),
-    pointcloud_file: UploadFile = File(..., description="las, laz, ply, xyz, ptx, pts, or e57"),
+    pointcloud_file: Optional[UploadFile] = File(None, description="las, laz, ply, xyz, ptx, pts, or e57"),
     thumbnail_file: Optional[UploadFile] = File(None, description="Optional PNG/JPEG/WebP thumbnail"),
+    pointcloud_upload_id: Optional[str] = Form(None, description="Instead of pointcloud_file: an id from PUT /api/uploads/pointcloud"),
     session: Session = Depends(get_session),
     editor: User = Depends(require_editor),
 ):
     if not SLUG_RE.match(slug):
         raise HTTPException(status_code=400, detail="Slug must be lowercase alphanumeric/-/_ (2-63 chars)")
+    if (pointcloud_file is None) == (not pointcloud_upload_id):
+        raise HTTPException(status_code=400, detail="Provide exactly one of pointcloud_file or pointcloud_upload_id")
     if session.exec(select(PointCloud).where(PointCloud.slug == slug)).first():
         raise HTTPException(status_code=409, detail="A point cloud with this slug already exists")
 
-    source_ext = Path(pointcloud_file.filename or "").suffix.lower()
+    staged = workdir.claim_upload(pointcloud_upload_id, "pointcloud", editor.id) if pointcloud_upload_id else None
+    source_ext = Path((staged.filename if staged else pointcloud_file.filename) or "").suffix.lower()
     if source_ext not in _POINTCLOUD_SOURCE_EXTS:
         raise HTTPException(
             status_code=400,
@@ -112,7 +116,8 @@ def create_pointcloud(
         work_dir = workdir.prepare_work_dir("pointclouds", slug, pc_dir)
         thumbnail_name = write_thumbnail(pc_dir, *thumbnail) if thumbnail else None
         upload_path = work_dir / f"_upload{source_ext}"  # upload stays in scratch; never copied into data
-        upload_fd = workdir.detach_upload(pointcloud_file)  # copied to upload_path by the background task
+        # multipart: copied to upload_path by the background task; staged: renamed there now
+        upload_fd = workdir.accept_upload(pointcloud_file, staged, upload_path)
     except Exception as exc:  # noqa: BLE001
         shutil.rmtree(pc_dir, ignore_errors=True)
         workdir.discard_job("pointclouds", slug)
@@ -152,7 +157,6 @@ def _process_pointcloud_upload(pc_id: int, pc_dir_str: str, upload_path_str: str
             log("Saving upload")
             workdir.save_detached(upload_fd, upload_path)
             convert_pointcloud(upload_path, output_dir, log=log)
-            pc.pc_path = output_dir.name
             pc.status = AssetStatus.ready
             log("Ready")
         except Exception as exc:  # noqa: BLE001 - the failure message IS the point, shown to the user
@@ -332,14 +336,14 @@ def _check_pc_token(token: str, pc_id: int, kind: str) -> None:
 def serve_octree_file(pc_id: int, token: str, path: str, session: Session = Depends(get_session)):
     """Serves individual files inside the Potree octree directory
     (metadata.json, octree.bin, hierarchy.bin, ...) — same pattern as the
-    volume viewer's zarr chunk server: a generic signed-token passthrough,
+    volume viewer's sharded-binary file server: a generic signed-token passthrough,
     since Potree's own client-side code decides exactly what to fetch from
     whatever base URL it's given."""
     _check_pc_token(token, pc_id, "pc-octree")
     pc = session.get(PointCloud, pc_id)
     if not pc:
         raise HTTPException(status_code=404, detail="Point cloud not found")
-    octree_root = (_pointcloud_dir(pc.slug) / pc.pc_path).resolve()
+    octree_root = _pointcloud_dir(pc.slug).resolve()
     target = (octree_root / path.lstrip("/")).resolve()
     if not str(target).startswith(str(octree_root)):
         raise HTTPException(status_code=400, detail="Invalid path")
@@ -357,7 +361,7 @@ def serve_pointcloud_download(pc_id: int, token: str, session: Session = Depends
     pc = session.get(PointCloud, pc_id)
     if not pc:
         raise HTTPException(status_code=404, detail="Point cloud not found")
-    octree_root = (_pointcloud_dir(pc.slug) / pc.pc_path).resolve()
+    octree_root = _pointcloud_dir(pc.slug).resolve()
     if not octree_root.exists():
         raise HTTPException(status_code=404, detail="Not found")
     zip_path = _pointcloud_dir(pc.slug) / "_download.zip"

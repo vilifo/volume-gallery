@@ -26,10 +26,24 @@ background tasks start. So the handler only calls detach_upload(), which keeps
 that temp file alive through a duplicated file descriptor, and the background
 task copies it into place with save_detached(). The HTTP response therefore
 goes out as soon as the last byte has arrived.
+
+Behind nginx there is a path that copies nothing at all: the browser sends each
+file as a raw request body to /api/uploads/<kind> (routers/uploads.py), nginx
+writes that body to <VG_PROCESSING_DIR>/.uploads (meshes: <VG_DATA_DIR>/.uploads)
+and tells the app only the file's name. The app renames it to an upload id, and
+the create request later renames it again into its final place (accept_upload).
+Both are renames within one filesystem, so each byte is written exactly once.
 """
+import errno
 import os
+import re
+import secrets
 import shutil
+import time
 from pathlib import Path
+from typing import NamedTuple
+
+from fastapi import HTTPException
 
 from .config import settings
 
@@ -66,10 +80,13 @@ def detach_upload(upload) -> int:
     return os.dup(upload.file.fileno())  # fileno() moves a small in-memory upload to disk first
 
 
-def save_detached(fd: int, dst: Path) -> None:
+def save_detached(fd, dst: Path) -> None:
     """Copies the whole file behind `fd` to `dst` and closes `fd`. Uses the
     kernel's copy_file_range where available (no data passes through Python),
-    otherwise a plain read/write loop. A partial `dst` is removed on failure."""
+    otherwise a plain read/write loop. A partial `dst` is removed on failure.
+    `fd` None means the upload was already moved to `dst` (accept_upload)."""
+    if fd is None:
+        return
     try:
         size = os.fstat(fd).st_size
         done = 0
@@ -99,12 +116,120 @@ def save_detached(fd: int, dst: Path) -> None:
         close_detached(fd)
 
 
-def close_detached(fd: int) -> None:
+def close_detached(fd) -> None:
     """Releases a descriptor from detach_upload() that will not be saved."""
+    if fd is None:
+        return
     try:
         os.close(fd)
     except OSError:
         pass
+
+
+# ---------- Uploads handed over by nginx ----------
+
+STAGING_NAME = ".uploads"
+_UPLOAD_ID_RE = re.compile(r"^u(?P<uid>\d+)_(?P<token>[0-9a-f]{32})__(?P<name>[A-Za-z0-9][A-Za-z0-9._-]{0,119})$")
+_NGINX_TEMP_RE = re.compile(r"^\d{10}$")  # name of a client_body temp file, no levels
+
+
+class StagedUpload(NamedTuple):
+    path: Path
+    filename: str  # sanitized original file name
+
+
+def staging_dir(kind: str) -> Path:
+    """Where uploads of this kind wait for their create request: next to where they end
+    up, so claiming one is a rename. kind: "volume" | "pointcloud" | "mesh"."""
+    return (settings.DATA_DIR if kind == "mesh" else settings.PROCESSING_DIR) / STAGING_NAME
+
+
+def safe_filename(name: str) -> str:
+    name = Path((name or "").replace("\\", "/")).name
+    name = re.sub(r"[^A-Za-z0-9._-]+", "_", name)[-120:].lstrip("._-")
+    return name or "upload"
+
+
+def move_file(src: Path, dst: Path) -> None:
+    """Renames src to dst; copies instead if they are on different filesystems."""
+    try:
+        os.replace(src, dst)
+    except OSError as exc:
+        if exc.errno != errno.EXDEV:
+            raise
+        print(f"[volume-gallery] {src} and {dst} are on different filesystems: copying instead of renaming")
+        save_detached(os.open(src, os.O_RDONLY), dst)
+        Path(src).unlink(missing_ok=True)
+
+
+def new_upload_id(user_id: int, filename: str) -> str:
+    return f"u{user_id}_{secrets.token_hex(16)}__{safe_filename(filename)}"
+
+
+def stage_handed_file(kind: str, user_id: int, filename: str, nginx_file: str) -> tuple:
+    """Takes over the temp file nginx wrote for an upload (`nginx_file` is the value of the
+    X-Upload-File header; only its name is used, so the two containers need not agree on
+    the mount path) and renames it to a fresh upload id. Returns (upload_id, size)."""
+    src = staging_dir(kind) / Path(nginx_file).name
+    if not _NGINX_TEMP_RE.match(src.name) or not src.is_file():
+        # Most likely cause in practice: nginx and the app do not share the directory, or nginx
+        # writes it as another user than the app runs as (files are 0600, the directory 0700).
+        print(f"[volume-gallery] cannot see the upload file nginx announced ({nginx_file!r} -> {src}). "
+              "Check that nginx and the app mount the same processing directory and run as the same uid (VG_UID/VG_GID).")
+        raise HTTPException(status_code=400, detail="Upload hand-over failed: the app cannot see the file nginx wrote "
+                                                    "(nginx and the app need the same processing directory and the same uid; see VG_UID)")
+    size = src.stat().st_size  # before the rename: some bind mounts (Docker Desktop on Windows) show a just-renamed file late
+    upload_id = new_upload_id(user_id, filename)
+    move_file(src, staging_dir(kind) / upload_id)
+    return upload_id, size
+
+
+def claim_upload(upload_id: str, kind: str, user_id: int) -> StagedUpload:
+    """The staged file behind an upload id returned by PUT /api/uploads/<kind>."""
+    m = _UPLOAD_ID_RE.match(upload_id or "")
+    path = staging_dir(kind) / upload_id if m else None
+    if not m or int(m["uid"]) != user_id or not path.is_file():
+        raise HTTPException(status_code=400, detail="Unknown or expired upload — please upload the file again")
+    return StagedUpload(path, m["name"])
+
+
+def accept_upload(upload, staged, dst: Path):
+    """Puts an upload where it belongs. `staged` (a claimed upload id) is renamed to `dst`
+    right away and None is returned; otherwise `upload` is a multipart UploadFile and its
+    detached descriptor is returned, to be copied to `dst` later by save_detached()."""
+    if staged is not None:
+        move_file(staged.path, dst)
+        return None
+    return detach_upload(upload)
+
+
+_last_sweep = 0.0
+
+
+def sweep_staging(force: bool = True) -> None:
+    """Deletes staged uploads nobody claimed (the browser gave up, the create request
+    failed, ...) once they are older than VG_UPLOAD_STAGING_MAX_AGE_HOURS. Without `force`
+    it runs at most every 10 minutes (it is called from the upload requests).
+    Files nginx is still receiving (names like 0000000001) are left alone: nginx deletes
+    them itself when a request is aborted."""
+    global _last_sweep
+    now = time.time()
+    if not force and now - _last_sweep < 600:
+        return
+    _last_sweep = now
+    max_age = 3600 * settings.UPLOAD_STAGING_MAX_AGE_HOURS
+    for kind in ("volume", "mesh"):
+        base = staging_dir(kind)
+        if not base.is_dir():
+            continue
+        for child in base.iterdir():
+            try:
+                if _NGINX_TEMP_RE.match(child.name) or not child.is_file():
+                    continue
+                if now - child.stat().st_mtime > max_age:
+                    child.unlink()
+            except OSError:
+                pass
 
 
 def discard_job(kind: str, slug: str) -> None:

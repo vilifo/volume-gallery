@@ -27,6 +27,7 @@ export class SliceState {
     this.layout = LAYOUTS.includes(layout) ? layout : "3d";
     this.linkZoom = false;
     this.showCrosshair = true;
+    this.showScaleBar = true; // length reference in each slice pane
     this.show3dPlanes = true; // outlines of the three planes over the 3D view
     this.show3dCursor = true; // the cursor (three crossing lines + dot) over the 3D view
     this.tf = { preset: "gray", stops: presetStops("gray") }; // colours over the windowed range

@@ -95,6 +95,7 @@ export function mountSliceControls(panelBody, views) {
 
       <div class="ctl-eyebrow ctl-subhead">Cursor and planes</div>
       ${toggle("crosshair", "Crosshairs in slices", st.showCrosshair, "Show where the other two panes cut through each slice pane")}
+      ${toggle("scalebar", "Scale bar in slices", st.showScaleBar !== false, "Length reference in each slice pane, assuming the voxel spacing in volume.json is in micrometres")}
       ${toggle("cursor3d", "Cursor in 3D view", st.show3dCursor, "Show the cursor (three crossing lines and a dot) over the 3D view")}
       ${toggle("planes3d", "Slice planes in 3D view", st.show3dPlanes, "Outline the three slice planes over the 3D view")}
       ${toggle("linkzoom", "Link zoom", st.linkZoom, "Zooming one slice pane zooms the others to match")}
@@ -115,6 +116,7 @@ export function mountSliceControls(panelBody, views) {
   q("win-reset").addEventListener("click", () => st.resetWindow());
   q("invert").addEventListener("change", (e) => st.setInvert(e.target.checked));
   q("crosshair").addEventListener("change", (e) => st.setOption("showCrosshair", e.target.checked));
+  q("scalebar").addEventListener("change", (e) => st.setOption("showScaleBar", e.target.checked));
   q("cursor3d").addEventListener("change", (e) => st.setOption("show3dCursor", e.target.checked));
   q("planes3d").addEventListener("change", (e) => st.setOption("show3dPlanes", e.target.checked));
   q("linkzoom").addEventListener("change", (e) => st.setOption("linkZoom", e.target.checked));
@@ -247,6 +249,7 @@ export function mountSliceControls(panelBody, views) {
     q("invert").checked = st.invert;
     q("cursor3d").checked = st.show3dCursor;
     q("planes3d").checked = st.show3dPlanes;
+    q("scalebar").checked = st.showScaleBar !== false;
   };
   const offs = [st.on("window", refresh), st.on("cursor", refresh), st.on("option", refresh), st.on("tf", syncEditor)];
   return () => { offs.forEach((off) => off()); section.remove(); };

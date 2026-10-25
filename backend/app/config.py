@@ -25,13 +25,12 @@ class Settings:
     POINTCLOUDS_DIR: Path = DATA_DIR / "pointclouds"
     DB_PATH: Path = DATA_DIR / "gallery.db"
 
-    # Offload OME-Zarr chunk file delivery to nginx via X-Accel-Redirect.
-    # Off by default so bare `uvicorn` local development works out of the box.
-    ZARR_ACCEL_REDIRECT: bool = os.environ.get("VG_ZARR_ACCEL_REDIRECT", "").lower() in (
+    # Offload sharded binary delivery to nginx via X-Accel-Redirect.
+    SHARD_ACCEL_REDIRECT: bool = os.environ.get("VG_SHARD_ACCEL_REDIRECT", "").lower() in (
         "1", "true", "yes", "on"
     )
-    ZARR_ACCEL_PREFIX: str = os.environ.get("VG_ZARR_ACCEL_PREFIX", "/_internal_volumes")
-    ZARR_META_CACHE_TTL_SECONDS: int = int(os.environ.get("VG_ZARR_META_CACHE_TTL_SECONDS", "60"))
+    SHARD_ACCEL_PREFIX: str = os.environ.get("VG_SHARD_ACCEL_PREFIX", "/_internal_volumes")
+    FILE_META_CACHE_TTL_SECONDS: int = int(os.environ.get("VG_FILE_META_CACHE_TTL_SECONDS", "60"))
 
     # Largest accepted thumbnail upload (png / jpeg / webp)
     THUMBNAIL_MAX_MB: int = int(os.environ.get("VG_THUMBNAIL_MAX_MB", "5"))
@@ -47,12 +46,18 @@ class Settings:
 
     PROCESSING_DIR: Path = Path(os.environ.get("VG_PROCESSING_DIR") or "/processing")  # "" (unset in compose) -> default
 
+    # Uploads that nginx has already written to disk and handed over by path (see
+    # nginx/nginx.conf.template and routers/uploads.py) wait in <processing>/.uploads (volumes, point
+    # clouds) or <data>/.uploads (meshes: the original is kept in the data folder) until the create
+    # request claims them. Unclaimed ones (abandoned or failed uploads) are deleted after this long.
+    UPLOAD_STAGING_MAX_AGE_HOURS: float = float(os.environ.get("VG_UPLOAD_STAGING_MAX_AGE_HOURS", "24"))
+
     # --- Slice views (server-extracted planes, see helpers/slices.py) ---
     # RAM for decoded 64-plane slabs, shared by every viewer. A slab of a 2000^3
     # 16-bit volume is ~512 MB, so ~4 slabs fit the default; 0 disables caching
     # (every plane is then read straight from the chunks, ~10-50x slower).
     SLICE_CACHE_MB: int = int(os.environ.get("VG_SLICE_CACHE_MB", "2048"))
-    # Slabs decoded in parallel (each decode is itself multi-threaded by zarr)
+    # Slabs decoded in parallel from sharded binary bricks
     SLICE_BUILD_THREADS: int = int(os.environ.get("VG_SLICE_BUILD_THREADS", "2"))
     # zstd level for planes sent to browsers that accept it (1 = fastest)
     SLICE_ZSTD_LEVEL: int = int(os.environ.get("VG_SLICE_ZSTD_LEVEL", "1"))
@@ -87,5 +92,7 @@ settings.POINTCLOUDS_DIR.mkdir(parents=True, exist_ok=True)
 
 _tmp = settings.PROCESSING_DIR / ".tmp"
 _tmp.mkdir(parents=True, exist_ok=True)
+(settings.PROCESSING_DIR / ".uploads").mkdir(parents=True, exist_ok=True)
+(settings.DATA_DIR / ".uploads").mkdir(parents=True, exist_ok=True)
 tempfile.tempdir = str(_tmp)
 os.environ["TMPDIR"] = str(_tmp)

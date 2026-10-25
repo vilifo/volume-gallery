@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Viewer — Volume Gallery</title>
 <script src="/js/theme-init.js?v=hist1"></script>
-<link rel="stylesheet" href="/css/style.css?v=brand2" />
+<link rel="stylesheet" href="/css/style.css?v=theme1" />
 <style>
   /* This page trades the app's normal padded/max-width main column for an
      edge-to-edge canvas — the render is the point of the page, everything
@@ -84,6 +84,15 @@
   .slice-pane-3d { background: #000; }
   .slice-pane-3d[data-visible="0"] { display: block; visibility: hidden; position: absolute; inset: 0; }
   .slice-pane-3d > canvas { width: 100%; height: 100%; display: block; }
+
+  /* Scale bar of the 3D view (startScaleBar). Drawn over arbitrary volume data, so it carries its own outline. */
+  .scale-bar {
+    position: absolute; left: 14px; bottom: 12px; display: flex; flex-direction: column; align-items: flex-start; gap: 4px;
+    pointer-events: none; color: #f2f4f8; font: 11px/1 var(--mono);
+    text-shadow: 0 0 3px #000, 0 1px 2px #000;
+  }
+  .scale-bar[hidden] { display: none; }
+  .scale-bar-line { height: 6px; box-sizing: border-box; border: 2px solid currentColor; border-top: 0; filter: drop-shadow(0 0 1px #000) drop-shadow(0 0 1px #000); }
   .slice-pane-2d:focus-visible { box-shadow: inset 0 0 0 1px rgba(120, 160, 255, 0.6); }
   .slice-canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; cursor: crosshair; }
   .slice-svg { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
@@ -148,7 +157,7 @@
   .viewer-progress {
     position: absolute; left: 0; right: 0; top: 0;
     height: 3px;
-    background: rgba(255, 255, 255, 0.08);
+    background: var(--viewer-hover);
     z-index: 3;
     opacity: 0;
     transition: opacity 0.25s ease;
@@ -162,7 +171,7 @@
   .viewer-load-chip {
     position: absolute; left: 12px; top: 12px;
     display: flex; align-items: center; gap: 0.6em;
-    background: rgba(26, 29, 35, 0.92);
+    background: var(--viewer-surface);
     border-radius: 8px;
     padding: 0.5em 0.8em;
     font-family: var(--mono);
@@ -179,9 +188,9 @@
   .ctl-chip {
     position: absolute;
     z-index: 3;
-    background: rgba(26, 29, 35, 0.92);
+    background: var(--viewer-surface);
     color: var(--text);
-    border: 1px solid rgba(255, 255, 255, 0.08);
+    border: 1px solid var(--viewer-border);
     border-radius: 8px;
     padding: 0.45em 0.85em;
     font-size: 12px;
@@ -209,7 +218,7 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    background: rgba(20, 23, 28, 0.95);
+    background: var(--panel-raised);
     color: var(--accent);
     font-weight: 600;
     letter-spacing: 0.02em;
@@ -227,15 +236,15 @@
     cursor: pointer;
     border-radius: 4px;
   }
-  .ctl-close:hover { color: var(--text); background: rgba(255, 255, 255, 0.08); }
+  .ctl-close:hover { color: var(--text); background: var(--viewer-hover); }
   .ctl-panel-body { padding: 0.85em; overflow-y: auto; flex: 1; min-height: 0; }
   .ctl-panel-body::-webkit-scrollbar { width: 6px; }
   .ctl-panel-body::-webkit-scrollbar-track { background: transparent; }
-  .ctl-panel-body::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.15); border-radius: 3px; }
+  .ctl-panel-body::-webkit-scrollbar-thumb { background: var(--viewer-track); border-radius: 3px; }
 
   .ctl-segmented {
     display: flex;
-    background: rgba(255, 255, 255, 0.05);
+    background: color-mix(in srgb, var(--panel-raised) 72%, transparent);
     border-radius: 6px;
     padding: 2px;
     margin-bottom: 0.9em;
@@ -251,13 +260,13 @@
     cursor: pointer;
   }
   .ctl-segment.active { background: var(--accent); color: var(--on-accent); font-weight: 600; }
-  .ctl-segment:not(.active):hover { color: var(--text); background: rgba(255, 255, 255, 0.06); }
+  .ctl-segment:not(.active):hover { color: var(--text); background: color-mix(in srgb, var(--panel-raised) 82%, transparent); }
 
   .ctl-select-row { display: flex; align-items: center; justify-content: space-between; gap: 0.6em; margin-bottom: 0.7em; }
   .ctl-row-label { color: var(--text-dim); font-size: 11px; flex-shrink: 0; }
   .ctl-select-input {
-    background: rgba(255, 255, 255, 0.06);
-    border: 1px solid rgba(255, 255, 255, 0.08);
+    background: color-mix(in srgb, var(--panel-raised) 82%, transparent);
+    border: 1px solid var(--viewer-border);
     border-radius: 4px;
     color: var(--text);
     font-size: 11px;
@@ -271,7 +280,7 @@
     margin-bottom: 0.9em;
     border-radius: 6px;
     overflow: hidden;
-    border: 1px solid rgba(255, 255, 255, 0.08);
+    border: 1px solid var(--viewer-border);
   }
   /* The stage is padded so handles at x/y = 0 or 1 sit fully inside the hit
      area; the overlay canvas covers the whole stage and owns pointer input. */
@@ -287,11 +296,11 @@
     user-select: none;
     -webkit-user-select: none;
   }
-  .ctl-tf-help { font-size: 10px; color: var(--text-dim); text-align: center; padding: 0.35em 0; background: rgba(0, 0, 0, 0.3); }
+  .ctl-tf-help { font-size: 10px; color: var(--text-dim); text-align: center; padding: 0.35em 0; background: color-mix(in srgb, var(--panel) 86%, transparent); }
 
   .ctl-slider-row { display: flex; align-items: center; gap: 0.6em; margin-bottom: 0.7em; }
   .ctl-slider-label { width: 62px; flex-shrink: 0; color: var(--text-dim); font-size: 11px; }
-  .ctl-slider-track { position: relative; flex: 1; height: 4px; background: rgba(255, 255, 255, 0.1); border-radius: 2px; }
+  .ctl-slider-track { position: relative; flex: 1; height: 4px; background: var(--viewer-track); border-radius: 2px; }
   .ctl-slider-fill { position: absolute; top: 0; left: 0; height: 100%; background: var(--accent); border-radius: 2px; pointer-events: none; }
   .ctl-slider-input {
     position: absolute;
@@ -316,7 +325,7 @@
     width: 12px; height: 12px;
     border-radius: 50%;
     background: var(--accent);
-    border: 2px solid #14171c;
+    border: 2px solid var(--panel);
     box-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
   }
   .ctl-slider-input::-moz-range-thumb {
@@ -324,14 +333,14 @@
     width: 12px; height: 12px;
     border-radius: 50%;
     background: var(--accent);
-    border: 2px solid #14171c;
+    border: 2px solid var(--panel);
     box-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
   }
   .ctl-slider-input::-moz-range-track { background: transparent; }
   .ctl-row-value { width: 42px; flex-shrink: 0; text-align: right; color: var(--text-dim); font-size: 10.5px; }
   .ctl-mono { font-family: var(--mono); }
 
-  .ctl-range-track { position: relative; flex: 1; height: 4px; background: rgba(255, 255, 255, 0.1); border-radius: 2px; }
+  .ctl-range-track { position: relative; flex: 1; height: 4px; background: var(--viewer-track); border-radius: 2px; }
   .ctl-range-fill { position: absolute; top: 0; height: 100%; background: var(--accent); border-radius: 2px; pointer-events: none; }
   .ctl-range-input {
     position: absolute;
@@ -357,7 +366,7 @@
     width: 12px; height: 12px;
     border-radius: 50%;
     background: var(--accent);
-    border: 2px solid #14171c;
+    border: 2px solid var(--panel);
     box-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
     cursor: pointer;
   }
@@ -367,7 +376,7 @@
     width: 12px; height: 12px;
     border-radius: 50%;
     background: var(--accent);
-    border: 2px solid #14171c;
+    border: 2px solid var(--panel);
     box-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
     cursor: pointer;
   }
@@ -380,7 +389,7 @@
   .ctl-toggle-track {
     position: relative;
     width: 30px; height: 16px;
-    background: rgba(255, 255, 255, 0.12);
+    background: var(--viewer-track);
     border-radius: 8px;
     transition: background 0.15s ease;
     flex-shrink: 0;
@@ -430,9 +439,8 @@
   <div class="app-shell" id="shell"></div>
 
   <script type="module">
-    import { api, requireLogin, getRole, getUsername, renderShell, wireLogout } from "/js/api.js?v=brand2";
+    import { api, requireLogin, getRole, getUsername, renderShell, wireLogout } from "/js/api.js?v=help2";
     import { syncHistogram } from "/js/histogram.js?v=hist1";
-    import { watchZarrAccess, resetZarrAccessWatch } from "/js/zarr-access.js?v=exp1";
     import { KilnViewer } from "/vendor/kiln-render/lib/kiln-render.js?v=atlas2";
     import {
       ATLAS_VRAM_OPTIONS_MB,
@@ -441,7 +449,9 @@
       planAtlas,
       saveAtlasMB,
     } from "/js/atlas-budget.js?v=atlas3";
-    import { setupSliceIntegration } from "/js/slice/slice-integration.js?v=slice1";
+    import { setupSliceIntegration } from "/js/slice/slice-integration.js?v=slice2";
+    import { niceScaleLength } from "/js/scalebar.js?v=sb1";
+    import { toggleHelpPanel } from "/js/help.js?v=help2";
 
     requireLogin();
     const role = getRole();
@@ -454,6 +464,7 @@
     const EXPAND_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M21 16v3a2 2 0 0 1-2 2h-3M3 16v3a2 2 0 0 0 2 2h3"/></svg>`;
     const COLLAPSE_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3v3a2 2 0 0 1-2 2H4M15 3v3a2 2 0 0 0 2 2h3M4 16h3a2 2 0 0 1 2 2v3M20 16h-3a2 2 0 0 0-2 2v3"/></svg>`;
     const CUBE_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8 12 3 3 8m18 0v8l-9 5m9-13-9 5m0 8-9-5V8m9 13v-8M3 8l9 5"/></svg>`;
+    const HELP_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.1 9a3 3 0 0 1 5.8 1c0 2-3 3-3 3M12 17h.01"/></svg>`;
     const LINK_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>`;
 
     document.getElementById("shell").innerHTML = `
@@ -500,29 +511,14 @@
       return { ok: true };
     }
 
-    // Prompts for a reload when the chunk requests start failing with 403 (expired access token).
-    watchZarrAccess(volumeId);
-
-    async function registerZarrServiceWorker(volId, version) {
-      if (!("serviceWorker" in navigator) || !("caches" in window)) return;
+    async function retireLegacyServiceWorker() {
+      if (!("serviceWorker" in navigator)) return;
       try {
-        const reg = await navigator.serviceWorker.register("/js/sw.js", { scope: "/" });
-        await navigator.serviceWorker.ready;
-        const target = navigator.serviceWorker.controller || reg.active;
-        if (target && version) {
-          await new Promise((resolve) => {
-            const ch = new MessageChannel();
-            const timer = setTimeout(resolve, 300);
-            ch.port1.onmessage = () => { clearTimeout(timer); resolve(); };
-            target.postMessage(
-              { type: "SET_VOLUME_VERSION", volumeId: String(volId), version: String(version) },
-              [ch.port2]
-            );
-          });
-        }
-      } catch (err) {
-        console.warn("[sw] Service worker registration skipped:", err);
-      }
+        const registrations = await navigator.serviceWorker.getRegistrations();
+        await Promise.all(registrations.filter((r) =>
+          [r.active, r.waiting, r.installing].some((w) => w?.scriptURL?.includes("/js/sw.js"))
+        ).map((r) => r.unregister()));
+      } catch (err) { console.warn("Could not retire legacy volume cache worker:", err); }
     }
 
     // ------------------------------------------------------------------
@@ -630,7 +626,7 @@
     // UI state that must survive a reload of the viewer (the side panel is
     // rebuilt for each KilnViewer, so its open/closed state lives here).
     // ------------------------------------------------------------------
-    const uiState = { panelOpen: true, infoOpen: false, sceneOpen: true, advancedOpen: false, panelScroll: 0 };
+    const uiState = { panelOpen: true, infoOpen: false, sceneOpen: true, advancedOpen: false, panelScroll: 0, scaleBar: true };
 
     function setPanelOpen(open) {
       uiState.panelOpen = open;
@@ -697,6 +693,7 @@
               <button type="button" data-layout="xz" title="XZ plane: slices along Y">XZ</button>
               <button type="button" data-layout="yz" title="YZ plane: slices along X">YZ</button>
             </div>
+            <button id="help-btn" class="icon-btn" aria-pressed="false" title="Show help for this viewer next to the view">${HELP_ICON}<span class="icon-btn-label">Help</span></button>
             <button id="share-btn" class="icon-btn" title="Copy a link to this exact view">${LINK_ICON}<span class="icon-btn-label">Share</span></button>
             ${
               volume.mesh_status === "ready"
@@ -709,7 +706,7 @@
         <div class="viewer-canvas-wrap" id="canvas-wrap">
           <div class="viewer-canvas-area" id="canvas-area">
             <div class="slice-grid" id="slice-grid" data-layout="3d">
-              <div class="slice-pane slice-pane-3d" id="pane-3d" data-visible="1"><canvas id="canvas"></canvas></div>
+              <div class="slice-pane slice-pane-3d" id="pane-3d" data-visible="1"><canvas id="canvas"></canvas><div class="scale-bar" id="scale-bar" hidden><span class="scale-bar-label"></span><div class="scale-bar-line"></div></div></div>
               <div data-axis="xy"></div><div data-axis="xz"></div><div data-axis="yz"></div>
             </div>
             <div class="viewer-progress" id="load-progress"><div class="viewer-progress-bar" id="load-progress-bar"></div></div>
@@ -747,7 +744,7 @@
         return;
       }
 
-      // Levels are OME-NGFF multiscale indices: 0 = full resolution, higher
+      // Levels are sharded-volume LOD indices: 0 = full resolution, higher
       // = coarser. Defaulting to the middle of the pyramid means the finest
       // (most memory/bandwidth-hungry) half is never streamed unless the
       // user explicitly asks for it — see the "Max detail level" control.
@@ -767,6 +764,7 @@
       // loadToken discards the result of a load superseded by a newer one.
       let loadToken = 0;
       let stopStats = null;
+      let stopScaleBar = null;
       let urlSync = null;
 
       // Slice views (xy / xz / yz panes + quad layout). Nothing is
@@ -811,6 +809,10 @@
           stopStats();
           stopStats = null;
         }
+        if (stopScaleBar) {
+          stopScaleBar();
+          stopScaleBar = null;
+        }
         if (currentViewer) {
           const old = currentViewer;
           currentViewer = null;
@@ -826,11 +828,10 @@
 
         try {
           histogramPromise = histogramPromise || api.volumeHistogram(volumeId); // fetched once, in parallel
-          const access = await api.zarrAccessUrl(volumeId, minLevel);
+          const access = await api.volumeDataAccessUrl(volumeId, minLevel);
           if (token !== loadToken) return;
-          resetZarrAccessWatch(); // fresh token: a later expiry may prompt again
+          await retireLegacyServiceWorker();
 
-          await registerZarrServiceWorker(volumeId, access.version);
           if (token !== loadToken) return;
 
           // The atlas gets the VRAM the user selected, but no more than this
@@ -867,6 +868,7 @@
             },
           });
           stopStats = startStatsLoop(viewer, atlas);
+          stopScaleBar = startScaleBar(viewer, $("pane-3d"), $("scale-bar"));
           urlSync = startUrlSync(viewer, () => activeMinLevel);
           slices.attachViewer(viewer);
           slices.mountControls(canvasWrap.querySelector(".ctl-panel-body"));
@@ -885,6 +887,13 @@
       loadVolume(activeMinLevel);
 
       // Share view URL button
+      // Help: a floating panel, not a dialog, so the view stays usable while it is open.
+      const helpBtn = document.getElementById("help-btn");
+      helpBtn.addEventListener("click", () => {
+        const open = toggleHelpPanel({ topic: "volume", role: getRole(), onClose: () => helpBtn.setAttribute("aria-pressed", "false") });
+        helpBtn.setAttribute("aria-pressed", String(open));
+      });
+
       document.getElementById("share-btn").addEventListener("click", async () => {
         const currentViewQuery =
           window.location.search.replace(/^\?/, "") +
@@ -1180,6 +1189,11 @@
               <label class="ctl-toggle-row">
                 <span class="ctl-row-label ctl-toggle-label">Axes</span>
                 <input type="checkbox" class="ctl-toggle-input" data-role="axes" ${renderer.showAxis ? "checked" : ""}>
+                <span class="ctl-toggle-track"></span>
+              </label>
+              <label class="ctl-toggle-row" title="Length reference at the orbit target, assuming the voxel spacing in volume.json is in micrometres">
+                <span class="ctl-row-label ctl-toggle-label">Scale bar (3D view)</span>
+                <input type="checkbox" class="ctl-toggle-input" data-role="scalebar" ${uiState.scaleBar ? "checked" : ""}>
                 <span class="ctl-toggle-track"></span>
               </label>
               <div data-role="clip-rows">
@@ -1559,6 +1573,10 @@
       panel.querySelector('[data-role="axes"]').addEventListener("change", (evt) => {
         renderer.showAxis = evt.target.checked;
       });
+      panel.querySelector('[data-role="scalebar"]').addEventListener("change", (evt) => {
+        uiState.scaleBar = evt.target.checked;
+        $("scale-bar").hidden = !uiState.scaleBar || !$("scale-bar").dataset.ready;
+      });
 
       wireClipAxis("X", dimX, (lo, hi) => { renderer.clipMin[0] = lo; renderer.clipMax[0] = hi; dirty(); });
       wireClipAxis("Y", dimY, (lo, hi) => { renderer.clipMin[1] = lo; renderer.clipMax[1] = hi; dirty(); });
@@ -1634,6 +1652,52 @@
 
     // Drives the info box and the loading indicator for one viewer. Returns a
     // function that stops it.
+    // ------------------------------------------------------------------
+    // Scale bar. The voxel spacing in volume.json (metadata.voxelSpacing) is taken to be micrometres.
+    // The camera is a perspective one orbiting a target and its distance is in "normalized" units,
+    // in which the longest physical edge of the volume is 1. So what lies at the orbit target (the
+    // middle of the view unless panned) is drawn at
+    //   pixels per normalized unit = canvas height / (2 * distance * tan(fovY / 2))
+    // and the bar is exact there; nearer or farther parts of the volume are drawn larger or smaller.
+    // ------------------------------------------------------------------
+    function startScaleBar(viewer, pane, el) {
+      const { dimensions, voxelSpacing } = viewer.metadata;
+      el.hidden = true;
+      delete el.dataset.ready;
+      if (!voxelSpacing || !voxelSpacing.every((s) => s > 0)) return () => {};
+      const umPerNormalized = Math.max(...dimensions.map((n, i) => n * voxelSpacing[i]));
+      const label = el.querySelector(".scale-bar-label");
+      const line = el.querySelector(".scale-bar-line");
+      const tanHalfFov = Math.tan(viewer.camera.fovY / 2);
+      let raf = 0;
+      let last = "";
+      const tick = () => {
+        raf = requestAnimationFrame(tick);
+        const canvas = pane.querySelector("canvas");
+        const h = canvas?.clientHeight;
+        const w = canvas?.clientWidth;
+        const distance = viewer.camera.getOrbitState()[2];
+        if (!h || !w || !(distance > 0)) return;
+        const umPerPx = (umPerNormalized * 2 * distance * tanHalfFov) / h;
+        const maxPx = Math.max(60, Math.min(150, w * 0.25));
+        const key = `${umPerPx.toPrecision(4)}|${maxPx}`;
+        if (key === last) return;
+        last = key;
+        const nice = niceScaleLength(umPerPx * maxPx);
+        if (!nice) return;
+        const { um, text } = nice;
+        line.style.width = `${Math.round(um / umPerPx)}px`;
+        label.textContent = text;
+        el.dataset.ready = "1";
+        el.hidden = !uiState.scaleBar;
+      };
+      tick();
+      return () => {
+        cancelAnimationFrame(raf);
+        el.hidden = true;
+      };
+    }
+
     function startStatsLoop(viewer, atlas) {
       const statsEl = $("stats-text");
       const meta = viewer.metadata;

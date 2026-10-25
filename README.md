@@ -1,7 +1,7 @@
 # Volume Gallery
 
 A small self-hosted gallery for CT volumes, viewed in-browser with
-[kiln-render](https://github.com/MPanknin/kiln-render) (WebGPU, OME-Zarr).
+[kiln-render](https://github.com/MPanknin/kiln-render) (WebGPU, kiln sharded binary).
 Three roles:
 
 - **admin** — add/remove/disable users, change roles, reset users' passwords.
@@ -27,23 +27,23 @@ frontend/   Static HTML/CSS/JS gallery UI + vendored kiln-render library
 nginx/      Reverse proxy config + self-signed cert generator (see below)
 .github/    GitHub Actions workflow that builds & publishes to Docker Hub
 data/       (created at runtime) SQLite DB + one folder per volume
-processing/ (optional, created at runtime) scratch space for uploads being processed
+processing/ (created at runtime) scratch space: uploads are written here by nginx and processed here
 ```
 
-- Each volume is a folder on disk containing its OME-Zarr store and an
+- Each volume slug directory contains the kiln sharded-binary dataset files directly (no dataset subdirectories) and an
   optional mesh file. The database only stores metadata and access grants.
 - **Uploads are processed in the background**, not while you wait: the
   upload request returns as soon as the file is saved, with the volume
-  marked `processing`. Extraction (or TIFF→OME-Zarr conversion, for TIFF
+  marked `processing`. Extraction (or TIFF→kiln sharded-binary conversion, for TIFF
   stack uploads) then runs server-side; the gallery page polls
   `GET /api/volumes/{id}/status` and shows live progress on that volume's
   row until it flips to `ready` (or `failed`, with the reason shown inline —
   editors can delete a failed upload from its Manage page to retry).
 - **kiln-render runs entirely in the browser** and does many small HTTP
-  range-reads directly against the zarr store, so it can't send an
+  range-reads directly against the sharded-binary dataset, so it can't send an
   `Authorization` header the way a normal API client would. Instead, when
   you open a volume the backend hands the page a short-lived signed URL
-  (`/api/volumes/{id}/zarr-access-url`, default 30 min) that kiln-render
+  (`/api/volumes/{id}/volume-data-access-url`, default 30 min) that kiln-render
   fetches chunks from directly. Mesh downloads work the same way. Anyone with
   the raw URL can use it until it expires, but they can't get one without
   first authenticating as a user with access to that volume.
@@ -65,15 +65,7 @@ processing/ (optional, created at runtime) scratch space for uploads being proce
 
 ## Histogram
 
-The volume viewer draws a histogram of the data behind the transfer function curve. It is
-computed from the full-resolution level when a volume is created (step "Computing
-histogram") and stored as `histogram.json` in the volume's folder, next to the Zarr store.
-On start, volumes that lack one (created before this feature, or whose computation failed)
-are processed one by one in a background thread; the app is usable meanwhile. A volume
-without a histogram simply shows none. `VG_HISTOGRAM_THREADS` (default: up to 4) limits the
-CPU used, `VG_HISTOGRAM_BACKFILL=0` turns the start-up catch-up off. The file holds
-`{"dtype", "min", "max", "bins", "counts"}`; the voxels the converter pads onto TIFF stacks
-(multiples of 16) count as zeros.
+The volume viewer draws a histogram behind the transfer-function curve. It is computed from the original full-resolution TIFF stack during conversion and stored as `histogram.json` alongside the sharded dataset. If a legacy or damaged volume has no histogram, the app leaves the backdrop empty rather than decompressing the entire dataset at startup. `VG_HISTOGRAM_THREADS` (default: up to 4) limits CPU use during conversion. The file contains `{"dtype", "min", "max", "bins", "counts"}`.
 
 ## Branding
 
@@ -86,32 +78,11 @@ Docker, point `VG_BRANDING_DIR` at the folder. Needs Python 3.11+ (TOML parser).
 
 ## Preparing volumes to upload
 
-The uploader expects a **.zip** file containing your OME-Zarr store (v0.5,
-single-channel, uint8/uint16 — see kiln-render's
-[Data Guide](https://kilnrender.com) for conversion tips from raw CT stacks).
-Zip the store's directory itself, e.g.:
+The volume uploader accepts a **.zip of single-slice TIFF files** (one `.tif` or `.tiff` per Z position), or multiple TIFF files selected together. The backend converts the input to kiln-render's sharded binary layout (`volume.json`, `lodN.bin`, and `lodN_index.json`) using out-of-core Dask processing. All generated sharded files and `histogram.json` are stored directly in the volume slug directory, without subdirectories. Supported scalar input types are `uint8` and `uint16`.
 
-```bash
-cd my-scan.ome.zarr
-zip -r ../my-scan.zip .
-```
+Slice order is sorted naturally by filename, so use names such as `slice_0001.tif`, `slice_0002.tif`, and so on. Plain numeric names (`1.tif`, `2.tif`, …) can sort incorrectly once the sequence reaches two digits, so zero-pad them.
 
-The mesh field accepts any file (STL/OBJ/PLY/...) — it's stored and served
-as-is for download, kiln-render never touches it.
-
-### Uploading a TIFF stack instead
-
-The uploader can also take a **.zip of a flat TIFF stack** (one .tif/.tiff
-file per Z slice) and convert it to OME-Zarr on the server — pick "TIFF
-stack" instead of "OME-Zarr" on the upload page. Slice order is taken from
-sorting the filenames, so name them so alphabetical order matches
-acquisition order (`slice_0001.tif`, `slice_0002.tif`, ...; a plain numeric
-`1.tif, 2.tif, ...` sorts wrong once you hit two digits, so zero-pad).
-Conversion runs synchronously as part of the upload request and can take a
-while for large stacks — the whole stack is decoded into memory at once, so
-keep an eye on available RAM for very large scans. Once conversion finishes,
-the original TIFF files are deleted; only the resulting OME-Zarr store is
-kept on disk.
+The mesh field accepts any supported mesh file (STL/OBJ/PLY/...) and stores the original for download.
 
 ## Local development
 
@@ -162,51 +133,81 @@ set — nginx redirects plain `http://` to `https://` automatically). See
 "Putting it behind HTTPS" below for what that cert script does and your
 options if you'd rather use a real certificate.
 
-### Processing directory (optional)
+### Processing directory
 
-By default an upload is saved, unpacked and converted inside its own folder
-under `/data`. If `/data` sits on slow or precious storage (a NAS dataset with
-snapshots, say), you can have all of that happen in a separate scratch
-directory instead — the data is still stored in `/data`; only the *processing*
-moves. Set these in `.env`:
+Uploads are received, unpacked and converted in a scratch directory
+(`/processing` in the containers), and only the finished result is written to
+`/data`. Point `VG_HOST_PROCESSING_DIR` in `.env` at a fast disk that isn't the
+data dataset (a tmpfs/RAM disk works too if it is big enough):
 
 ```bash
-VG_PROCESSING_DIR=/processing                      # blank (the default) = process inside /data
-VG_HOST_PROCESSING_DIR=/mnt/scratch/volume-gallery  # host folder mounted at /processing
+VG_HOST_PROCESSING_DIR=/mnt/scratch/volume-gallery   # host folder mounted at /processing
 ```
 
-then `docker compose up -d`. `VG_HOST_PROCESSING_DIR` is a plain bind mount,
-so it can be any host directory — ideally on a fast disk that isn't the data
-dataset (a tmpfs/RAM disk works too if it is big enough).
+**Every upload byte is written to disk once.** The browser sends each file as
+the raw body of `PUT /api/uploads/<volume|mesh|pointcloud>`. For those requests
+nginx
 
-What happens with it enabled:
+1. asks the app whether the caller may upload (`auth_request`) — before it
+   reads a single byte of the body, so nobody else can fill your disk;
+2. writes the body to `<processing>/.uploads` (meshes: `<data>/.uploads`, because
+   the mesh original is kept in the data folder) — this is the one and only write;
+3. calls the app *without* the body, telling it just the file's name.
 
-- Uploads (zip archives, individually uploaded TIFF slices, meshes, point
-  clouds) are staged in `<processing>/<volumes|meshes|pointclouds>/<slug>/`,
-  extraction and conversion run there, and the finished OME-Zarr store, mesh
-  files or Potree octree are then moved into `/data`. The volume's folder in
-  `/data` is created at upload time, so slugs are still reserved there.
-- The spooled temp files of large uploads and the temp files of the external
-  converters (`nxsbuild`, `PotreeConverter`) go to `<processing>/.tmp`, so none
-  of it ends up in the container's `/tmp`.
-- The scratch folder of a job is deleted when it finishes, whether it
-  succeeded or failed. The status log shows a "Moving … into the data
-  directory" step while the result is being copied across.
-- Leave room for roughly 2–3× the size of your largest upload.
+The app renames the file to an upload id, and the `POST` that creates the
+volume / mesh / point cloud (`tiff_upload_id`, `tiff_upload_ids`,
+`mesh_upload_id`, `pointcloud_upload_id` instead of the file fields) renames it
+again into the asset's scratch folder. Renames inside one filesystem are
+instant, whatever the file size. The old multipart form fields keep working
+(curl, scripts, a bare `uvicorn` without nginx), they just cost one more copy.
+
+What lives where afterwards:
+
+| asset        | upload                        | temp files / extraction    | result                |
+|--------------|-------------------------------|----------------------------|-----------------------|
+| volume       | scratch (`.uploads` → slug)   | scratch                    | written to `/data`    |
+| mesh         | `/data` (`.uploads` → slug)   | scratch (`.ply`, `.nxs`)   | compressed into `/data` |
+| point cloud  | scratch                       | —                          | octree exported to `/data` |
+
+- The scratch folder of a job is deleted when it finishes, whether it succeeded
+  or failed. Leave room for roughly 2–3× the size of your largest upload.
+- Uploads that were never turned into an asset (browser closed, slug already
+  taken, …) are deleted from the `.uploads` folders after
+  `VG_UPLOAD_STAGING_MAX_AGE_HOURS` (default 24). An upload that is aborted
+  half-way is removed by nginx immediately.
 - On startup, scratch folders left behind by a crash or restart are removed.
   Assets that were still processing at that point (a restart kills the
   background job) are marked `failed` with an explanatory log line — delete
   and re-upload them. Volumes still waiting for their TIFF slices keep theirs.
+- Spooled temp files of the app and of the external converters (`nxsbuild`,
+  `PotreeConverter`) go to `<processing>/.tmp`, nginx's own spool directories
+  to `<processing>/.nginx_*`, so none of it ends up in a container's writable layer.
 
-The same option works without Docker: `export VG_PROCESSING_DIR=/some/dir`.
+Two things must hold for the hand-over to work, and the compose files take care
+of both:
 
-### Running as a non-root user (optional)
+- nginx and the app mount **the same host directory** at `/processing` (and
+  nginx mounts `<data>/.uploads` at `/data/.uploads`). Otherwise a rename would
+  have to copy — the app does fall back to copying then, and says so in its log.
+- nginx and the app run as **the same uid:gid**. nginx creates the files with
+  mode `0600`, so only that user (or root) can read and rename them. If they
+  differ, uploads fail with "the app cannot see the file nginx wrote".
+
+### Running as a non-root user
 
 The app container runs as root by default. To run it as another user — on
-TrueNAS SCALE typically the `apps` user — set `VG_UID` and `VG_GID` in `.env`
-(see `.env.example`) and make the host folders behind `VG_HOST_DATA_DIR` (and
-`VG_HOST_PROCESSING_DIR`, if you use it) writable by that user, e.g.
-`chown -R 568:568 /mnt/tank/apps/volume-gallery/data`.
+TrueNAS SCALE the `apps` user, 568:568 — set `VG_UID` and `VG_GID` in `.env`
+(see `.env.example`). That one setting does everything:
+
+- the app container runs as that user;
+- the nginx container's worker processes run as that user too (its entrypoint
+  recreates the image's `nginx` account with these ids; the master process stays
+  root to bind the ports and read the TLS key);
+- the one-shot `volume-gallery-init` container (runs first, as root) creates the
+  directories and `chown`s anything under `VG_HOST_DATA_DIR` /
+  `VG_HOST_PROCESSING_DIR` that has another owner, so you don't have to prepare
+  the host folders by hand (it only touches files with a wrong owner, so it is
+  quick after the first run).
 
 ---
 
@@ -347,7 +348,7 @@ into `docker-compose.yml` for this — it terminates TLS, redirects plain HTTP
 to HTTPS, and forwards `X-Forwarded-Proto: https` so the backend's signed
 data URLs come back as `https://` (the backend's `uvicorn` already runs with
 `--proxy-headers` to trust that). It's also configured with no upload size
-cap and long request timeouts, since OME-Zarr/TIFF archives can be large and
+cap and long request timeouts, since TIFF archives can be large and
 TIFF conversion runs synchronously within the upload request. The host ports
 it listens on (`VG_HTTP_PORT`/`VG_HTTPS_PORT` in `.env`, default 8080/8443)
 and where it looks for the certificate (`VG_CERT_DIR`, default
@@ -405,13 +406,13 @@ Beyond WebGPU, HTTPS also matters here because JWTs and the signed file
 tokens are passed as plain bearer tokens / URL query params, and you don't
 want those on the wire unencrypted outside your LAN.
 
-**Fast chunk delivery (`VG_ZARR_ACCEL_REDIRECT`).** In `docker-compose.yml` and
+**Fast chunk delivery (`VG_SHARD_ACCEL_REDIRECT`).** In `docker-compose.yml` and
 `truenas_app.yml`, the host's volumes directory (`<data>/volumes`) is mounted
-read-only into the `nginx` container at `/data/volumes:ro` and `VG_ZARR_ACCEL_REDIRECT=true`
+read-only into the `nginx` container at `/data/volumes:ro` and `VG_SHARD_ACCEL_REDIRECT=true`
 is set on the backend. Python validates the signed token and returns an internal
 `X-Accel-Redirect` header so nginx serves chunk files directly using `sendfile`.
 When running `uvicorn` directly without nginx (local development), leave
-`VG_ZARR_ACCEL_REDIRECT` unset (`false`) so FastAPI serves chunks directly.
+`VG_SHARD_ACCEL_REDIRECT` unset (`false`) so FastAPI serves chunks directly.
 
 ### Backups
 

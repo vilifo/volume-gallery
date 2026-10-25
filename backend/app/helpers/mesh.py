@@ -12,6 +12,10 @@ TEMP_NEXUS_FILE = "temp.nxs"
 OUTPUT_FILE = "mesh.nxz"
 
 
+def mesh_path(mesh_dir: Path) -> Path:
+    return mesh_dir / OUTPUT_FILE
+
+
 def convert_mesh_to_nxz(work_dir: Path, mesh_dir: Path, log) -> Path:
     """Reads mesh_dir/_upload.* (data folder), keeps the intermediate .ply/.nxs
     in work_dir (scratch folder) and compresses the result directly to

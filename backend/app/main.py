@@ -13,7 +13,7 @@ from .security import hash_password
 from .config import settings
 from . import workdir
 from .utils import _now
-from .routers import auth, users, volumes, meshes, pointclouds, branding, shares
+from .routers import auth, users, volumes, meshes, pointclouds, branding, shares, uploads
 
 
 def _bootstrap_admin():
@@ -62,6 +62,7 @@ def _recover_interrupted_jobs():
                     keep.add((kind, asset.slug))
         session.commit()
     workdir.clear_stale(keep)
+    workdir.sweep_staging()  # staged uploads (see routers/uploads.py) that nobody claimed
 
 
 @asynccontextmanager
@@ -84,6 +85,7 @@ app.include_router(volumes.router)
 app.include_router(meshes.router)
 app.include_router(pointclouds.router)
 app.include_router(shares.router)
+app.include_router(uploads.router)
 
 # Serve the frontend (single-page-ish static site) at the root.
 @app.get("/js/sw.js", include_in_schema=False)

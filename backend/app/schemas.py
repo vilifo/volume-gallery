@@ -49,7 +49,6 @@ class AssetRead(BaseModel):
 
 class VolumeRead(AssetRead):
     has_mesh: bool
-    mesh_filename: Optional[str] = None
     # Processing state of the attached mesh (it goes through the regular mesh
     # pipeline); None when the volume has no mesh or only a legacy raw file.
     mesh_status: Optional[AssetStatus] = None

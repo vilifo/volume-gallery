@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Point Cloud Viewer — Volume Gallery</title>
 <script src="/js/theme-init.js?v=hist1"></script>
-<link rel="stylesheet" href="/css/style.css?v=brand2" />
+<link rel="stylesheet" href="/css/style.css?v=theme1" />
 <link rel="stylesheet" href="/vendor/potree/potree.css" />
 <link rel="stylesheet" href="/vendor/libs/jquery-ui/jquery-ui.min.css" />
 <link rel="stylesheet" href="/vendor/libs/openlayers3/ol.css" />
@@ -29,19 +29,84 @@
   .icon-btn svg { width: 14px; height: 14px; flex-shrink: 0; }
 
   .pc-render-area { flex: 1; min-height: 0; position: relative; background: #000; }
-  /* Potree's native sidebar (sidebar.html) is loaded by viewer.loadGUI() into
-     #potree_sidebar_container; viewer.toggleSidebar() shifts the render area's
-     "left" offset, so it must be absolutely positioned and sized by its edges. */
   .pc-render-area .potree_container { position: absolute; inset: 0; }
-  #potree_render_area {
-    position: absolute; top: 0; right: 0; bottom: 0; left: 0; width: auto; height: auto;
-  }
 
-  .viewer-status {
-    position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
-    color: var(--text-dim); font-family: var(--mono); font-size: 0.85em;
-    background: rgba(0, 0, 0, 0.6); padding: 1.5em; text-align: left; line-height: 1.5;
+  /* Potree's sidebar is loaded by viewer.loadGUI() into #potree_sidebar_container. Potree puts it on
+     the left; here it sits on the right of the render area. Potree opens and closes it by moving
+     the render area's edge (toggleSidebar(), replaced below to move the right edge instead). */
+  #potree_sidebar_container {
+    top: 0; right: 0; left: auto;
+    border-right: 0; border-left: 1px solid var(--line);
   }
+  #potree_render_area { transition: right 0.35s; }
+
+  .pc-render-area .viewer-status { padding: 1.5em; text-align: left; line-height: 1.5; }
+
+  /* Theme. Potree's stylesheet draws everything from these few variables, so pointing them at the
+     app's palette (which follows the OS / the theme switch) themes the whole sidebar. */
+  .pc-render-area .potree_container {
+    --bg-color: var(--panel);
+    --bg-color-2: var(--panel-raised);
+    --bg-light-color: var(--panel-raised);
+    --bg-dark-color: var(--bg);
+    --font-color: var(--text);
+    --font-color-2: var(--text);
+    --color-1: var(--line);
+    --color-2: var(--viewer-hover);
+  }
+  #potree_sidebar_container a { color: var(--accent); }
+  #potree_sidebar_container .divider > span::before,
+  #potree_sidebar_container .divider > span::after { background: var(--line); }
+
+  /* Menu headings (Appearance, Tools, ...): plain <h3>s that Potree opens with slideToggle() on the
+     panel after them. It draws them with a black text outline and a drop shadow that only work on its
+     own dark theme; here they get a flat look and an arrow that follows the panel's open state
+     (the panel's inline display is "none" while it is closed). */
+  #potree_sidebar_container .accordion > h3 {
+    position: relative; margin: 0; padding: 0.55em 0.8em 0.55em 2.2em;
+    background: var(--panel-raised) !important;
+    border: 0; border-top: 1px solid var(--line);
+    color: var(--text); font-weight: 600; text-shadow: none; box-shadow: none;
+  }
+  #potree_sidebar_container .accordion > h3:hover { filter: none; background: var(--viewer-hover) !important; }
+  #potree_sidebar_container .accordion > h3::before {
+    content: ""; position: absolute; left: 1em; top: 50%; width: 0.4em; height: 0.4em; margin-top: -0.3em;
+    border: solid currentColor; border-width: 0 2px 2px 0; transform: rotate(-45deg); transition: transform 0.2s;
+  }
+  #potree_sidebar_container .accordion > h3:has(+ :not([style*="display: none"])) { color: var(--accent); }
+  #potree_sidebar_container .accordion > h3:has(+ :not([style*="display: none"]))::before { transform: rotate(45deg); }
+
+  /* jQuery UI widgets inside the sidebar (Potree's own rules paint them light grey with !important) */
+  #potree_sidebar_container .ui-widget-content { background: var(--panel); color: var(--text); border-color: var(--line); }
+  #potree_sidebar_container .ui-state-default,
+  #potree_sidebar_container .ui-button {
+    background: var(--panel-raised) !important; color: var(--text); border: 1px solid var(--line);
+  }
+  #potree_sidebar_container .ui-state-hover,
+  #potree_sidebar_container .ui-state-focus,
+  #potree_sidebar_container .ui-button:hover,
+  #potree_sidebar_container .ui-button:focus {
+    background: var(--viewer-hover) !important; color: var(--text); border-color: var(--accent-dim);
+  }
+  #potree_sidebar_container .ui-state-active {
+    background: var(--viewer-hover) !important; color: var(--text) !important; border-color: var(--accent-dim);
+  }
+  #potree_sidebar_container .ui-slider .ui-slider-handle {
+    background: var(--accent) !important; border: 1px solid var(--accent-dim) !important;
+  }
+  #potree_sidebar_container input[type="range"] { accent-color: var(--accent); }
+  #potree_sidebar_container input:not([type]), #potree_sidebar_container input[type="text"],
+  #potree_sidebar_container input[type="number"], #potree_sidebar_container select,
+  #potree_sidebar_container textarea {
+    background: var(--panel-raised); color: var(--text); border: 1px solid var(--line);
+  }
+  #potree_sidebar_container .jstree-default .jstree-anchor { color: var(--text); }
+  #potree_sidebar_container .jstree-default .jstree-clicked,
+  #potree_sidebar_container .jstree-default .jstree-hovered { background: var(--viewer-hover) !important; }
+
+  /* Drop-down lists of the sidebar's selects open in a menu appended to <body>. */
+  .ui-selectmenu-menu .ui-menu { background: var(--panel); color: var(--text); border: 1px solid var(--line); }
+  .ui-selectmenu-menu .ui-state-active { background: var(--viewer-hover); color: var(--text); border-color: transparent; margin: 0; }
 </style>
 </head>
 <body class="viewer-page">
@@ -60,7 +125,8 @@
   <script src="/vendor/potree/potree.js"></script>
 
   <script type="module">
-    import { api, requireLogin, getRole, getUsername, renderShell, wireLogout } from "/js/api.js?v=brand2";
+    import { api, requireLogin, getRole, getUsername, renderShell, wireLogout } from "/js/api.js?v=help2";
+    import { toggleHelpPanel } from "/js/help.js?v=help2";
 
     requireLogin();
     const role = getRole();
@@ -68,6 +134,7 @@
     const pcId = params.get("id");
 
     const EXPAND_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M21 16v3a2 2 0 0 1-2 2h-3M3 16v3a2 2 0 0 0 2 2h3"/></svg>`;
+    const HELP_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.1 9a3 3 0 0 1 5.8 1c0 2-3 3-3 3M12 17h.01"/></svg>`;
     const LINK_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>`;
 
     document.getElementById("shell").innerHTML = `
@@ -105,6 +172,7 @@
             ${pc.description ? `<div class="viewer-desc">${escapeHtml(pc.description)}</div>` : ""}
           </div>
           <div class="viewer-topbar-actions">
+            <button id="help-btn" class="icon-btn" aria-pressed="false" title="Show help for this viewer next to the view">${HELP_ICON}<span class="icon-btn-label">Help</span></button>
             <button id="share-btn" class="icon-btn" title="Copy a link to this exact view">${LINK_ICON}<span class="icon-btn-label">Share</span></button>
             <button id="fullscreen-btn" class="icon-btn primary">${EXPAND_ICON}<span>Fullscreen</span></button>
           </div>
@@ -129,6 +197,13 @@
 
 
       // Share view URL button
+      // Help: a floating panel, not a dialog, so the view stays usable while it is open.
+      const helpBtn = document.getElementById("help-btn");
+      helpBtn.addEventListener("click", () => {
+        const open = toggleHelpPanel({ topic: "pointcloud", role: getRole(), onClose: () => helpBtn.setAttribute("aria-pressed", "false") });
+        helpBtn.setAttribute("aria-pressed", String(open));
+      });
+
       document.getElementById("share-btn").addEventListener("click", async () => {
         const btn = document.getElementById("share-btn");
         const origHtml = btn.innerHTML;
@@ -308,6 +383,12 @@
         Potree.resourcePath = window.location.origin + "/vendor/potree/resources";
 
         const viewer = new Potree.Viewer(document.getElementById("potree_render_area"));
+        // Potree's toggleSidebar() moves the render area's LEFT edge (its sidebar is on the left); ours
+        // is on the right. Must be in place before loadGUI(), which wires it to the menu button.
+        viewer.toggleSidebar = () => {
+          const area = $("#potree_render_area");
+          area.css("right", area.css("right") !== "0px" ? "0px" : "300px");
+        };
         viewer.setEDLEnabled(true);
         viewer.setFOV(60);
         viewer.setPointBudget(1_000_000);

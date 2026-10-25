@@ -64,48 +64,26 @@ function bytesPerSourceVoxel(dtype) {
 }
 
 /**
- * Reads shape / dtype of the finest level this store exposes (the backend
+ * Reads shape / dtype of the finest LOD this sharded volume exposes (the backend
  * already truncates the pyramid to the user's "max detail level"). The files
  * are the ones kiln-render fetches first anyway and are served with immutable
  * cache headers, so this costs no extra transfer.
  * Resolves to null when anything is unexpected.
  *
- * @param {string} baseUrl signed store URL (ends with "/")
+ * @param {string} baseUrl signed sharded-volume URL (ends with "/")
  * @returns {Promise<null | {dims: number[], channels: number, texBytes: number}>}
  */
 export async function probeDataset(baseUrl, signal) {
   try {
-    let isV3 = true;
-    let root = await fetchJson(`${baseUrl}zarr.json`, signal);
-    if (!root) {
-      isV3 = false;
-      root = await fetchJson(`${baseUrl}.zattrs`, signal);
-    }
-    if (!root) return null;
-
-    const attrs = isV3 ? (root.attributes ?? {}) : root;
-    const ms = (attrs.ome ?? attrs).multiscales?.[0];
-    const path = ms?.datasets?.[0]?.path;
-    if (path == null) return null;
-
-    const arr = await fetchJson(`${baseUrl}${path}/${isV3 ? "zarr.json" : ".zarray"}`, signal);
-    const shape = arr?.shape;
-    if (!Array.isArray(shape) || shape.length < 3) return null;
-    const dtype = isV3 ? arr.data_type : arr.dtype;
-
-    const names = (ms.axes ?? []).map((a) => String(typeof a === "string" ? a : a.name).toLowerCase());
-    const pick = (name, fallbackIdx) => {
-      const i = names.indexOf(name);
-      return shape[i >= 0 ? i : fallbackIdx];
-    };
-    const dims = [pick("z", shape.length - 3), pick("y", shape.length - 2), pick("x", shape.length - 1)];
-    const ci = names.indexOf("c");
-    const channels = Math.min(4, ci >= 0 ? shape[ci] : 1); // the engine renders at most 4
-
-    // 8-bit data is uploaded as r8unorm, everything wider as a 16-bit texture.
-    const texBytes = bytesPerSourceVoxel(dtype) <= 1 ? 1 : 2;
-    if (dims.some((d) => !(d > 0))) return null;
-    return { dims, channels, texBytes };
+    const root = await fetchJson(baseUrl.endsWith("/") ? `${baseUrl}volume.json` : `${baseUrl}/volume.json`, signal);
+    const level = root?.levels?.[0];
+    const dims = level?.dimensions; // [width, height, depth]
+    if (!Array.isArray(dims) || dims.length !== 3) return null;
+    const dtype = String(root?.format ?? "uint8").toLowerCase();
+    const channels = 1; // kiln sharded binary is single-channel scalar data
+    const texBytes = dtype === "uint8" ? 1 : 2;
+    if (dims.some((d) => !(Number(d) > 0))) return null;
+    return { dims: [Number(dims[2]), Number(dims[1]), Number(dims[0])], channels, texBytes };
   } catch (err) {
     if (err?.name !== "AbortError") console.warn("[atlas] dataset probe failed:", err);
     return null;
@@ -131,7 +109,7 @@ function budgetForGrid(grid, channels, texBytes) {
 /**
  * The `atlasBudgetBytes` to hand to KilnViewer.create().
  *
- * @param {string} baseUrl signed store URL
+ * @param {string} baseUrl signed sharded-volume URL
  * @param {{vramMB: number, signal?: AbortSignal}} opts the user's VRAM choice
  * @returns {Promise<{budgetBytes: number, source: "selected limit"|"dataset fits"}>}
  */

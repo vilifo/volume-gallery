@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
     <title>Upload asset — Volume Gallery</title>
     <script src="/js/theme-init.js?v=hist1"></script>
-    <link rel="stylesheet" href="/css/style.css?v=brand2"/>
+    <link rel="stylesheet" href="/css/style.css?v=help2"/>
     <style>
         .source-toggle {
             display: flex;
@@ -119,7 +119,8 @@
 <div class="app-shell" id="shell"></div>
 
 <script type="module">
-    import {api, requireLogin, getRole, getUsername, renderShell, wireLogout} from "/js/api.js?v=brand2";
+    import {api, requireLogin, getRole, getUsername, renderShell, wireLogout} from "/js/api.js?v=help2";
+    import { pageHint } from "/js/help.js?v=help2";
 
     requireLogin();
     const role = getRole();
@@ -134,20 +135,30 @@
     // this one. Keep this in sync with SLUG_RE in backend/app/routers/assets.py.
     const SLUG_RE = /^[a-z0-9][a-z0-9_-]{1,62}$/;
 
+    function escapeHtml(str) {
+        return str.replace(/[&<>"']/g, m => ({
+            "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+        }[m]));
+    }
+
+    function formatBytes(bytes) {
+        if (bytes < 1024) return `${bytes} B`;
+        if (bytes < 1048576) return `${(bytes / 1024).toFixed(1)} KB`;
+        return `${(bytes / 1048576).toFixed(1)} MB`;
+    }
+
     document.getElementById("shell").innerHTML = `
       ${renderShell("upload", role, getUsername())}
       <main>
         <h1>Upload asset</h1>
         <p class="subtitle">
-          Provide either an OME-Zarr archive or a TIFF stack — a TIFF stack is
-          converted to OME-Zarr on the server, then the original TIFF files
-          are deleted. A mesh file is optional.
+          Provide TIFF stack either in zip or as individual files. A mesh file is optional.
         </p>
+        ${pageHint("upload", role)}
         <div id="error" style="display:none" class="error-box"></div>
 
         <div class="source-toggle">
-          <button type="button" id="src-zarr" class="active">OME-Zarr (.zip)</button>
-          <button type="button" id="src-tiff">TIFF stack (.zip of .tif files)</button>
+          <button type="button" id="src-tiff" class="active">TIFF stack (.zip or .tif files)</button>
           <button type="button" id="src-mesh">Mesh file (.stl, .obj, .ply, \u2026)</button>
           <button type="button" id="src-pointcloud">Point cloud file (.laz, .las, .ply, \u2026)</button>
         </div>
@@ -171,21 +182,52 @@
             <div class="field-hint">Optional. PNG, JPEG or WebP image shown in the gallery. It can be changed later under Manage.</div>
           </div>
 
-          <div class="field" id="zarr-field">
-            <label for="zarr_zip">OME-Zarr archive (.zip)</label>
-            <input id="zarr_zip" type="file" accept=".zip" />
-            <div class="field-hint">A .zip containing the .ome.zarr (or .zarr) directory.</div>
-          </div>
+          <div id="tiff-section">
+            <div class="field">
+              <label>TIFF upload mode</label>
+              <div class="source-toggle" style="margin-bottom:0.5rem">
+                <button type="button" id="tiff-mode-zip" class="active">Single .zip of TIFFs</button>
+                <button type="button" id="tiff-mode-stack">TIFF stack (individual .tif files)</button>
+              </div>
+            </div>
 
-          <div class="field" id="tiff-field" style="display:none">
-            <label for="tiff_zip">TIFF stack (.zip of .tif files)</label>
-            <input id="tiff_zip" type="file" accept=".zip" />
-            <div class="field-hint">
-              A flat .zip of single-slice .tif/.tiff files (one per Z position). Filenames
-              are sorted to determine slice order, so name them so alphabetical order
-              matches acquisition order (e.g. slice_0001.tif, slice_0002.tif, \u2026).
-              Large stacks are loaded into memory in full during conversion, so keep an
-              eye on available RAM for very large scans.
+            <div class="field" id="tiff-zip-field">
+              <label for="tiff_zip">TIFF archive (.zip)</label>
+              <input id="tiff_zip" type="file" accept=".zip" />
+              <div class="field-hint">
+                A flat .zip of single-slice .tif/.tiff files (one per Z position). Filenames
+                are sorted to determine slice order, so name them so alphabetical order
+                matches acquisition order (e.g. slice_0001.tif, slice_0002.tif, \u2026).
+              </div>
+            </div>
+
+            <div class="field" id="tiff-stack-field" style="display:none">
+              <label for="tiff_files">TIFF stack files (.tif, .tiff)</label>
+              <input id="tiff_files" type="file" accept=".tif,.tiff,image/tiff" multiple />
+              <div class="field-hint">
+                Select multiple individual .tif/.tiff files (one per Z position). Filenames
+                are sorted alphabetically to determine slice order.
+              </div>
+              <div id="tiff-file-list" style="display:none; margin-top:0.75rem; max-height:220px; overflow-y:auto; border:1px solid rgba(128,128,128,0.3); border-radius:6px; padding:0.5rem 0.75rem; font-size:0.875rem;"></div>
+            </div>
+
+            <div class="field" id="tiff-spacing-field">
+              <label>Voxel spacing (\u00b5m)</label>
+              <div style="display:grid; grid-template-columns:repeat(3, 1fr); gap:0.75rem;">
+                <div>
+                  <label for="spacing_x" style="font-size:0.8rem; opacity:0.8;">X (\u00b5m)</label>
+                  <input id="spacing_x" type="number" step="any" min="0.0001" value="1.0" required placeholder="1.0" />
+                </div>
+                <div>
+                  <label for="spacing_y" style="font-size:0.8rem; opacity:0.8;">Y (\u00b5m)</label>
+                  <input id="spacing_y" type="number" step="any" min="0.0001" value="1.0" required placeholder="1.0" />
+                </div>
+                <div>
+                  <label for="spacing_z" style="font-size:0.8rem; opacity:0.8;">Z (\u00b5m)</label>
+                  <input id="spacing_z" type="number" step="any" min="0.0001" value="1.0" required placeholder="1.0" />
+                </div>
+              </div>
+              <div class="field-hint">Physical voxel dimensions in micrometers (\u00b5m) along X, Y, and Z (slice thickness).</div>
             </div>
           </div>
 
@@ -212,38 +254,114 @@
             <div class="bar-fill" id="progress-fill"></div>
           </div>
           <div class="bar-percent" id="progress-percent">0%</div>
+          <div id="file-progress-list" style="display:none; margin-top:1rem; max-height:260px; overflow-y:auto; border:1px solid rgba(128,128,128,0.25); border-radius:6px; padding:0.5rem 0.75rem; font-size:0.85rem;"></div>
         </div>
       </main>
     `;
     wireLogout();
 
-    let source = "zarr";
-    const srcZarrBtn = document.getElementById("src-zarr");
+    let source = "tiff";
+    let tiffMode = "zip"; // "zip" | "stack"
+
     const srcTiffBtn = document.getElementById("src-tiff");
     const srcMeshBtn = document.getElementById("src-mesh");
     const srcPointCloudBtn = document.getElementById("src-pointcloud");
-    const zarrField = document.getElementById("zarr-field");
-    const tiffField = document.getElementById("tiff-field");
+    const tiffSection = document.getElementById("tiff-section");
     const meshField = document.getElementById("mesh-field");
     const pointCloudField = document.getElementById("pointcloud-field");
 
+    const tiffModeZipBtn = document.getElementById("tiff-mode-zip");
+    const tiffModeStackBtn = document.getElementById("tiff-mode-stack");
+    const tiffZipField = document.getElementById("tiff-zip-field");
+    const tiffStackField = document.getElementById("tiff-stack-field");
+    const tiffFilesInput = document.getElementById("tiff_files");
+    const tiffFileList = document.getElementById("tiff-file-list");
+
+    const spacingInputs = [
+        document.getElementById("spacing_x"),
+        document.getElementById("spacing_y"),
+        document.getElementById("spacing_z"),
+    ];
+
     function setSource(next) {
         source = next;
-        srcZarrBtn.classList.toggle("active", source === "zarr");
         srcTiffBtn.classList.toggle("active", source === "tiff");
         srcMeshBtn.classList.toggle("active", source === "mesh");
         srcPointCloudBtn.classList.toggle("active", source === "pointcloud");
 
-        zarrField.style.display = source === "zarr" ? "" : "none";
-        tiffField.style.display = source === "tiff" ? "" : "none";
-        meshField.style.display = source === "mesh" || source === "zarr" || source === "tiff" ? "" : "none";
+        tiffSection.style.display = source === "tiff" ? "" : "none";
+        meshField.style.display = source === "mesh" || source === "tiff" ? "" : "none";
         pointCloudField.style.display = source === "pointcloud" ? "" : "none";
+
+        spacingInputs.forEach(input => {
+            input.required = source === "tiff";
+        });
     }
 
-    srcZarrBtn.addEventListener("click", () => setSource("zarr"));
+    function setTiffMode(next) {
+        tiffMode = next;
+        tiffModeZipBtn.classList.toggle("active", tiffMode === "zip");
+        tiffModeStackBtn.classList.toggle("active", tiffMode === "stack");
+
+        tiffZipField.style.display = tiffMode === "zip" ? "" : "none";
+        tiffStackField.style.display = tiffMode === "stack" ? "" : "none";
+    }
+
     srcTiffBtn.addEventListener("click", () => setSource("tiff"));
     srcMeshBtn.addEventListener("click", () => setSource("mesh"));
     srcPointCloudBtn.addEventListener("click", () => setSource("pointcloud"));
+
+    tiffModeZipBtn.addEventListener("click", () => setTiffMode("zip"));
+    tiffModeStackBtn.addEventListener("click", () => setTiffMode("stack"));
+
+    function getSortedStackFiles() {
+        return Array.from(tiffFilesInput.files).sort((a, b) => a.name.localeCompare(b.name));
+    }
+
+    tiffFilesInput.addEventListener("change", () => {
+        const files = getSortedStackFiles();
+        if (files.length === 0) {
+            tiffFileList.style.display = "none";
+            tiffFileList.innerHTML = "";
+            return;
+        }
+        const totalBytes = files.reduce((acc, f) => acc + f.size, 0);
+        tiffFileList.style.display = "block";
+        tiffFileList.textContent = "";
+
+        const summary = document.createElement("div");
+        summary.style.fontWeight = "600";
+        summary.style.marginBottom = "0.4rem";
+        summary.textContent = `Selected ${files.length} slice${files.length === 1 ? "" : "s"} (${formatBytes(totalBytes)} total, sorted by filename):`;
+
+        const list = document.createElement("ol");
+        list.style.margin = "0";
+        list.style.paddingLeft = "1.5rem";
+
+        files.forEach(f => {
+            const item = document.createElement("li");
+            item.style.padding = "0.15rem 0";
+            item.style.display = "flex";
+            item.style.justifyContent = "space-between";
+            item.style.gap = "1rem";
+
+            const nameSpan = document.createElement("span");
+            nameSpan.style.wordBreak = "break-all";
+            nameSpan.textContent = f.name;
+
+            const sizeSpan = document.createElement("span");
+            sizeSpan.style.opacity = "0.65";
+            sizeSpan.style.whiteSpace = "nowrap";
+            sizeSpan.textContent = formatBytes(f.size);
+
+            item.appendChild(nameSpan);
+            item.appendChild(sizeSpan);
+            list.appendChild(item);
+        });
+
+        tiffFileList.appendChild(summary);
+        tiffFileList.appendChild(list);
+    });
 
     const form = document.getElementById("form");
     const errorBox = document.getElementById("error");
@@ -254,6 +372,58 @@
     const progressLabel = document.getElementById("progress-label");
     const progressSpinner = document.getElementById("progress-spinner");
     const progressCheck = document.getElementById("progress-check");
+    const fileProgressList = document.getElementById("file-progress-list");
+
+    let activeUploadFiles = [];
+
+    function initFileProgressList(files) {
+        activeUploadFiles = files;
+        if (!files || files.length === 0) {
+            fileProgressList.style.display = "none";
+            fileProgressList.innerHTML = "";
+            return;
+        }
+        fileProgressList.style.display = "block";
+        fileProgressList.innerHTML = files.map((f, i) => `
+            <div id="fprog-row-${i}" style="padding:0.35rem 0; border-bottom:1px solid rgba(128,128,128,0.15);">
+                <div style="display:flex; justify-content:space-between; gap:0.5rem; margin-bottom:0.2rem;">
+                    <span style="word-break:break-all;">${escapeHtml(f.name)}</span>
+                    <span id="fprog-pct-${i}" style="opacity:0.75; white-space:nowrap;">0%</span>
+                </div>
+                <div class="bar-track" style="height:4px;">
+                    <div class="bar-fill" id="fprog-bar-${i}" style="width:0%;"></div>
+                </div>
+            </div>
+        `).join("");
+    }
+
+    function updateFileProgressList(fraction) {
+        if (!activeUploadFiles || activeUploadFiles.length === 0) return;
+        const totalSize = activeUploadFiles.reduce((acc, f) => acc + (f.size || 1), 0) || 1;
+        const uploadedBytes = fraction * totalSize;
+        let cumulative = 0;
+        let currentIdx = 0;
+
+        activeUploadFiles.forEach((f, i) => {
+            const fSize = f.size || 1;
+            const fileUploaded = Math.max(0, Math.min(fSize, uploadedBytes - cumulative));
+            const filePct = Math.round((fileUploaded / fSize) * 100);
+            cumulative += fSize;
+
+            if (filePct > 0 && filePct < 100) currentIdx = i;
+            else if (filePct === 100) currentIdx = i + 1;
+
+            const bar = document.getElementById(`fprog-bar-${i}`);
+            const pctEl = document.getElementById(`fprog-pct-${i}`);
+            if (bar) bar.style.width = `${filePct}%`;
+            if (pctEl) pctEl.textContent = filePct === 100 ? "\u2713 100%" : `${filePct}%`;
+        });
+
+        const clampedIdx = Math.min(currentIdx + 1, activeUploadFiles.length);
+        if (fraction < 1 && activeUploadFiles.length > 1) {
+            progressLabel.textContent = `Uploading file ${clampedIdx} of ${activeUploadFiles.length}\u2026`;
+        }
+    }
 
     function setIndeterminate(label) {
         progressTrack.classList.add("indeterminate");
@@ -267,6 +437,7 @@
         progressFill.style.width = `${pct}%`;
         progressPercent.textContent = `${pct}%`;
         progressLabel.textContent = pct < 100 ? "Uploading\u2026" : "Finishing up\u2026";
+        updateFileProgressList(fraction);
         if (pct >= 100) setIndeterminate("Finishing up\u2026");
     }
 
@@ -284,15 +455,29 @@
         }
 
         let sourceFile;
+        let tiffFiles = [];
         let errorMessage;
+        let spacingX, spacingY, spacingZ;
+
         switch (source) {
-            case "zarr":
-                sourceFile = document.getElementById("zarr_zip").files[0];
-                errorMessage = "Choose an OME-Zarr .zip file.";
-                break;
             case "tiff":
-                sourceFile = document.getElementById("tiff_zip").files[0];
-                errorMessage = "Choose a TIFF stack .zip file.";
+                spacingX = parseFloat(document.getElementById("spacing_x").value);
+                spacingY = parseFloat(document.getElementById("spacing_y").value);
+                spacingZ = parseFloat(document.getElementById("spacing_z").value);
+                if (!(spacingX > 0 && spacingY > 0 && spacingZ > 0)) {
+                    errorBox.textContent = "Provide positive voxel spacing values in \u00b5m for X, Y, and Z.";
+                    errorBox.style.display = "block";
+                    return;
+                }
+                if (tiffMode === "zip") {
+                    sourceFile = document.getElementById("tiff_zip").files[0];
+                    errorMessage = "Choose a TIFF stack .zip file.";
+                    if (sourceFile) tiffFiles = [sourceFile];
+                } else {
+                    tiffFiles = getSortedStackFiles();
+                    sourceFile = tiffFiles[0];
+                    errorMessage = "Choose one or more .tif/.tiff files for the TIFF stack.";
+                }
                 break;
             case "mesh":
                 sourceFile = document.getElementById("mesh_file").files[0];
@@ -314,50 +499,65 @@
         fd.append("slug", slug);
         fd.append("title", document.getElementById("title").value.trim());
         fd.append("description", document.getElementById("description").value.trim());
+
+        const filesToTrack = [];
         switch (source) {
-            case "zarr":
-                fd.append("zarr_zip", sourceFile);
-                break;
             case "tiff":
-                fd.append("tiff_zip", sourceFile);
+                for (const spacing of [String(spacingX), String(spacingY), String(spacingZ)]){
+                    fd.append("spacing", spacing);
+                }
+                if (tiffMode === "zip") {
+                    fd.append("tiff_zip", sourceFile);
+                } else {
+                    for (const file of tiffFiles) {
+                        fd.append("tiff_files", file);
+                    }
+                }
+                filesToTrack.push(...tiffFiles);
                 break;
             case "mesh":
                 fd.append("mesh_file", sourceFile);
+                filesToTrack.push(sourceFile);
                 break;
             case "pointcloud":
                 fd.append("pointcloud_file", sourceFile);
+                filesToTrack.push(sourceFile);
                 break;
         }
         const meshFile = document.getElementById("mesh_file").files[0];
-        if (meshFile) fd.append("mesh_file", meshFile);
+        if (meshFile && source !== "mesh") {
+            fd.append("mesh_file", meshFile);
+            filesToTrack.push(meshFile);
+        }
         const thumbnailFile = document.getElementById("thumbnail_file").files[0];
-        if (thumbnailFile) fd.append("thumbnail_file", thumbnailFile);
+        if (thumbnailFile) {
+            fd.append("thumbnail_file", thumbnailFile);
+            filesToTrack.push(thumbnailFile);
+        }
 
         form.style.display = "none";
         progressBox.style.display = "block";
         progressSpinner.style.display = "block";
         progressCheck.style.display = "none";
+        initFileProgressList(filesToTrack);
         setProgress(0);
 
         try {
             let asset;
-            if (source === "zarr" || source === "tiff") {
+            if (source === "tiff") {
                 asset = await api.createVolumeWithProgress(fd, setProgress);
             } else if (source === "mesh") {
                 asset = await api.createMeshWithProgress(fd, setProgress);
             } else if (source === "pointcloud") {
                 asset = await api.createPointCloudWithProgress(fd, setProgress);
             }
+            updateFileProgressList(1);
             progressSpinner.style.display = "none";
             progressCheck.style.display = "block";
             progressTrack.classList.remove("indeterminate");
             progressFill.style.width = "100%";
             progressPercent.textContent = "";
             progressLabel.textContent = "Uploaded \u2014 processing in the background";
-            // The heavy lifting (extraction / TIFF conversion) now happens
-            // server-side after this response, tracked by asset.status;
-            // gallery polls that and shows it live, so hand off there rather
-            // than making the user sit on this page waiting for it.
             console.log(asset);
             console.log(asset.id);
             setTimeout(() => {

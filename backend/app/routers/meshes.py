@@ -13,7 +13,7 @@ from ..deps import get_current_user, require_editor
 from ..security import create_file_token, decode_token
 from ..config import settings
 from .. import workdir
-from ..helpers import convert_mesh_to_nxz, read_thumbnail, write_thumbnail, store_thumbnail, remove_thumbnail, thumbnail_response
+from ..helpers import convert_mesh_to_nxz, read_thumbnail, write_thumbnail, store_thumbnail, remove_thumbnail, thumbnail_response, mesh_path
 from ..utils import SLUG_RE, _now  # shared slug validation + timestamp helper
 
 router = APIRouter(prefix="/api/meshes", tags=["meshes"])
@@ -98,22 +98,23 @@ def delete_volume_mesh(session: Session, volume) -> None:
         workdir.discard_job("meshes", m.slug)
         session.delete(m)
     volume.has_mesh = False
-    volume.mesh_filename = None
     session.add(volume)
 
 
-def attach_mesh_to_volume(session: Session, volume, mesh_file: UploadFile, editor: User,
-                          background_tasks: BackgroundTasks) -> Mesh:
-    """Stores `mesh_file` as the volume's mesh (replacing any previous one) and
-    queues the usual mesh conversion."""
-    source_ext = Path(mesh_file.filename or "").suffix.lstrip(".").lower() or "bin"
+def attach_mesh_to_volume(session: Session, volume, mesh_file: Optional[UploadFile], editor: User,
+                          background_tasks: BackgroundTasks,
+                          mesh_staged: Optional[workdir.StagedUpload] = None) -> Mesh:
+    """Stores the uploaded mesh (`mesh_file`, or `mesh_staged`: a file nginx already wrote to
+    disk) as the volume's mesh (replacing any previous one) and queues the usual mesh conversion."""
+    source_ext = Path((mesh_staged.filename if mesh_staged else mesh_file.filename) or "").suffix.lstrip(".").lower() or "bin"
     delete_volume_mesh(session, volume)
     slug = _child_mesh_slug(session, volume.slug)
     mesh_dir = _mesh_dir(slug)
     mesh_dir.mkdir(parents=True, exist_ok=False)
     try:
         workdir.prepare_work_dir("meshes", slug, mesh_dir)  # scratch for the conversion's temp files
-        upload_fd = workdir.detach_upload(mesh_file)  # copied into the data folder by the background task
+        # multipart: copied into the data folder by the background task; staged: renamed there now
+        upload_fd = workdir.accept_upload(mesh_file, mesh_staged, mesh_dir / f"_upload.{source_ext}")
     except Exception as exc:  # noqa: BLE001
         shutil.rmtree(mesh_dir, ignore_errors=True)
         workdir.discard_job("meshes", slug)
@@ -126,7 +127,6 @@ def attach_mesh_to_volume(session: Session, volume, mesh_file: UploadFile, edito
     )
     session.add(mesh)
     volume.has_mesh = True
-    volume.mesh_filename = Path(mesh_file.filename or "").name or f"mesh.{source_ext}"
     session.add(volume)
     session.commit()
     session.refresh(mesh)
@@ -136,7 +136,7 @@ def attach_mesh_to_volume(session: Session, volume, mesh_file: UploadFile, edito
 
 def volume_mesh_file(mesh: Mesh) -> Path:
     """The processed (.nxz) file of an attached mesh, as shown in the viewer."""
-    return _mesh_dir(mesh.slug) / (mesh.mesh_filename or "mesh.nxz")
+    return _mesh_dir(mesh.slug) / "mesh.nxz"
 
 
 def volume_mesh_source(mesh: Mesh) -> Path:
@@ -178,25 +178,30 @@ def create_mesh(
     slug: str = Form(...),
     title: str = Form(...),
     description: str = Form(""),
-    mesh_file: UploadFile = File(..., description="Any common mesh format: obj, stl, ply, off, dae, glb, gltf, 3mf, ..."),
+    mesh_file: Optional[UploadFile] = File(None, description="Any common mesh format: obj, stl, ply, off, dae, glb, gltf, 3mf, ..."),
     thumbnail_file: Optional[UploadFile] = File(None, description="Optional PNG/JPEG/WebP thumbnail"),
+    mesh_upload_id: Optional[str] = Form(None, description="Instead of mesh_file: an id from PUT /api/uploads/mesh"),
     session: Session = Depends(get_session),
     editor: User = Depends(require_editor),
 ):
     if not SLUG_RE.match(slug):
         raise HTTPException(status_code=400, detail="Slug must be lowercase alphanumeric/-/_ (2-63 chars)")
+    if (mesh_file is None) == (not mesh_upload_id):
+        raise HTTPException(status_code=400, detail="Provide exactly one of mesh_file or mesh_upload_id")
     if session.exec(select(Mesh).where(Mesh.slug == slug)).first():
         raise HTTPException(status_code=409, detail="A mesh with this slug already exists")
     thumbnail = read_thumbnail(thumbnail_file) if thumbnail_file is not None else None  # validate before creating anything
+    staged = workdir.claim_upload(mesh_upload_id, "mesh", editor.id) if mesh_upload_id else None
 
     mesh_dir = _mesh_dir(slug)
     mesh_dir.mkdir(parents=True, exist_ok=False)
 
-    source_ext = Path(mesh_file.filename or "").suffix.lstrip(".").lower() or "bin"
+    source_ext = Path((staged.filename if staged else mesh_file.filename) or "").suffix.lstrip(".").lower() or "bin"
     try:
         workdir.prepare_work_dir("meshes", slug, mesh_dir)  # scratch for the conversion's temp files
         thumbnail_name = write_thumbnail(mesh_dir, *thumbnail) if thumbnail else None
-        upload_fd = workdir.detach_upload(mesh_file)  # copied into the data folder by the background task
+        # multipart: copied into the data folder by the background task; staged: renamed there now
+        upload_fd = workdir.accept_upload(mesh_file, staged, mesh_dir / f"_upload.{source_ext}")
     except Exception as exc:  # noqa: BLE001
         shutil.rmtree(mesh_dir, ignore_errors=True)
         workdir.discard_job("meshes", slug)
@@ -237,8 +242,7 @@ def _process_mesh_upload(mesh_id: int, mesh_dir_str: str, upload_fd: int) -> Non
         try:
             log("Saving upload")
             workdir.save_detached(upload_fd, mesh_dir / f"_upload.{mesh.file_extension}")
-            nxz_path = convert_mesh_to_nxz(work_dir, mesh_dir, log)
-            mesh.mesh_filename = nxz_path.name
+            convert_mesh_to_nxz(work_dir, mesh_dir, log)
             mesh.status = AssetStatus.ready
             log("Ready")
         except Exception as exc:  # noqa: BLE001 - the failure message IS the point, shown to the user
@@ -419,9 +423,9 @@ def _check_mesh_token(token: str, mesh_id: int) -> str:
 def serve_mesh_file(mesh_id: int, token: str, session: Session = Depends(get_session)):
     kind = _check_mesh_token(token, mesh_id)
     mesh = session.get(Mesh, mesh_id)
-    if not mesh or not mesh.mesh_filename or mesh.volume_id is not None:
+    if not mesh or mesh.volume_id is not None:
         raise HTTPException(status_code=404, detail=f"Mesh with id {mesh_id} not found or not ready")
-    nxz_path = _mesh_dir(mesh.slug) / mesh.mesh_filename
+    nxz_path = mesh_path(_mesh_dir(mesh.slug))
     if not nxz_path.exists():
         raise HTTPException(status_code=404, detail=f"Mesh not ready: {nxz_path} does not exist")
     cache_headers = {"Cache-Control": f"public, max-age={settings.FILE_TOKEN_EXPIRE_MINUTES * 60}, immutable"}

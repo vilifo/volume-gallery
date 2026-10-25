@@ -8,7 +8,6 @@ VG_POTREE_CONVERTER_BIN points at) and raises a clear, actionable error
 failure) if it isn't found.
 """
 import shutil
-import os
 from pathlib import Path
 import subprocess
 
@@ -19,19 +18,17 @@ def convert_pointcloud(source_path: Path, output_dir: Path, log=None) -> None:
     """source_path: the uploaded point cloud file (las/laz/ply/xyz/ptx —
     whatever the PotreeConverter build on your system supports).
     output_dir: where PotreeConverter writes its octree + metadata.json — the
-    point cloud's folder in the data directory, so nothing is copied afterwards.
+    point cloud's folder in the data directory, so nothing is copied afterward.
     The source file (in the scratch folder) is deleted when done; a partial
     octree is removed if the conversion fails."""
-    def _log(msg: str) -> None:
-        if log:
-            log(msg)
+    log = log if log else print
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    _log("Building Potree octree from point cloud...")
+    log("Building Potree octree from point cloud...")
     cmd = settings.POTREE_CONVERTER_BIN, str(source_path.resolve()), "-o", str(output_dir.resolve())
     try:
         subprocess.run(cmd, check=True)
-        _log(f"Successfully generated potree folder: {output_dir}")
+        log(f"Successfully generated potree folder: {output_dir}")
     except subprocess.CalledProcessError as e:
         shutil.rmtree(output_dir, ignore_errors=True)
         raise ValueError(f"Error during Potree conversion: {e}")
