@@ -7,7 +7,7 @@ bcrypt==5.0.0
 python-multipart==0.0.32
 
 # --- TIFF-stack -> kiln sharded binary conversion ---
-tifffile==2026.9.20
+tifffile==2026.10.15
 numpy==2.5.4
 dask==2026.8.0
 # --- Slice views: zstd-compressed planes (backend/app/helpers/slices.py) ---
