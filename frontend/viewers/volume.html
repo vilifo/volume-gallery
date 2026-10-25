@@ -84,6 +84,15 @@
   .slice-pane-3d { background: #000; }
   .slice-pane-3d[data-visible="0"] { display: block; visibility: hidden; position: absolute; inset: 0; }
   .slice-pane-3d > canvas { width: 100%; height: 100%; display: block; }
+
+  /* Scale bar of the 3D view (startScaleBar). Drawn over arbitrary volume data, so it carries its own outline. */
+  .scale-bar {
+    position: absolute; left: 14px; bottom: 12px; display: flex; flex-direction: column; align-items: flex-start; gap: 4px;
+    pointer-events: none; color: #f2f4f8; font: 11px/1 var(--mono);
+    text-shadow: 0 0 3px #000, 0 1px 2px #000;
+  }
+  .scale-bar[hidden] { display: none; }
+  .scale-bar-line { height: 6px; box-sizing: border-box; border: 2px solid currentColor; border-top: 0; filter: drop-shadow(0 0 1px #000) drop-shadow(0 0 1px #000); }
   .slice-pane-2d:focus-visible { box-shadow: inset 0 0 0 1px rgba(120, 160, 255, 0.6); }
   .slice-canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; cursor: crosshair; }
   .slice-svg { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
@@ -440,7 +449,8 @@
       planAtlas,
       saveAtlasMB,
     } from "/js/atlas-budget.js?v=atlas3";
-    import { setupSliceIntegration } from "/js/slice/slice-integration.js?v=slice1";
+    import { setupSliceIntegration } from "/js/slice/slice-integration.js?v=slice2";
+    import { niceScaleLength } from "/js/scalebar.js?v=sb1";
 
     requireLogin();
     const role = getRole();
@@ -614,7 +624,7 @@
     // UI state that must survive a reload of the viewer (the side panel is
     // rebuilt for each KilnViewer, so its open/closed state lives here).
     // ------------------------------------------------------------------
-    const uiState = { panelOpen: true, infoOpen: false, sceneOpen: true, advancedOpen: false, panelScroll: 0 };
+    const uiState = { panelOpen: true, infoOpen: false, sceneOpen: true, advancedOpen: false, panelScroll: 0, scaleBar: true };
 
     function setPanelOpen(open) {
       uiState.panelOpen = open;
@@ -693,7 +703,7 @@
         <div class="viewer-canvas-wrap" id="canvas-wrap">
           <div class="viewer-canvas-area" id="canvas-area">
             <div class="slice-grid" id="slice-grid" data-layout="3d">
-              <div class="slice-pane slice-pane-3d" id="pane-3d" data-visible="1"><canvas id="canvas"></canvas></div>
+              <div class="slice-pane slice-pane-3d" id="pane-3d" data-visible="1"><canvas id="canvas"></canvas><div class="scale-bar" id="scale-bar" hidden><span class="scale-bar-label"></span><div class="scale-bar-line"></div></div></div>
               <div data-axis="xy"></div><div data-axis="xz"></div><div data-axis="yz"></div>
             </div>
             <div class="viewer-progress" id="load-progress"><div class="viewer-progress-bar" id="load-progress-bar"></div></div>
@@ -751,6 +761,7 @@
       // loadToken discards the result of a load superseded by a newer one.
       let loadToken = 0;
       let stopStats = null;
+      let stopScaleBar = null;
       let urlSync = null;
 
       // Slice views (xy / xz / yz panes + quad layout). Nothing is
@@ -794,6 +805,10 @@
         if (stopStats) {
           stopStats();
           stopStats = null;
+        }
+        if (stopScaleBar) {
+          stopScaleBar();
+          stopScaleBar = null;
         }
         if (currentViewer) {
           const old = currentViewer;
@@ -850,6 +865,7 @@
             },
           });
           stopStats = startStatsLoop(viewer, atlas);
+          stopScaleBar = startScaleBar(viewer, $("pane-3d"), $("scale-bar"));
           urlSync = startUrlSync(viewer, () => activeMinLevel);
           slices.attachViewer(viewer);
           slices.mountControls(canvasWrap.querySelector(".ctl-panel-body"));
@@ -1163,6 +1179,11 @@
               <label class="ctl-toggle-row">
                 <span class="ctl-row-label ctl-toggle-label">Axes</span>
                 <input type="checkbox" class="ctl-toggle-input" data-role="axes" ${renderer.showAxis ? "checked" : ""}>
+                <span class="ctl-toggle-track"></span>
+              </label>
+              <label class="ctl-toggle-row" title="Length reference at the orbit target, assuming the voxel spacing in volume.json is in micrometres">
+                <span class="ctl-row-label ctl-toggle-label">Scale bar (3D view)</span>
+                <input type="checkbox" class="ctl-toggle-input" data-role="scalebar" ${uiState.scaleBar ? "checked" : ""}>
                 <span class="ctl-toggle-track"></span>
               </label>
               <div data-role="clip-rows">
@@ -1542,6 +1563,10 @@
       panel.querySelector('[data-role="axes"]').addEventListener("change", (evt) => {
         renderer.showAxis = evt.target.checked;
       });
+      panel.querySelector('[data-role="scalebar"]').addEventListener("change", (evt) => {
+        uiState.scaleBar = evt.target.checked;
+        $("scale-bar").hidden = !uiState.scaleBar || !$("scale-bar").dataset.ready;
+      });
 
       wireClipAxis("X", dimX, (lo, hi) => { renderer.clipMin[0] = lo; renderer.clipMax[0] = hi; dirty(); });
       wireClipAxis("Y", dimY, (lo, hi) => { renderer.clipMin[1] = lo; renderer.clipMax[1] = hi; dirty(); });
@@ -1617,6 +1642,52 @@
 
     // Drives the info box and the loading indicator for one viewer. Returns a
     // function that stops it.
+    // ------------------------------------------------------------------
+    // Scale bar. The voxel spacing in volume.json (metadata.voxelSpacing) is taken to be micrometres.
+    // The camera is a perspective one orbiting a target and its distance is in "normalized" units,
+    // in which the longest physical edge of the volume is 1. So what lies at the orbit target (the
+    // middle of the view unless panned) is drawn at
+    //   pixels per normalized unit = canvas height / (2 * distance * tan(fovY / 2))
+    // and the bar is exact there; nearer or farther parts of the volume are drawn larger or smaller.
+    // ------------------------------------------------------------------
+    function startScaleBar(viewer, pane, el) {
+      const { dimensions, voxelSpacing } = viewer.metadata;
+      el.hidden = true;
+      delete el.dataset.ready;
+      if (!voxelSpacing || !voxelSpacing.every((s) => s > 0)) return () => {};
+      const umPerNormalized = Math.max(...dimensions.map((n, i) => n * voxelSpacing[i]));
+      const label = el.querySelector(".scale-bar-label");
+      const line = el.querySelector(".scale-bar-line");
+      const tanHalfFov = Math.tan(viewer.camera.fovY / 2);
+      let raf = 0;
+      let last = "";
+      const tick = () => {
+        raf = requestAnimationFrame(tick);
+        const canvas = pane.querySelector("canvas");
+        const h = canvas?.clientHeight;
+        const w = canvas?.clientWidth;
+        const distance = viewer.camera.getOrbitState()[2];
+        if (!h || !w || !(distance > 0)) return;
+        const umPerPx = (umPerNormalized * 2 * distance * tanHalfFov) / h;
+        const maxPx = Math.max(60, Math.min(150, w * 0.25));
+        const key = `${umPerPx.toPrecision(4)}|${maxPx}`;
+        if (key === last) return;
+        last = key;
+        const nice = niceScaleLength(umPerPx * maxPx);
+        if (!nice) return;
+        const { um, text } = nice;
+        line.style.width = `${Math.round(um / umPerPx)}px`;
+        label.textContent = text;
+        el.dataset.ready = "1";
+        el.hidden = !uiState.scaleBar;
+      };
+      tick();
+      return () => {
+        cancelAnimationFrame(raf);
+        el.hidden = true;
+      };
+    }
+
     function startStatsLoop(viewer, atlas) {
       const statsEl = $("stats-text");
       const meta = viewer.metadata;

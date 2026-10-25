@@ -40,7 +40,7 @@ async def stage_upload(
     name: str = Query(..., min_length=1, max_length=255, description="Original file name"),
     editor: User = Depends(require_editor),
 ):
-    await run_in_threadpool(workdir.sweep_staging)  # cheap, and keeps abandoned uploads from piling up
+    await run_in_threadpool(workdir.sweep_staging, False)  # throttled; keeps abandoned uploads from piling up
     handed = request.headers.get("x-upload-file")
     if handed:
         upload_id, size = await run_in_threadpool(workdir.stage_handed_file, kind, editor.id, name, handed)

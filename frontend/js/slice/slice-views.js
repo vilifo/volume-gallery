@@ -13,6 +13,7 @@ import { SliceRenderer, requestSliceDevice } from "./slice-renderer.js";
 import { SliceState } from "./cursor.js";
 import { buildLut, isGrayRamp } from "./transfer-function.js";
 import { Overlay3D } from "./overlay-3d.js";
+import { niceScaleLength } from "../scalebar.js";
 import {
   AXES, AXIS_INFO, AXIS_COLORS, clamp, cursorInPlane, dragWindow, panePpv, planeExtents,
   planeIndex, planeToPixel, pixelToPlane, textureFormatFor, zoomAt,
@@ -25,6 +26,24 @@ const PREVIEW_MIN_PIXELS = 512 * 512; // smaller planes are cheap enough to alwa
 function fmtPos(mm, unit) {
   const label = UNIT_LABEL[unit] ?? unit ?? "";
   return `${+mm.toPrecision(4)}${label ? ` ${label}` : ""}`;
+}
+
+/**
+ * SVG for a scale bar at the bottom-left of a pane (above the read-out line). `umPerPx` is the
+ * physical length of one screen pixel along the pane's horizontal axis; the voxel spacing is
+ * taken to be micrometres. Returns "" when the pane is too small or the scale is unusable.
+ */
+export function scaleBarSvg(umPerPx, width, height) {
+  if (!(umPerPx > 0) || height < 90 || width < 120) return "";
+  const nice = niceScaleLength(umPerPx * clamp(width * 0.25, 60, 150));
+  if (!nice) return "";
+  const x0 = 14, y = height - 32;
+  const len = Math.max(2, Math.round(nice.um / umPerPx));
+  const d = `M${x0},${y - 6}V${y}H${x0 + len}V${y - 6}`;
+  return `<path d="${d}" fill="none" stroke="#000" stroke-opacity="0.75" stroke-width="4.5" stroke-linejoin="round"/>` +
+    `<path d="${d}" fill="none" stroke="#f2f4f8" stroke-width="2"/>` +
+    `<text x="${x0}" y="${y - 11}" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" ` +
+    `fill="#f2f4f8" stroke="#000" stroke-opacity="0.75" stroke-width="3" paint-order="stroke">${nice.text}</text>`;
 }
 
 // ------------------------------------------------------------------------- pane
@@ -245,6 +264,7 @@ class Pane {
         `<circle cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="3" fill="none" stroke="#fff" stroke-opacity="0.9"/>`,
       );
     }
+    if (st.showScaleBar !== false) parts.push(scaleBarSvg(st.spacing[info.u] / ppv.u, width, height));
     this.svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
     this.svg.innerHTML = parts.join("");
   }

@@ -178,9 +178,10 @@ def stage_handed_file(kind: str, user_id: int, filename: str, nginx_file: str) -
               "Check that nginx and the app mount the same processing directory and run as the same uid (VG_UID/VG_GID).")
         raise HTTPException(status_code=400, detail="Upload hand-over failed: the app cannot see the file nginx wrote "
                                                     "(nginx and the app need the same processing directory and the same uid; see VG_UID)")
+    size = src.stat().st_size  # before the rename: some bind mounts (Docker Desktop on Windows) show a just-renamed file late
     upload_id = new_upload_id(user_id, filename)
     move_file(src, staging_dir(kind) / upload_id)
-    return upload_id, (staging_dir(kind) / upload_id).stat().st_size
+    return upload_id, size
 
 
 def claim_upload(upload_id: str, kind: str, user_id: int) -> StagedUpload:
@@ -202,17 +203,30 @@ def accept_upload(upload, staged, dst: Path):
     return detach_upload(upload)
 
 
-def sweep_staging() -> None:
+_last_sweep = 0.0
+
+
+def sweep_staging(force: bool = True) -> None:
     """Deletes staged uploads nobody claimed (the browser gave up, the create request
-    failed, ...) once they are older than VG_UPLOAD_STAGING_MAX_AGE_HOURS."""
-    cutoff = time.time() - 3600 * settings.UPLOAD_STAGING_MAX_AGE_HOURS
+    failed, ...) once they are older than VG_UPLOAD_STAGING_MAX_AGE_HOURS. Without `force`
+    it runs at most every 10 minutes (it is called from the upload requests).
+    Files nginx is still receiving (names like 0000000001) are left alone: nginx deletes
+    them itself when a request is aborted."""
+    global _last_sweep
+    now = time.time()
+    if not force and now - _last_sweep < 600:
+        return
+    _last_sweep = now
+    max_age = 3600 * settings.UPLOAD_STAGING_MAX_AGE_HOURS
     for kind in ("volume", "mesh"):
         base = staging_dir(kind)
         if not base.is_dir():
             continue
         for child in base.iterdir():
             try:
-                if child.is_file() and child.stat().st_mtime < cutoff:
+                if _NGINX_TEMP_RE.match(child.name) or not child.is_file():
+                    continue
+                if now - child.stat().st_mtime > max_age:
                     child.unlink()
             except OSError:
                 pass
