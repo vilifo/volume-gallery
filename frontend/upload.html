@@ -327,19 +327,40 @@
         }
         const totalBytes = files.reduce((acc, f) => acc + f.size, 0);
         tiffFileList.style.display = "block";
-        tiffFileList.innerHTML = `
-            <div style="font-weight:600; margin-bottom:0.4rem;">
-                Selected ${files.length} slice${files.length === 1 ? "" : "s"} (${formatBytes(totalBytes)} total, sorted by filename):
-            </div>
-            <ol style="margin:0; padding-left:1.5rem;">
-                ${files.map(f => `
-                    <li style="padding:0.15rem 0; display:flex; justify-content:space-between; gap:1rem;">
-                        <span style="word-break:break-all;">${escapeHtml(f.name)}</span>
-                        <span style="opacity:0.65; white-space:nowrap;">${formatBytes(f.size)}</span>
-                    </li>
-                `).join("")}
-            </ol>
-        `;
+        tiffFileList.textContent = "";
+
+        const summary = document.createElement("div");
+        summary.style.fontWeight = "600";
+        summary.style.marginBottom = "0.4rem";
+        summary.textContent = `Selected ${files.length} slice${files.length === 1 ? "" : "s"} (${formatBytes(totalBytes)} total, sorted by filename):`;
+
+        const list = document.createElement("ol");
+        list.style.margin = "0";
+        list.style.paddingLeft = "1.5rem";
+
+        files.forEach(f => {
+            const item = document.createElement("li");
+            item.style.padding = "0.15rem 0";
+            item.style.display = "flex";
+            item.style.justifyContent = "space-between";
+            item.style.gap = "1rem";
+
+            const nameSpan = document.createElement("span");
+            nameSpan.style.wordBreak = "break-all";
+            nameSpan.textContent = f.name;
+
+            const sizeSpan = document.createElement("span");
+            sizeSpan.style.opacity = "0.65";
+            sizeSpan.style.whiteSpace = "nowrap";
+            sizeSpan.textContent = formatBytes(f.size);
+
+            item.appendChild(nameSpan);
+            item.appendChild(sizeSpan);
+            list.appendChild(item);
+        });
+
+        tiffFileList.appendChild(summary);
+        tiffFileList.appendChild(list);
     });
 
     const form = document.getElementById("form");
