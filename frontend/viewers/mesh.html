@@ -85,6 +85,10 @@
     border-radius: var(--radius); padding: 0.25em 0.6em; font-size: 1em;
   }
   .mesh-panel button.small:hover { border-color: var(--accent-dim); }
+  /* The close button of a panel holds only an inline SVG, which has no size of its own (just a viewBox)
+     and collapsed to nothing, leaving an empty box. */
+  .mesh-panel h2 button.small { display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; padding: 0.3em; }
+  .mesh-panel h2 button.small svg { width: 14px; height: 14px; display: block; }
   .mesh-panel input[type="range"] { width: 100%; accent-color: var(--accent); }
   .mesh-panel input[type="color"] { width: 34px; height: 24px; padding: 0; border: 1px solid var(--line); background: none; border-radius: var(--radius); }
   .mesh-panel input[type="checkbox"] { accent-color: var(--accent); }
