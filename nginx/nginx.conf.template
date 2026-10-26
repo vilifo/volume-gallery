@@ -165,7 +165,7 @@ http {
 			proxy_set_header X-Forwarded-Port ${VG_HTTPS_PORT};
 		}
 
-		location ~ ^/api/volumes/[0-9]+/dataset/ {
+		location ~ ^/api/volumes/[0-9]+/(dataset|slices)/ {
 			gzip off;
 			proxy_buffering off;
 			proxy_pass http://volume_gallery_backend;
