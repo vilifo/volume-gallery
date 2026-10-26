@@ -1,0 +1,228 @@
+diff --git a/lib/kiln-render.js b/lib/kiln-render.js
+index 4ae3556..eeea379 100644
+--- a/lib/kiln-render.js
++++ b/lib/kiln-render.js
+@@ -7828,11 +7828,22 @@ class Camera {
+   poleEpsilon = 1e-3;
+   // monotonic counter to capture state changes
+   version_ = 0;
++  // Local patch: free rotation. The orbit used to be a turntable: two angles, with the elevation clamped
++  // just short of the poles, so the model could never be turned over the top or rolled. In free mode
++  // the view is two orthonormal vectors instead, `back` (from the target to the eye) and `up` (screen
++  // up): dragging rotates them about the screen's own axes, so there are no poles and no gimbal lock.
++  // Shift + drag rolls about the view axis. With freeRotation = false the turntable behaviour (and its
++  // angles, which drive the view again) is back. rotationX / rotationY are kept in step either way, so
++  // getOrbitState() still describes where the camera is.
++  freeRotation = true;
++  back = [0, 0, 1];
++  up = [0, 1, 0];
+   get version() {
+     return this.version_;
+   }
+   constructor(canvas) {
+     this.position = new Float32Array(3);
++    this.orientationFromAngles();
+     this.updatePosition();
+     canvas.addEventListener("contextmenu", (e) => e.preventDefault());
+     canvas.addEventListener("mousedown", (e) => {
+@@ -7851,7 +7862,7 @@ class Camera {
+       this.lastX = e.clientX;
+       this.lastY = e.clientY;
+       if (this.isDragging) {
+-        this.applyOrbit(dx, dy);
++        this.applyOrbit(dx, dy, e.shiftKey);
+       } else if (this.isPanning) {
+         this.applyPan(dx, dy);
+       }
+@@ -7953,7 +7964,11 @@ class Camera {
+     canvas.addEventListener("touchend", handleTouchEnd, { passive: false });
+     canvas.addEventListener("touchcancel", handleTouchEnd, { passive: false });
+   }
+-  applyOrbit(dx, dy) {
++  applyOrbit(dx, dy, roll = false) {
++    if (this.freeRotation) {
++      this.rotateFree(dx, dy, roll);
++      return;
++    }
+     const baseAxis = this.upAxis.replace("-", "");
+     const isNegative = this.upAxis.startsWith("-");
+     let hSign = baseAxis === "z" ? 1 : -1;
+@@ -7982,8 +7997,86 @@ class Camera {
+       y: (t1.clientY + t2.clientY) / 2
+     };
+   }
++  /** The (back, up) pair the turntable angles describe, without touching any state. */
++  turntableBasis(rotationX = this.rotationX, rotationY = this.rotationY) {
++    const cosX = Math.cos(rotationX), sinX = Math.sin(rotationX);
++    const cosY = Math.cos(rotationY), sinY = Math.sin(rotationY);
++    const sign = this.upAxis.startsWith("-") ? -1 : 1;
++    const back = { x: [sign * sinX, cosY * cosX, sinY * cosX], y: [sinY * cosX, sign * sinX, cosY * cosX], z: [cosY * cosX, sinY * cosX, sign * sinX] }[this.upAxis.replace("-", "")];
++    return { back, up: Camera.orthogonalTo(this.upVector, back) };
++  }
++  /** `v` with its component along the unit vector `n` removed, normalised. */
++  static orthogonalTo(v, n) {
++    const d = v[0] * n[0] + v[1] * n[1] + v[2] * n[2];
++    const w = [v[0] - n[0] * d, v[1] - n[1] * d, v[2] - n[2] * d];
++    const len = Math.hypot(w[0], w[1], w[2]);
++    return len > 1e-9 ? [w[0] / len, w[1] / len, w[2] / len] : null;
++  }
++  /** Rotates `v` about the unit axis `k` by `angle` (Rodrigues' formula). */
++  static rotateAbout(v, k, angle) {
++    const c = Math.cos(angle), s = Math.sin(angle);
++    const d = (k[0] * v[0] + k[1] * v[1] + k[2] * v[2]) * (1 - c);
++    return [
++      v[0] * c + (k[1] * v[2] - k[2] * v[1]) * s + k[0] * d,
++      v[1] * c + (k[2] * v[0] - k[0] * v[2]) * s + k[1] * d,
++      v[2] * c + (k[0] * v[1] - k[1] * v[0]) * s + k[2] * d
++    ];
++  }
++  /** Makes (back, up) follow the turntable angles. */
++  orientationFromAngles() {
++    const { back, up } = this.turntableBasis();
++    this.back = back;
++    this.up = up ?? this.up;
++  }
++  /** Makes the turntable angles follow (back, up): the elevation and azimuth of the eye. */
++  anglesFromOrientation() {
++    const [x, y, z] = this.back;
++    const sign = this.upAxis.startsWith("-") ? -1 : 1;
++    const [along, hc, hs] = { x: [x, y, z], y: [y, z, x], z: [z, x, y] }[this.upAxis.replace("-", "")];
++    const limit = Math.PI / 2 - this.poleEpsilon;
++    this.rotationX = Math.max(-limit, Math.min(limit, Math.asin(Math.max(-1, Math.min(1, along * sign)))));
++    if (Math.hypot(hc, hs) > 1e-6) this.rotationY = Math.atan2(hs, hc);
++  }
++  /**
++   * Free rotation. A horizontal drag turns the model about the screen's vertical axis, a vertical drag
++   * about its horizontal axis (the model follows the pointer, as with the turntable), and with `roll`
++   * a horizontal drag turns it clockwise / counter-clockwise about the view axis.
++   */
++  rotateFree(dx, dy, roll) {
++    let { back, up } = this;
++    if (roll) {
++      up = Camera.rotateAbout(up, back, dx * 0.01);
++    } else {
++      back = Camera.rotateAbout(back, up, -dx * 0.01);
++      const right = [up[1] * back[2] - up[2] * back[1], up[2] * back[0] - up[0] * back[2], up[0] * back[1] - up[1] * back[0]];
++      back = Camera.rotateAbout(back, right, -dy * 0.01);
++      up = Camera.rotateAbout(up, right, -dy * 0.01);
++    }
++    // Rotations accumulate rounding errors: keep the pair unit length and perpendicular
++    const bl = Math.hypot(back[0], back[1], back[2]);
++    back = [back[0] / bl, back[1] / bl, back[2] / bl];
++    this.back = back;
++    this.up = Camera.orthogonalTo(up, back) ?? this.up;
++    this.anglesFromOrientation();
++  }
++  /** Switches between free rotation and the turntable. Back on the turntable the view is levelled (no roll). */
++  setFreeRotation(enabled) {
++    enabled = !!enabled;
++    if (enabled === this.freeRotation) return;
++    if (!enabled) this.anglesFromOrientation();
++    this.freeRotation = enabled;
++    this.updatePosition();
++  }
++  isFreeRotation() {
++    return this.freeRotation;
++  }
+   updatePosition() {
+     this.version_++;
++    if (this.freeRotation) {
++      for (let i = 0; i < 3; i++) this.position[i] = this.target[i] + this.back[i] * this.distance;
++      return;
++    }
++    this.orientationFromAngles();
+     const cosX = Math.cos(this.rotationX);
+     const sinX = Math.sin(this.rotationX);
+     const cosY = Math.cos(this.rotationY);
+@@ -8045,6 +8138,7 @@ class Camera {
+     this.rotationX = 0.3;
+     this.rotationY = 0.4;
+     this.target = [0, 0, 0];
++    this.orientationFromAngles();
+     this.updatePosition();
+   }
+   /** Orbit to view the target from world direction `dir`; distance and pan are kept. */
+@@ -8052,6 +8146,14 @@ class Camera {
+     const len = Math.hypot(dir[0], dir[1], dir[2]);
+     if (len === 0) return;
+     const [x, y, z] = [dir[0] / len, dir[1] / len, dir[2] / len];
++    if (this.freeRotation) {
++      // Look from `dir`, keeping the current screen up as far as it fits (else the up axis)
++      this.back = [x, y, z];
++      this.up = Camera.orthogonalTo(this.up, this.back) ?? Camera.orthogonalTo(this.upVector, this.back) ?? Camera.orthogonalTo([0, 1, 0], this.back) ?? [1, 0, 0];
++      this.anglesFromOrientation();
++      this.updatePosition();
++      return;
++    }
+     const sign = this.upAxis.startsWith("-") ? -1 : 1;
+     const [up, hc, hs] = { x: [x, y, z], y: [y, z, x], z: [z, x, y] }[this.upAxis.replace("-", "")];
+     const limit = Math.PI / 2 - this.poleEpsilon;
+@@ -8071,21 +8173,47 @@ class Camera {
+   getOrbitState() {
+     return [this.rotationX, this.rotationY, this.distance, this.target[0], this.target[1], this.target[2]];
+   }
+-  /** Set orbital state: [rotationX, rotationY, distance] or [rotationX, rotationY, distance, targetX, targetY, targetZ] */
++  /**
++   * Like getOrbitState(), plus the exact orientation, [..., backX, backY, backZ, upX, upY, upZ], when the
++   * turntable angles cannot describe it (the view is rolled or was turned over a pole). Used for share links.
++   */
++  getFullOrbitState() {
++    const state = this.getOrbitState();
++    const ref = this.turntableBasis();
++    const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
++    const sameAsTurntable = ref.up && dot(this.back, ref.back) > 1 - 1e-9 && dot(this.up, ref.up) > 1 - 1e-9;
++    return sameAsTurntable ? state : [...state, ...this.back, ...this.up];
++  }
++  /**
++   * Set orbital state: [rotationX, rotationY, distance], [rotationX, rotationY, distance, targetX, targetY, targetZ],
++   * or the 12 numbers of getFullOrbitState() (which switch to free rotation, as the turntable cannot show them).
++   */
+   setOrbitState(state) {
+     this.rotationX = state[0];
+     this.rotationY = state[1];
+     this.distance = Math.max(MIN_DISTANCE, Math.min(MAX_DISTANCE, state[2]));
+-    if (state.length === 6) {
++    if (state.length >= 6) {
+       this.target = [state[3], state[4], state[5]];
+     }
++    this.orientationFromAngles();
++    if (state.length === 12) {
++      const back = state.slice(6, 9);
++      const bl = Math.hypot(back[0], back[1], back[2]);
++      const up = bl > 1e-9 ? Camera.orthogonalTo(state.slice(9, 12), back.map((v) => v / bl)) : null;
++      if (up) {
++        this.back = back.map((v) => v / bl);
++        this.up = up;
++        this.freeRotation = true;
++        this.anglesFromOrientation();
++      }
++    }
+     this.updatePosition();
+   }
+   isInteracting() {
+     return this.isDragging || this.isPanning || this.isTouchPanning || performance.now() - this.lastInteractionTime < 200;
+   }
+   getViewMatrix() {
+-    return mat4.lookAt(this.position, this.target, this.upVector, this.viewScratch);
++    return mat4.lookAt(this.position, this.target, this.up, this.viewScratch);
+   }
+   getProjectionMatrix(aspect) {
+     return mat4.perspective(this.fovY, aspect, 0.01, 100, this.projScratch);
+@@ -12892,7 +13020,7 @@ class KilnViewer {
+   }
+   // State serialisation
+   getState() {
+-    const [rx, ry, dist, tx, ty, tz] = this.camera.getOrbitState();
++    const cam = this.camera.getFullOrbitState();
+     return {
+       mode: this.renderer.volumeRenderMode,
+       windowCenter: this.renderer.windowCenter,
+@@ -12903,7 +13031,7 @@ class KilnViewer {
+       tfPreset: this.transferFunction.preset,
+       tfPoints: this.transferFunction.getOpacityPoints(),
+       upAxis: this.camera.getUpAxis(),
+-      cam: [rx, ry, dist, tx, ty, tz],
++      cam,
+       clipMin: [
+         this.renderer.clipMin[0],
+         this.renderer.clipMin[1],
