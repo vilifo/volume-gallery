@@ -608,7 +608,7 @@
       }
       const up = p.get("up");
       if (UP_AXES.includes(up)) o.upAxis = up;
-      const cam = numList(p.get("cam"), [3, 6]); if (cam) o.cam = cam;
+      const cam = numList(p.get("cam"), [3, 6, 12]); if (cam) o.cam = cam;  // 12: a rolled view (kiln patch 0003)
       const clipMin = numList(p.get("clipMin"), [3]); if (clipMin) o.clipMin = clipMin;
       const clipMax = numList(p.get("clipMax"), [3]); if (clipMax) o.clipMax = clipMax;
       if (p.get("wireframe") === "1") o.showWireframe = true;
@@ -626,7 +626,7 @@
     // UI state that must survive a reload of the viewer (the side panel is
     // rebuilt for each KilnViewer, so its open/closed state lives here).
     // ------------------------------------------------------------------
-    const uiState = { panelOpen: true, infoOpen: false, sceneOpen: true, advancedOpen: false, panelScroll: 0, scaleBar: true };
+    const uiState = { panelOpen: true, infoOpen: false, sceneOpen: true, advancedOpen: false, panelScroll: 0, scaleBar: true, freeRotation: true };
 
     function setPanelOpen(open) {
       uiState.panelOpen = open;
@@ -869,6 +869,7 @@
           });
           stopStats = startStatsLoop(viewer, atlas);
           stopScaleBar = startScaleBar(viewer, $("pane-3d"), $("scale-bar"));
+          if (!uiState.freeRotation) viewer.camera.setFreeRotation?.(false);
           urlSync = startUrlSync(viewer, () => activeMinLevel);
           slices.attachViewer(viewer);
           slices.mountControls(canvasWrap.querySelector(".ctl-panel-body"));
@@ -1191,6 +1192,11 @@
                 <input type="checkbox" class="ctl-toggle-input" data-role="axes" ${renderer.showAxis ? "checked" : ""}>
                 <span class="ctl-toggle-track"></span>
               </label>
+              ${typeof camera.setFreeRotation === "function" ? `<label class="ctl-toggle-row" title="On: drag turns the volume freely about the screen's axes, over the poles, and Shift + drag rolls it. Off: turntable, the chosen up axis stays up.">
+                <span class="ctl-row-label ctl-toggle-label">Free rotation</span>
+                <input type="checkbox" class="ctl-toggle-input" data-role="freerot" ${camera.isFreeRotation() ? "checked" : ""}>
+                <span class="ctl-toggle-track"></span>
+              </label>` : ""}
               <label class="ctl-toggle-row" title="Length reference at the orbit target, assuming the voxel spacing in volume.json is in micrometres">
                 <span class="ctl-row-label ctl-toggle-label">Scale bar (3D view)</span>
                 <input type="checkbox" class="ctl-toggle-input" data-role="scalebar" ${uiState.scaleBar ? "checked" : ""}>
@@ -1572,6 +1578,10 @@
       });
       panel.querySelector('[data-role="axes"]').addEventListener("change", (evt) => {
         renderer.showAxis = evt.target.checked;
+      });
+      panel.querySelector('[data-role="freerot"]')?.addEventListener("change", (evt) => {
+        uiState.freeRotation = evt.target.checked;
+        camera.setFreeRotation(evt.target.checked);
       });
       panel.querySelector('[data-role="scalebar"]').addEventListener("change", (evt) => {
         uiState.scaleBar = evt.target.checked;

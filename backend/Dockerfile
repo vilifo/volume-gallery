@@ -42,7 +42,8 @@ RUN git clone --depth 1 --branch 2025.07 https://github.com/cnr-isti-vclab/vcgli
 
 # kiln-render: built from the v0.5.0 GitHub tag + our patch (backend/kiln-patches).
 # Its own stage so it is cached independently and never depends on what happens to
-# be in frontend/vendor. The patch lifts the 10-slots-per-axis atlas cap.
+# be in frontend/vendor. The patches lift the 10-slots-per-axis atlas cap, add finer LOD
+# levels and make the camera rotate freely (no poles, with roll).
 FROM oven/bun:1-debian AS kiln
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates git wget unzip \
     && rm -rf /var/lib/apt/lists/*
@@ -56,7 +57,9 @@ RUN wget -q "https://github.com/MPanknin/kiln-render/archive/refs/tags/v0.5.0.zi
 COPY backend/kiln-patches /tmp/kiln-patches
 RUN sed -i 's/\r$//' /tmp/kiln-patches/*.patch \
     && git apply --ignore-whitespace /tmp/kiln-patches/*.patch \
-    && grep -q "MAX_GRID_SIZE = 32" lib/kiln-render.js
+    && grep -q "MAX_GRID_SIZE = 32" lib/kiln-render.js \
+    && grep -q "getFullOrbitState" lib/kiln-render.js \
+    && grep -q 'hSign = this.upAxis.startsWith("-") ? 1 : -1' lib/kiln-render.js
 
 FROM python:3.12-slim
 

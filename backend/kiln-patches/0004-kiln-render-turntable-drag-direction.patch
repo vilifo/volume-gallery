@@ -1,0 +1,20 @@
+diff --git a/lib/kiln-render.js b/lib/kiln-render.js
+index eeea379..e2529f4 100644
+--- a/lib/kiln-render.js
++++ b/lib/kiln-render.js
+@@ -7969,10 +7969,11 @@ class Camera {
+       this.rotateFree(dx, dy, roll);
+       return;
+     }
+-    const baseAxis = this.upAxis.replace("-", "");
+-    const isNegative = this.upAxis.startsWith("-");
+-    let hSign = baseAxis === "z" ? 1 : -1;
+-    if (baseAxis === "y" && isNegative) hSign = 1;
++    // Local patch: the horizontal drag direction used to depend on the up axis by accident (the model
++    // followed the pointer for y, -y, x and -z, but ran against it for z and -x). The azimuth always
++    // increases towards the screen's right for a positive up axis and towards its left for a negative one,
++    // so dragging right must lower it for +x/+y/+z and raise it for -x/-y/-z.
++    const hSign = this.upAxis.startsWith("-") ? 1 : -1;
+     this.rotationY += hSign * dx * 0.01;
+     this.rotationX += dy * 0.01;
+     this.rotationX = Math.max(-Math.PI / 2 + this.poleEpsilon, Math.min(Math.PI / 2 - this.poleEpsilon, this.rotationX));
