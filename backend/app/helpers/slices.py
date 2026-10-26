@@ -172,7 +172,7 @@ class VolumeSlicesKiln(VolumeSlices):
     """Read access to the planes of one binary-sharded volume (one resolution level)."""
 
     def __init__(self, dataset_root: Path, level: int = 0, cache: Optional[SlabCache] = None):
-        self.root = Path(dataset_root)
+        self.root = Path(dataset_root).resolve()
         self.level = level
         self._cache = cache
 
@@ -225,10 +225,23 @@ class VolumeSlicesKiln(VolumeSlices):
             "z": float(base_spacing[2] or 1.0) * scale_factor,
         }
         self.unit = vol_meta.get("unit", None)
+        levels = vol_meta.get("levels") or []
+        if level < 0 or level >= len(levels):
+            raise SliceError(f"Invalid level {level}", 404)
 
         # Load brick index (lodN_index.json) and verify shard binary (lodN.bin)
-        index_file = self.root / lvl_meta.get("indexFile", f"lod{level}_index.json")
-        self.bin_file = self.root / lvl_meta.get("binFile", f"lod{level}.bin")
+        index_name = lvl_meta.get("indexFile", f"lod{level}_index.json")
+        # index_file = self.root / lvl_meta.get("indexFile", f"lod{level}_index.json")
+        bin_name = lvl_meta.get("binFile", f"lod{level}.bin")
+        index_file = (self.root / index_name).resolve()
+        self.bin_file = (self.root / bin_name).resolve()
+        if self.root not in index_file.parents or self.root not in self.bin_file.parents:
+            raise SliceError("Invalid shard file path", 404)
+        try:
+            index_file.relative_to(self.root)
+            self.bin_file.relative_to(self.root)
+        except ValueError:
+            raise SliceError(f"Invalid shard paths for level {level}", 404)
 
         if not index_file.exists() or not self.bin_file.exists():
             raise SliceError(f"Missing shard binary or index file for level {level}", 404)
