@@ -1,87 +1,85 @@
 services:
-  # One-shot helper (runs as root, then exits): creates the folders the app and nginx share and
-  # makes them belong to the "apps" user (568), so you do not have to fiddle with dataset
-  # permissions or ACLs by hand. After the first run it only touches files with a wrong owner.
-  # If you use another uid, change the 568s here, in "user:" below and in the nginx VG_UID/VG_GID.
-  volume-gallery-init:
-    image: busybox:1.37
-    container_name: volume-gallery-init
-    restart: "no"
-    user: "0:0"
-    command:
-      - sh
-      - -c
-      - |
-        set -eu
-        mkdir -p /data/volumes /data/meshes /data/pointclouds /data/.uploads /processing/.uploads
-        find /data /processing ! -user 568 -exec chown 568:568 {} +
-    volumes:
-      - /mnt/your/path/to/data/here:/data
-      - /mnt/your/path/to/processing/here:/processing
-
-  volume-gallery:
-    image: vilfoges/volume-gallery:latest
-    shm_size: '1gb'
-    container_name: volume-gallery
-    restart: unless-stopped
-    init: true
-    user: "568:568"
-    security_opt:
-      - no-new-privileges:true
-    logging:
-      driver: json-file
-      options:
-        max-size: 10m
-        max-file: "3"
-    expose:
-      - "8000"
+  nginx:
+    container_name: volume-gallery-nginx
     depends_on:
+      volume-gallery:
+        condition: service_healthy
       volume-gallery-init:
         condition: service_completed_successfully
     environment:
-      VG_SECRET_KEY: your_key_here
-      VG_ADMIN_USER: ${VG_ADMIN_USER:-admin}
-      VG_ADMIN_PASSWORD: your_password_here
-      VG_ACCESS_TOKEN_MINUTES: ${VG_ACCESS_TOKEN_MINUTES:-480}
-      VG_FILE_TOKEN_MINUTES: ${VG_FILE_TOKEN_MINUTES:-30}
-      VG_PROCESSING_DIR: ${VG_PROCESSING_DIR:-}
-      VG_SHARD_ACCEL_REDIRECT: ${VG_SHARD_ACCEL_REDIRECT:-true}
-      VG_UPLOAD_STAGING_MAX_AGE_HOURS: ${VG_UPLOAD_STAGING_MAX_AGE_HOURS:-24}
-    volumes:
-      - /mnt/your/path/to/data/here:/data
-      # Put this on a fast dataset, ideally NOT the one that holds the data: every upload
-      # is written here once and processed here. Must be on the same pool/dataset path that
-      # nginx mounts below (nginx and the app rename files between each other's directories).
-      - /mnt/your/path/to/processing/here:/processing
-
-  nginx:
+      NGINX_ENVSUBST_OUTPUT_DIR: /etc/nginx
+      VG_UID: '568'
+      VG_GID: '568'
+      PUID: 568
+      PGID: 568
+      VG_HTTPS_PORT: ${VG_HTTPS_PORT:-8443}
+      VG_NGINX_REQUEST_BUFFERING: ${VG_NGINX_REQUEST_BUFFERING:-off}
     image: vilfoges/volume-gallery-nginx:latest
-    container_name: volume-gallery-nginx
-    restart: unless-stopped
     logging:
       driver: json-file
       options:
+        max-file: '3'
         max-size: 10m
-        max-file: "3"
-    depends_on:
-      volume-gallery-init:
-        condition: service_completed_successfully
-      volume-gallery:
-        condition: service_healthy
     ports:
       - ${VG_HTTP_PORT:-8080}:80
       - ${VG_HTTPS_PORT:-8443}:443
-    environment:
-      VG_HTTPS_PORT: ${VG_HTTPS_PORT:-8443}
-      NGINX_ENVSUBST_OUTPUT_DIR: /etc/nginx
-      VG_NGINX_REQUEST_BUFFERING: ${VG_NGINX_REQUEST_BUFFERING:-off}
-      # nginx's workers run as the same user as the app: uploads reach the app as files nginx
-      # wrote itself (mode 0600), which only that user can read and rename.
-      VG_UID: 568
-      VG_GID: 568
+    restart: unless-stopped
     volumes:
-      - /mnt/your/path/to/certs/here:/etc/nginx/certs:ro
-      - /mnt/your/path/to/processing/here:/processing
-      - /mnt/your/path/to/data/here/volumes:/data/volumes:ro
-      # Where mesh uploads land (the mesh original is kept in the data folder).
-      - /mnt/your/path/to/data/here/.uploads:/data/.uploads
+      - /mnt/fast/storage/path/processing:/processing
+      - /mnt/your/path/to/certs/:/etc/nginx/certs:ro
+      - /mnt/your/path/to/app/data/volumes:/data/volumes:ro
+      - /mnt/your/path/to/app/data/.uploads:/data/.uploads
+  volume-gallery:
+    container_name: volume-gallery
+    depends_on:
+      volume-gallery-init:
+        condition: service_completed_successfully
+    environment:
+      VG_UID: '568'
+      VG_GID: '568'
+      PUID: 568
+      PGID: 568
+      VG_ACCESS_TOKEN_MINUTES: ${VG_ACCESS_TOKEN_MINUTES:-480}
+      VG_ADMIN_PASSWORD: your-password
+      VG_ADMIN_USER: ${VG_ADMIN_USER:-admin}
+      VG_FILE_TOKEN_MINUTES: ${VG_FILE_TOKEN_MINUTES:-30}
+      VG_PROCESSING_DIR: /processing
+      VG_SECRET_KEY: your-secret-key
+      VG_SHARD_ACCEL_REDIRECT: ${VG_SHARD_ACCEL_REDIRECT:-true}
+      VG_UPLOAD_STAGING_MAX_AGE_HOURS: ${VG_UPLOAD_STAGING_MAX_AGE_HOURS:-24}
+    expose:
+      - '8000'
+    image: vilfoges/volume-gallery:latest
+    init: True
+    logging:
+      driver: json-file
+      options:
+        max-file: '3'
+        max-size: 10m
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    shm_size: 1gb
+    user: '568:568'
+    volumes:
+      - /mnt/fast/storage/path/processing:/processing
+      - /mnt/your/path/to/app/branding:/branding:ro
+      - /mnt/your/path/to/app/data:/data
+  volume-gallery-init:
+    command:
+      - sh
+      - '-c'
+      - >
+        set -eu
+
+        mkdir -p /data/volumes /data/meshes /data/pointclouds /data/.uploads
+        /processing/.uploads /processing/.nginx_client_body /processing/.nginx_proxy
+
+        find /data /processing \( ! -user 568 -o ! -group 568 \) -exec chown 568:568 {} +
+    container_name: volume-gallery-init
+    image: busybox:1.37
+    restart: 'no'
+    user: '0:0'
+    volumes:
+      - /mnt/our/path/to/app/data:/data
+      - /mnt/fast/storage/path/processing:/processing

@@ -8,9 +8,13 @@ RUN apt-get update && apt-get install -y \
     libtbb-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Clone and build the PotreeConverter executable
+# Clone and build the PotreeConverter executable, at a fixed commit (tag 2.1.5) instead of whatever
+# master is on the day of the build. The sed patches below target this source: when bumping the commit,
+# check that they still match.
+ARG POTREE_CONVERTER_REF=c2cb61843bf2b901e8e257874b1a6dcf67792fb2
 RUN git clone https://github.com/potree/PotreeConverter.git /opt/PotreeConverter \
     && cd /opt/PotreeConverter \
+    && git checkout --quiet ${POTREE_CONVERTER_REF} \
     && sed -i 's/__debugbreak();/\/\/ __debugbreak();/g' Converter/src/VBuffer.cpp Converter/src/indexer.cpp \
     && sed -i 's/state->name = js\["state"\]\["name"\];/state->name = js\["state"\]\["name"\].get<std::string>();/g' Converter/src/indexer.cpp \
     && sed -i 's/attribute.description = jsAttribute\["description"\];/attribute.description = jsAttribute\["description"\].get<std::string>();/g' Converter/src/indexer.cpp \
@@ -48,7 +52,10 @@ FROM oven/bun:1-debian AS kiln
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates git wget unzip \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /kiln
+# The download is checked against a SHA-256 (a changed archive fails the build); update it with the tag.
+ARG KILN_RENDER_SHA256=5e2fa62437ca063d980354c88817faacc28b2251641a3da72f26fd31d2ec6040
 RUN wget -q "https://github.com/MPanknin/kiln-render/archive/refs/tags/v0.5.0.zip" -O kiln-render.zip \
+    && echo "${KILN_RENDER_SHA256}  kiln-render.zip" | sha256sum -c - \
     && unzip -q kiln-render.zip \
     && mv kiln-render-0.5.0/* kiln-render-0.5.0/.[!.]* . 2>/dev/null || true \
     && rm -rf kiln-render-0.5.0 kiln-render.zip \
@@ -108,13 +115,19 @@ RUN mkdir -p /frontend/vendor/3dhop \
 
 WORKDIR /tmp/vendor_downloads
 
-# Download 3DHOP via master zip and extract the needed files from the minimal directory
-RUN wget -q "https://github.com/cnr-isti-vclab/3DHOP/archive/refs/heads/master.zip" -O 3dhop.zip && \
+# Download 3DHOP at a fixed commit (tag 4.3), checked against a SHA-256, and extract the needed files
+# from the minimal directory
+ARG THREEDHOP_REF=a8c145ddc575df5291e073a377d942ff77c34901
+ARG THREEDHOP_SHA256=cd0fed714ce0f86164e81a4d868c5689f7a2dd8de2908d01e07eb82927309147
+RUN wget -q "https://github.com/cnr-isti-vclab/3DHOP/archive/${THREEDHOP_REF}.zip" -O 3dhop.zip && \
+    echo "${THREEDHOP_SHA256}  3dhop.zip" | sha256sum -c - && \
     unzip -q 3dhop.zip && \
-    cp 3DHOP-master/minimal/* /frontend/vendor/3dhop/ -r
+    cp 3DHOP-${THREEDHOP_REF}/minimal/* /frontend/vendor/3dhop/ -r
 
 # Download Potree dependencies
+ARG POTREE_SHA256=c140a8bce0ce129de762fbc0fd3ba7c21120ffd36d423dd2755abb39f32aebe5
 RUN wget -q "https://github.com/potree/potree/releases/download/1.8.2/Potree_1.8.2.zip" -O potree.zip && \
+    echo "${POTREE_SHA256}  potree.zip" | sha256sum -c - && \
     unzip -q potree.zip && \
     cp -r Potree_1.8.2/build/potree/* /frontend/vendor/potree/ && \
     cp -r Potree_1.8.2/libs/* /frontend/vendor/libs/

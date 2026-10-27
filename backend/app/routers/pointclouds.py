@@ -10,7 +10,7 @@ from sqlmodel import Session, select
 from ..database import get_session, engine
 from ..models import User, Role, PointCloud, PointCloudAccess, AssetStatus
 from ..schemas import PointCloudRead, AssetStatusRead, AccessGrant, GrantedUserRead, FileAccessUrl
-from ..deps import get_current_user, require_editor
+from ..deps import file_token_revoked, get_current_user, require_editor
 from ..security import create_file_token, decode_token
 from ..config import settings
 from .. import workdir
@@ -92,7 +92,7 @@ def create_pointcloud(
     session: Session = Depends(get_session),
     editor: User = Depends(require_editor),
 ):
-    if not SLUG_RE.match(slug):
+    if not SLUG_RE.fullmatch(slug):
         raise HTTPException(status_code=400, detail="Slug must be lowercase alphanumeric/-/_ (2-63 chars)")
     if (pointcloud_file is None) == (not pointcloud_upload_id):
         raise HTTPException(status_code=400, detail="Provide exactly one of pointcloud_file or pointcloud_upload_id")
@@ -110,7 +110,10 @@ def create_pointcloud(
     thumbnail = read_thumbnail(thumbnail_file) if thumbnail_file is not None else None  # validate before creating anything
 
     pc_dir = _pointcloud_dir(slug)
-    pc_dir.mkdir(parents=True, exist_ok=False)
+    try:
+        pc_dir.mkdir(parents=True, exist_ok=False)
+    except FileExistsError:  # a folder without a database row (left over, or a concurrent request for the same slug)
+        raise HTTPException(status_code=409, detail="A point cloud with this slug already exists")
 
     try:
         work_dir = workdir.prepare_work_dir("pointclouds", slug, pc_dir)
@@ -287,7 +290,7 @@ def octree_access_url(
             status_code=409,
             detail="Point cloud is still processing" if pc.status == AssetStatus.processing else "Point cloud processing failed — see its status log",
         )
-    token = create_file_token(subject=user.username, asset_id=pc_id, kind="pc-octree")
+    token = create_file_token(subject=user.username, user=user, asset_id=pc_id, kind="pc-octree")
     base = str(request.base_url).rstrip("/")
     return FileAccessUrl(
         url=f"{base}/api/pointclouds/{pc_id}/octree/{token}/",
@@ -304,7 +307,10 @@ def pointcloud_download_access_url(
         raise HTTPException(status_code=404, detail="Point cloud not found")
     if pc.status != AssetStatus.ready:
         raise HTTPException(status_code=409, detail="Point cloud is still processing")
-    token = create_file_token(subject=user.username, asset_id=pc_id, kind="pc-download")
+    scope = getattr(user, "_share_scope", None)
+    if scope is not None and not scope.get("can_download"):  # a share link without can_download: view only
+        raise HTTPException(status_code=403, detail="This share link does not allow downloads")
+    token = create_file_token(subject=user.username, user=user, asset_id=pc_id, kind="pc-download")
     base = str(request.base_url).rstrip("/")
     return FileAccessUrl(
         url=f"{base}/api/pointclouds/{pc_id}/download-file/{token}",
@@ -328,6 +334,7 @@ def _check_pc_token(token: str, pc_id: int, kind: str) -> None:
         or payload.get("type") != "file"
         or payload.get("kind") != kind
         or payload.get("vol") != pc_id
+        or file_token_revoked(payload)
     ):
         raise HTTPException(status_code=403, detail="Invalid or expired link")
 
@@ -345,7 +352,8 @@ def serve_octree_file(pc_id: int, token: str, path: str, session: Session = Depe
         raise HTTPException(status_code=404, detail="Point cloud not found")
     octree_root = _pointcloud_dir(pc.slug).resolve()
     target = (octree_root / path.lstrip("/")).resolve()
-    if not str(target).startswith(str(octree_root)):
+    # is_relative_to, not startswith: "/data/pointclouds/foo-bar/x" starts with "/data/pointclouds/foo"
+    if not target.is_relative_to(octree_root):
         raise HTTPException(status_code=400, detail="Invalid path")
     if not target.exists() or not target.is_file():
         raise HTTPException(status_code=404, detail="Not found")

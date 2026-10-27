@@ -9,7 +9,7 @@ from sqlmodel import Session, select
 from ..database import get_session, engine
 from ..models import User, Role, Mesh, MeshAccess, AssetStatus
 from ..schemas import MeshRead, AssetStatusRead, AccessGrant, GrantedUserRead, FileAccessUrl
-from ..deps import get_current_user, require_editor
+from ..deps import file_token_revoked, get_current_user, require_editor
 from ..security import create_file_token, decode_token
 from ..config import settings
 from .. import workdir
@@ -184,7 +184,7 @@ def create_mesh(
     session: Session = Depends(get_session),
     editor: User = Depends(require_editor),
 ):
-    if not SLUG_RE.match(slug):
+    if not SLUG_RE.fullmatch(slug):
         raise HTTPException(status_code=400, detail="Slug must be lowercase alphanumeric/-/_ (2-63 chars)")
     if (mesh_file is None) == (not mesh_upload_id):
         raise HTTPException(status_code=400, detail="Provide exactly one of mesh_file or mesh_upload_id")
@@ -194,7 +194,10 @@ def create_mesh(
     staged = workdir.claim_upload(mesh_upload_id, "mesh", editor.id) if mesh_upload_id else None
 
     mesh_dir = _mesh_dir(slug)
-    mesh_dir.mkdir(parents=True, exist_ok=False)
+    try:
+        mesh_dir.mkdir(parents=True, exist_ok=False)
+    except FileExistsError:  # a folder without a database row (left over, or a concurrent request for the same slug)
+        raise HTTPException(status_code=409, detail="A mesh with this slug already exists")
 
     source_ext = Path((staged.filename if staged else mesh_file.filename) or "").suffix.lstrip(".").lower() or "bin"
     try:
@@ -377,7 +380,7 @@ def mesh_access_url(
             status_code=409,
             detail="Mesh is still processing" if mesh.status == AssetStatus.processing else "Mesh processing failed — see its status log",
         )
-    token = create_file_token(subject=user.username, asset_id=mesh_id, kind="mesh")
+    token = create_file_token(subject=user.username, user=user, asset_id=mesh_id, kind="mesh")
     base = str(request.base_url).rstrip("/")
     return FileAccessUrl(
         url=f"{base}/api/meshes/{mesh_id}/mesh-access-file/{token}",
@@ -396,7 +399,7 @@ def mesh_download_access_url(
         raise HTTPException(status_code=403, detail="You don't have permission to download this mesh")
     if mesh.status != AssetStatus.ready:
         raise HTTPException(status_code=409, detail="Mesh is still processing")
-    token = create_file_token(subject=user.username, asset_id=mesh_id, kind="mesh-download")
+    token = create_file_token(subject=user.username, user=user, asset_id=mesh_id, kind="mesh-download")
     base = str(request.base_url).rstrip("/")
     return FileAccessUrl(
         url=f"{base}/api/meshes/{mesh_id}/mesh-access-file/{token}",
@@ -414,6 +417,7 @@ def _check_mesh_token(token: str, mesh_id: int) -> str:
         or payload.get("type") != "file"
         or payload.get("kind") not in ("mesh", "mesh-download")
         or payload.get("vol") != mesh_id
+        or file_token_revoked(payload)
     ):
         raise HTTPException(status_code=403, detail="Invalid or expired link")
     return payload["kind"]

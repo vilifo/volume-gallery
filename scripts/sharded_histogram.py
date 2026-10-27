@@ -1,4 +1,3 @@
-\
 #!/usr/bin/env python3
 """Compute the finest-LOD voxel histogram from a kiln sharded volume.
 

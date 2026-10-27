@@ -52,7 +52,7 @@ def _validate_custom_code(code: str) -> str:
             status_code=400,
             detail=f"Share code length must be between {min_len} and {max_len} characters",
         )
-    if not _CODE_CHARS_RE.match(cleaned):
+    if not _CODE_CHARS_RE.fullmatch(cleaned):
         raise HTTPException(
             status_code=400,
             detail="Share code may only contain letters, digits, '-' and '_', starting with a letter or digit",

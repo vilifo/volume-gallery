@@ -114,10 +114,13 @@ def create_share_session_token(
     return jwt.encode(payload, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
 
 
-def create_file_token(subject: str, asset_id: int, kind: str, min_lod: Optional[int] = None) -> str:
+def create_file_token(subject: str, asset_id: int, kind: str, min_lod: Optional[int] = None, user=None) -> str:
     """kind is 'sharded', 'mesh' or 'pointcloud' — scopes the token to a specific resource on a
     specific volume.
-    - min_lod (sharded-volume tokens only) caps the finest LOD served — see routers/volumes.py."""
+    - min_lod (sharded-volume tokens only) caps the finest LOD served — see routers/volumes.py.
+    - user: whose request minted the token. The token remembers the share link (shr) or the account (uid)
+      it came from, so deps.file_token_revoked() can refuse it once that share is revoked or expired or
+      that account is disabled or deleted, instead of letting it run out its full lifetime."""
     expire = datetime.utcnow() + timedelta(minutes=settings.FILE_TOKEN_EXPIRE_MINUTES)
     payload = {
         "sub": subject,
@@ -128,6 +131,11 @@ def create_file_token(subject: str, asset_id: int, kind: str, min_lod: Optional[
     }
     if min_lod is not None:
         payload["min_lod"] = min_lod
+    scope = getattr(user, "_share_scope", None)
+    if scope is not None:
+        payload["shr"] = scope["share_id"]
+    elif user is not None and user.id is not None and user.id > 0:
+        payload["uid"] = user.id
     return jwt.encode(payload, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
 
 

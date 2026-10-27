@@ -48,11 +48,12 @@ services:
       volume-gallery-init:
         condition: service_completed_successfully
     environment:
-      VG_SECRET_KEY: ${VG_SECRET_KEY}
+      VG_SECRET_KEY: ${VG_SECRET_KEY:?set VG_SECRET_KEY in .env (at least 32 characters, e.g. openssl rand -hex 32)}
       VG_ADMIN_USER: ${VG_ADMIN_USER:-admin}
       VG_ADMIN_PASSWORD: ${VG_ADMIN_PASSWORD}
       VG_ACCESS_TOKEN_MINUTES: ${VG_ACCESS_TOKEN_MINUTES:-480}
       VG_FILE_TOKEN_MINUTES: ${VG_FILE_TOKEN_MINUTES:-30}
+      VG_CONVERTER_TIMEOUT_HOURS: ${VG_CONVERTER_TIMEOUT_HOURS:-24}
       VG_PROCESSING_DIR: ${VG_PROCESSING_DIR:-}
       VG_SHARD_ACCEL_REDIRECT: ${VG_SHARD_ACCEL_REDIRECT:-true}
       VG_UPLOAD_STAGING_MAX_AGE_HOURS: ${VG_UPLOAD_STAGING_MAX_AGE_HOURS:-24}

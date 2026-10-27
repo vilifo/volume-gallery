@@ -58,6 +58,8 @@ def update_user(
         raise HTTPException(status_code=404, detail="User not found")
     if user.id == admin.id and payload.role and payload.role != Role.admin:
         raise HTTPException(status_code=400, detail="Admins cannot demote themselves")
+    if user.id == admin.id and payload.disabled:
+        raise HTTPException(status_code=400, detail="Admins cannot disable themselves")
     if payload.role is not None:
         user.role = payload.role
     if payload.disabled is not None:

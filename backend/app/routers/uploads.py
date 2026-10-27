@@ -4,7 +4,9 @@
 
 and gets back an upload id, which the create request (POST /api/volumes, /api/meshes,
 /api/pointclouds) then names instead of re-sending the file (tiff_upload_id,
-tiff_upload_ids, mesh_upload_id, pointcloud_upload_id). The multipart form fields keep
+tiff_upload_manifest, mesh_upload_id, pointcloud_upload_id). A stack's slice ids go in
+chunks of JSON arrays: one form field per slice would hit Starlette's limit of 1000
+fields per multipart form. The multipart form fields keep
 working too, for curl and for a bare uvicorn without nginx.
 
 Behind nginx (see nginx/nginx.conf.template) this is what makes an upload cost one disk

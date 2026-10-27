@@ -91,12 +91,12 @@ cd backend
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 export VG_DATA_DIR=../data
-export VG_SECRET_KEY=dev-secret-change-me
-export VG_ADMIN_PASSWORD=changeme
+export VG_SECRET_KEY=$(python -c "import secrets; print(secrets.token_hex(32))")
+export VG_ADMIN_PASSWORD='pick-a-password'  # only used to create the first admin
 uvicorn app.main:app --reload --port 8000
 ```
 
-Then open `http://localhost:8000`, sign in as `admin` / `changeme`.
+Then open `http://localhost:8000`, sign in as `admin` with the password you set.
 
 ## Running with Docker Compose
 
@@ -155,10 +155,15 @@ nginx
 3. calls the app *without* the body, telling it just the file's name.
 
 The app renames the file to an upload id, and the `POST` that creates the
-volume / mesh / point cloud (`tiff_upload_id`, `tiff_upload_ids`,
+volume / mesh / point cloud (`tiff_upload_id`, `tiff_upload_manifest`,
 `mesh_upload_id`, `pointcloud_upload_id` instead of the file fields) renames it
 again into the asset's scratch folder. Renames inside one filesystem are
-instant, whatever the file size. The old multipart form fields keep working
+instant, whatever the file size. For a TIFF stack the create request does not
+even do that: it answers as soon as it has checked the ids, and the renames
+(one per slice) are the first step of the background job.
+`tiff_upload_manifest` carries the slices' ids as JSON arrays of a few hundred
+ids per field, because a form with one field per slice is refused by Starlette
+beyond 1000 fields ("Too many fields"). The old multipart form fields keep working
 (curl, scripts, a bare `uvicorn` without nginx), they just cost one more copy.
 
 What lives where afterwards:

@@ -288,14 +288,17 @@ function _xhrWithProgress(method, path, body, onProgress, headers = {}) {
 // sent with the small fields and the ids of the staged files (see backend/app/routers/uploads.py).
 // A multipart form carrying the files would have to be parsed and spooled to a temp file and copied
 // from there. The thumbnail is small and stays in the form.
-//   form field -> [upload kind, id field of the create request]
+//   form field -> [upload kind, id field of the create request, ids go out as JSON chunks]
+// A stack of slices has one id per file, and a multipart form may carry at most 1000 fields
+// (Starlette: "Too many fields"), so those ids are sent as a few fields holding JSON arrays.
 const _STAGED_FIELDS = {
     tiff_zip: ["volume", "tiff_upload_id"],
-    tiff_files: ["volume", "tiff_upload_ids"],
+    tiff_files: ["volume", "tiff_upload_manifest", true],
     mesh_file: ["mesh", "mesh_upload_id"],
     pointcloud_file: ["pointcloud", "pointcloud_upload_id"],
 };
-const _STAGE_CONCURRENCY = 3;  // only matters for stacks of many small slice files
+const _IDS_PER_FIELD = 500;  // ~35 KB a field, far below Starlette's 1 MB limit on a form field
+const _STAGE_CONCURRENCY = 6;  // only matters for stacks of many small slice files (6 = a browser's connections per host over HTTP/1.1)
 
 // File -> upload id of the copy already staged on the server. When the create request is
 // refused (slug taken, ...) the form is shown again, and sending it once more must not upload
@@ -365,7 +368,22 @@ async function _stageFiles(formData, onProgress) {
         }
     };
     await Promise.all(Array.from({length: Math.min(_STAGE_CONCURRENCY, jobs.length)}, worker));
-    for (const job of jobs) staged.append(_STAGED_FIELDS[job.field][1], job.id);  // keeps the files' order
+    const manifests = new Map();
+    for (const job of jobs) {  // keeps the files' order
+        const [, idField, chunked] = _STAGED_FIELDS[job.field];
+        if (!chunked) {
+            staged.append(idField, job.id);
+        } else if (manifests.has(idField)) {
+            manifests.get(idField).push(job.id);
+        } else {
+            manifests.set(idField, [job.id]);
+        }
+    }
+    for (const [idField, ids] of manifests) {
+        for (let i = 0; i < ids.length; i += _IDS_PER_FIELD) {
+            staged.append(idField, JSON.stringify(ids.slice(i, i + _IDS_PER_FIELD)));
+        }
+    }
     return staged;
 }
 
