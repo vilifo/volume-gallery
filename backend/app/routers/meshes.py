@@ -107,7 +107,8 @@ def attach_mesh_to_volume(session: Session, volume, mesh_file: Optional[UploadFi
     """Stores the uploaded mesh (`mesh_file`, or `mesh_staged`: a file nginx already wrote to
     disk) as the volume's mesh (replacing any previous one) and queues the usual mesh conversion."""
     source_ext = Path((mesh_staged.filename if mesh_staged else mesh_file.filename) or "").suffix.lstrip(".").lower() or "bin"
-    delete_volume_mesh(session, volume)
+    # The previous mesh is only removed once the new upload is saved (below): if saving fails, the
+    # volume keeps the mesh it had. Until then it still exists, so the new mesh gets another slug.
     slug = _child_mesh_slug(session, volume.slug)
     mesh_dir = _mesh_dir(slug)
     mesh_dir.mkdir(parents=True, exist_ok=False)
@@ -120,6 +121,7 @@ def attach_mesh_to_volume(session: Session, volume, mesh_file: Optional[UploadFi
         workdir.discard_job("meshes", slug)
         raise HTTPException(status_code=400, detail=f"Could not save mesh upload: {exc}")
 
+    delete_volume_mesh(session, volume)  # the replaced mesh: files + row
     mesh = Mesh(
         slug=slug, title=f"{volume.title} (mesh)", created_by=editor.id, volume_id=volume.id,
         status=AssetStatus.processing, file_extension=source_ext,
