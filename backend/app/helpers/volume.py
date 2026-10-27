@@ -534,7 +534,7 @@ def decompose_tiff_stack(
         max_lod=-1,
         workers=4,
         slab_gb=8.0,
-        compresslevel=6,
+        compresslevel=3,
         log=None,
 ):
     dask.config.set(scheduler="threads", num_workers=workers)
