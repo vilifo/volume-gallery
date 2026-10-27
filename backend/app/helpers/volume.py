@@ -275,6 +275,8 @@ def decompose_tiff_stack(input_path: Path,
     os.makedirs(output_dir, exist_ok=True)
 
     vol, dimensions, dtype = load_tiff_as_dask(input_path, brick_size)
+    log("Computing histogram...")
+    compute_histogram(vol, histogram_path(output_dir))
 
     w, h, d = dimensions
 
