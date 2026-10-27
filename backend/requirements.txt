@@ -11,6 +11,7 @@ tifffile==2026.10.15
 numpy==2.5.4
 dask==2026.8.0
 # --- Slice views: zstd-compressed planes (backend/app/helpers/slices.py) ---
+isal==1.8.0
 zstandard==0.25.0
 # --- Mesh and point cloud processing (backend/app/helpers/mesh.py) ---
 trimesh==5.1.1
