@@ -10,7 +10,7 @@ from sqlmodel import Session, select
 from .database import init_db, engine
 from .models import User, Role, Volume, Mesh, PointCloud, AssetStatus
 from .security import hash_password
-from .config import settings
+from .config import settings, check_secret_key
 from . import workdir
 from .utils import _now
 from .routers import auth, users, volumes, meshes, pointclouds, branding, shares, uploads
@@ -67,6 +67,7 @@ def _recover_interrupted_jobs():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    check_secret_key()
     init_db()
     _bootstrap_admin()
     _recover_interrupted_jobs()

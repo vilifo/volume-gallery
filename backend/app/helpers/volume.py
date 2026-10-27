@@ -7,7 +7,13 @@ Uses Dask for larger-than-RAM out-of-core processing and multithreading.
 TIFF slices are sorted naturally before stacking to preserve acquisition order.
 """
 import shutil
+import stat
+import threading
+import zipfile
+import zlib
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import PurePosixPath
 from typing import Optional
 import multiprocessing
 import subprocess
@@ -41,27 +47,73 @@ def volume_meta_path(vol_dir: Path) -> Path:
 
 
 def extract_zip_parallel(zip_path, extract_to):
-    os.makedirs(extract_to, exist_ok=True)
-    cores = str(max(1, multiprocessing.cpu_count() - 1))
+    """Extracts the .tif/.tiff entries of a zip into `extract_to`, one thread per core.
 
-    print(f"Starting parallel extraction on {cores} cores...")
-
-    list_cmd = ["unzip", "-Z", "-1", zip_path]
+    Raises ValueError (not a zip, unsafe path, corrupt entry, not enough free space) or OSError
+    (e.g. the disk filled up): the volume then fails with that message instead of being converted
+    from a partly extracted stack. Entries that are not TIFFs, symlinks and macOS resource forks
+    (__MACOSX/, ._name) are skipped; a path that is absolute or climbs out with .. is refused."""
+    root = Path(extract_to)
+    root.mkdir(parents=True, exist_ok=True)
+    root = root.resolve()
     try:
-        files = subprocess.run(list_cmd, capture_output=True, text=True, check=True)
-    except subprocess.CalledProcessError as e:
-        print(f"Failed to read zip. Is 'unzip' installed? {e}")
+        with zipfile.ZipFile(zip_path) as zf:
+            infos = zf.infolist()
+    except zipfile.BadZipFile as exc:
+        raise ValueError(f"The upload is not a valid zip archive: {exc}") from exc
+
+    jobs = []  # (zip entry, destination)
+    total = 0
+    for info in infos:
+        name = info.filename.replace("\\", "/")
+        path = PurePosixPath(name)
+        if info.is_dir() or path.suffix.lower() not in (".tif", ".tiff"):
+            continue
+        if stat.S_ISLNK(info.external_attr >> 16):
+            continue  # never create links from archive contents
+        if path.is_absolute() or ".." in path.parts:
+            raise ValueError(f"Unsafe path in the zip archive: {info.filename!r}")
+        if "__MACOSX" in path.parts or path.name.startswith("._"):
+            continue
+        dest = root.joinpath(*path.parts)
+        if not dest.resolve().is_relative_to(root):
+            raise ValueError(f"Unsafe path in the zip archive: {info.filename!r}")
+        jobs.append((info, dest))
+        total += info.file_size  # zipfile never yields more bytes than this, so it bounds the output
+
+    free = shutil.disk_usage(root).free
+    if total > free:
+        raise ValueError(
+            f"The archive holds {total / 1e9:.1f} GB of TIFF data but only {free / 1e9:.1f} GB is free "
+            f"in the processing directory"
+        )
+
+    workers = max(1, min(len(jobs), multiprocessing.cpu_count() - 1))
+    print(f"Extracting {len(jobs)} TIFF files on {workers} threads...")
+    stop = threading.Event()
+
+    def work(chunk):
+        with zipfile.ZipFile(zip_path) as zf:  # a handle per thread
+            for info, dest in chunk:
+                if stop.is_set():
+                    return
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                try:
+                    with zf.open(info) as src, open(dest, "wb") as out:
+                        shutil.copyfileobj(src, out, 1 << 20)
+                except (zipfile.BadZipFile, zlib.error) as exc:
+                    raise ValueError(f"Corrupt entry {info.filename!r} in the zip archive: {exc}") from exc
+
+    if not jobs:
         return
-
-    extract_cmd = [
-        "xargs", "-d", "\n", "-P", cores, "-I", "{}",
-        "unzip", "-o", "-q", zip_path, "{}", "-d", extract_to
-    ]
-
-    try:
-        subprocess.run(extract_cmd, input=files.stdout, text=True, check=True)
-    except subprocess.CalledProcessError as e:
-        print(f"Extraction failed: {e}")
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = [pool.submit(work, jobs[i::workers]) for i in range(workers)]
+        try:
+            for f in futures:
+                f.result()
+        except BaseException:
+            stop.set()  # the other threads finish the file they are on and stop
+            raise
 
 
 def _find_tiff_dir(scratch_dir: Path) -> Optional[Path]:

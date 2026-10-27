@@ -6,7 +6,8 @@ from pathlib import Path  # noqa: E402
 class Settings:
     # --- Security ---
     # Generate a real secret with: python -c "import secrets; print(secrets.token_hex(32))"
-    SECRET_KEY: str = os.environ.get("VG_SECRET_KEY", "CHANGE_ME_INSECURE_DEFAULT")
+    # No default: check_secret_key() refuses to start without a real one (see below).
+    SECRET_KEY: str = os.environ.get("VG_SECRET_KEY", "")
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = int(os.environ.get("VG_ACCESS_TOKEN_MINUTES", "480"))
     # Short-lived token used to authorize a single volume-data / mesh download
@@ -67,6 +68,9 @@ class Settings:
     # point clouds" section. Point these at wherever you've placed them
     # (e.g. mounted into /usr/local/bin, or an absolute path) if they're not
     # on PATH under their default names.
+    # Longest a converter (nxsbuild, nxscompress, PotreeConverter) may run on an uploaded file before the
+    # job is failed: one that hangs on a broken or hostile file would otherwise hold its worker for ever.
+    CONVERTER_TIMEOUT_SECONDS: float = float(os.environ.get("VG_CONVERTER_TIMEOUT_HOURS", "24")) * 3600  # 0 = no limit
     NXSBUILD_BIN: str = os.environ.get("VG_NXSBUILD_BIN", "nxsbuild")
     NXSCOMPRESS_BIN: str = os.environ.get("VG_NXSCOMPRESS_BIN", "nxscompress")
     POTREE_CONVERTER_BIN: str = os.environ.get("VG_POTREE_CONVERTER_BIN", "PotreeConverter") # Must be the full path to the PotreeConverter binary
@@ -75,7 +79,7 @@ class Settings:
 
     # --- Bootstrap admin (only used on first run, if no users exist) ---
     BOOTSTRAP_ADMIN_USER: str = os.environ.get("VG_ADMIN_USER", "admin")
-    BOOTSTRAP_ADMIN_PASSWORD: str = os.environ.get("VG_ADMIN_PASSWORD", "changeme")
+    BOOTSTRAP_ADMIN_PASSWORD: str = os.environ.get("VG_ADMIN_PASSWORD", "")  # no default password
 
     # --- Frontend static files ---
     # In the Docker image this is /frontend (see Dockerfile). For local dev
@@ -86,6 +90,22 @@ class Settings:
     FRONTEND_DIR: str = os.environ.get("VG_FRONTEND_DIR", _default_frontend)
 
 settings = Settings()
+
+_MIN_SECRET_KEY_LENGTH = 32
+_PLACEHOLDER_SECRETS = {"change_me_insecure_default", "your-secret-key", "dev-secret-change-me", "changeme", "secret"}
+
+
+def check_secret_key() -> None:
+    """Refuses to start with a missing, short or placeholder VG_SECRET_KEY. Every login and
+    download token is signed with it: an empty or well-known key lets anyone forge an admin token
+    (docker-compose turns an unset variable into an empty string, which the JWT library accepts)."""
+    key = settings.SECRET_KEY
+    if len(key) < _MIN_SECRET_KEY_LENGTH or key.strip().lower() in _PLACEHOLDER_SECRETS:
+        raise RuntimeError(
+            f"VG_SECRET_KEY is missing, too short (< {_MIN_SECRET_KEY_LENGTH} characters) or a placeholder. "
+            'Generate one with: python -c "import secrets; print(secrets.token_hex(32))" '
+            "(changing it signs everyone out)."
+        )
 settings.VOLUMES_DIR.mkdir(parents=True, exist_ok=True)
 settings.MESHES_DIR.mkdir(parents=True, exist_ok=True)
 settings.POINTCLOUDS_DIR.mkdir(parents=True, exist_ok=True)

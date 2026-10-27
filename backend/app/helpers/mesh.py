@@ -43,8 +43,10 @@ def convert_mesh_to_nxz(work_dir: Path, mesh_dir: Path, log) -> Path:
     cmd = [settings.NXSBUILD_BIN, str(temp_mesh_file), '-o', str(temp_nexus_file)]
 
     try:
-        subprocess.run(cmd, check=True)
+        subprocess.run(cmd, check=True, timeout=settings.CONVERTER_TIMEOUT_SECONDS or None)
         log(f"Successfully generated multi-resolution Nexus file: {temp_nexus_file}")
+    except subprocess.TimeoutExpired:
+        raise ValueError(f"Nexus compilation timed out after {settings.CONVERTER_TIMEOUT_SECONDS / 3600:g} hours (VG_CONVERTER_TIMEOUT_HOURS)")
     except subprocess.CalledProcessError as e:
         raise ValueError(f"Error during Nexus compilation: {e}")
     finally:
@@ -55,8 +57,11 @@ def convert_mesh_to_nxz(work_dir: Path, mesh_dir: Path, log) -> Path:
     log(f"Compressing Nexus file to {output_file}...")
     cmd = [settings.NXSCOMPRESS_BIN, str(temp_nexus_file), '-o', str(output_file)]
     try:
-        subprocess.run(cmd, check=True)
+        subprocess.run(cmd, check=True, timeout=settings.CONVERTER_TIMEOUT_SECONDS or None)
         log(f"Successfully compressed Nexus file: {output_file}")
+    except subprocess.TimeoutExpired:
+        output_file.unlink(missing_ok=True)
+        raise ValueError(f"Nexus compression timed out after {settings.CONVERTER_TIMEOUT_SECONDS / 3600:g} hours (VG_CONVERTER_TIMEOUT_HOURS)")
     except subprocess.CalledProcessError as e:
         output_file.unlink(missing_ok=True)  # written straight into the data folder: drop the partial file
         raise ValueError(f"Error during Nexus compilation: {e}")

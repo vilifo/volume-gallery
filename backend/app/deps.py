@@ -4,7 +4,7 @@ from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 from sqlmodel import Session, select
 
-from .database import get_session
+from .database import engine, get_session
 from .security import decode_token, password_fingerprint
 from .models import User, Role, ShareLink
 from .utils import get_utc_now
@@ -69,6 +69,26 @@ def get_current_user(
     if pwv is not None and pwv != password_fingerprint(user.password_hash):
         raise credentials_exc
     return user
+
+
+def file_token_revoked(payload: dict) -> bool:
+    """True when whatever a file token was issued for no longer holds: its share link was revoked or
+    has expired, or its account was disabled or deleted. (Tokens without either claim, issued before
+    this check existed, are never refused here.)"""
+    shr, uid = payload.get("shr"), payload.get("uid")
+    if shr is None and uid is None:
+        return False
+    with Session(engine) as session:
+        if shr is not None:
+            share = session.get(ShareLink, int(shr))
+            if share is None or share.revoked:
+                return True
+            exp = share.expires_at
+            if exp.tzinfo is None:
+                exp = exp.replace(tzinfo=timezone.utc)
+            return exp <= get_utc_now()
+        user = session.get(User, int(uid))
+        return user is None or user.disabled
 
 
 def require_roles(*roles: Role):

@@ -39,6 +39,7 @@ import os
 import re
 import secrets
 import shutil
+import threading
 import time
 from pathlib import Path
 from typing import NamedTuple
@@ -171,7 +172,7 @@ def stage_handed_file(kind: str, user_id: int, filename: str, nginx_file: str) -
     X-Upload-File header; only its name is used, so the two containers need not agree on
     the mount path) and renames it to a fresh upload id. Returns (upload_id, size)."""
     src = staging_dir(kind) / Path(nginx_file).name
-    if not _NGINX_TEMP_RE.match(src.name) or not src.is_file():
+    if not _NGINX_TEMP_RE.fullmatch(src.name) or not src.is_file():
         # Most likely cause in practice: nginx and the app do not share the directory, or nginx
         # writes it as another user than the app runs as (files are 0600, the directory 0700).
         print(f"[volume-gallery] cannot see the upload file nginx announced ({nginx_file!r} -> {src}). "
@@ -186,7 +187,7 @@ def stage_handed_file(kind: str, user_id: int, filename: str, nginx_file: str) -
 
 def claim_upload(upload_id: str, kind: str, user_id: int) -> StagedUpload:
     """The staged file behind an upload id returned by PUT /api/uploads/<kind>."""
-    m = _UPLOAD_ID_RE.match(upload_id or "")
+    m = _UPLOAD_ID_RE.fullmatch(upload_id or "")
     path = staging_dir(kind) / upload_id if m else None
     if not m or int(m["uid"]) != user_id or not path.is_file():
         raise HTTPException(status_code=400, detail="Unknown or expired upload — please upload the file again")
@@ -201,6 +202,43 @@ def accept_upload(upload, staged, dst: Path):
         move_file(staged.path, dst)
         return None
     return detach_upload(upload)
+
+
+# Staged uploads a create request has claimed but whose move into the scratch folder has not
+# happened yet (the move runs in the background task, see move_staged). Without this a second
+# create request naming the same ids would still find the files and claim them as well.
+_reserved: set = set()
+_reserved_lock = threading.Lock()
+
+
+def reserve_uploads(paths) -> None:
+    """Marks claimed staged files as taken until drop_staged() releases them. Raises the
+    same 400 as claim_upload() when another request already took one of them (or when the
+    list names a file twice)."""
+    paths = list(paths)
+    with _reserved_lock:
+        if len(set(paths)) != len(paths) or any(p in _reserved for p in paths):
+            raise HTTPException(status_code=400, detail="Unknown or expired upload — please upload the file again")
+        _reserved.update(paths)
+
+
+def move_staged(moves) -> None:
+    """Renames each reserved staged upload to its destination: `moves` is a list of
+    (staged path, destination). A create request hands this to its background task, so
+    the HTTP response does not wait for one rename per file (thousands for a TIFF stack,
+    and slow on a bind mount such as Docker Desktop's)."""
+    for src, dst in moves:
+        move_file(src, dst)
+
+
+def drop_staged(moves) -> None:
+    """Always the last step of a create request's staged uploads, whether or not move_staged()
+    ran or got through: deletes the ones that are still where they were staged and releases
+    the reservation. Safe to call more than once."""
+    for src, _dst in moves:
+        Path(src).unlink(missing_ok=True)
+    with _reserved_lock:
+        _reserved.difference_update(src for src, _dst in moves)
 
 
 _last_sweep = 0.0
@@ -224,7 +262,7 @@ def sweep_staging(force: bool = True) -> None:
             continue
         for child in base.iterdir():
             try:
-                if _NGINX_TEMP_RE.match(child.name) or not child.is_file():
+                if _NGINX_TEMP_RE.fullmatch(child.name) or not child.is_file():
                     continue
                 if now - child.stat().st_mtime > max_age:
                     child.unlink()

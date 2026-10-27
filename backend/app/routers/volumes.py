@@ -13,7 +13,7 @@ from sqlmodel import Session, select
 from ..database import get_session, engine
 from ..models import User, Role, Volume, VolumeAccess, Mesh, AssetStatus
 from ..schemas import VolumeRead, AssetStatusRead, AccessGrant, FileAccessUrl, UserRead
-from ..deps import get_current_user, require_editor
+from ..deps import file_token_revoked, get_current_user, require_editor
 from ..security import create_file_token, decode_token
 from ..config import settings
 from .. import workdir
@@ -156,6 +156,30 @@ def get_volume_status(
 
 # ---------- Editor: create / upload / delete ----------
 
+def _slice_upload_ids(manifest: Optional[List[str]], legacy: Optional[List[str]]) -> List[str]:
+    """The upload ids of a TIFF stack's slices, in stack order.
+
+    `manifest` is how the browser sends them: a repeated tiff_upload_manifest field whose
+    values are JSON arrays of ids (a few hundred each). One form field per slice, which is what
+    `legacy` (tiff_upload_ids) still is, does not work for big stacks: Starlette refuses a
+    multipart form with more than 1000 fields ("Too many fields"). A JSON chunk is a single
+    field, and chunking keeps each one below Starlette's 1 MB limit on the size of a field."""
+    if manifest and legacy:
+        raise HTTPException(status_code=400, detail="Provide only one of tiff_upload_manifest or tiff_upload_ids")
+    if not manifest:
+        return list(legacy or [])
+    ids: List[str] = []
+    for chunk in manifest:
+        try:
+            part = json.loads(chunk)
+        except ValueError:
+            part = None
+        if not isinstance(part, list) or not all(isinstance(i, str) for i in part):
+            raise HTTPException(status_code=400, detail="tiff_upload_manifest must be JSON arrays of upload ids")
+        ids.extend(part)
+    return ids
+
+
 @router.post("", response_model=VolumeRead)
 def create_volume(
     background_tasks: BackgroundTasks,
@@ -174,16 +198,18 @@ def create_volume(
     # Instead of the file fields above: ids returned by PUT /api/uploads/volume|mesh, for files
     # nginx has already written to disk (see routers/uploads.py). Order matters for tiff_upload_ids.
     tiff_upload_id: Optional[str] = Form(None),
-    tiff_upload_ids: Annotated[list[str], Form()] = None,
+    tiff_upload_ids: Annotated[list[str], Form()] = None,  # one field per slice: max ~900 slices, see _slice_upload_ids
+    tiff_upload_manifest: Annotated[list[str], Form()] = None,  # JSON arrays of slice ids, any number of slices
     mesh_upload_id: Optional[str] = Form(None),
     session: Session = Depends(get_session),
     editor: User = Depends(require_editor),
 ):
-    if not SLUG_RE.match(slug):
+    if not SLUG_RE.fullmatch(slug):  # fullmatch: a pattern ending in $ also matches before a trailing newline
         raise HTTPException(status_code=400, detail="Slug must be lowercase alphanumeric/-/_ (2-63 chars)")
 
+    slice_ids = _slice_upload_ids(tiff_upload_manifest, tiff_upload_ids)
     has_zip = tiff_zip is not None or bool(tiff_upload_id)
-    n_sources = int(has_zip) + int(bool(tiff_files)) + int(bool(tiff_upload_ids))
+    n_sources = int(has_zip) + int(bool(tiff_files)) + int(bool(slice_ids))
 
     if n_sources == 0:
         raise HTTPException(status_code=400, detail="Provide either tiff_zip or tiff_files")
@@ -202,31 +228,40 @@ def create_volume(
         raise HTTPException(status_code=400, detail="Spacing must be three numbers (x, y, z)")
     # Uploads nginx already wrote to disk: checked now, moved into place below.
     staged_zip = workdir.claim_upload(tiff_upload_id, "volume", editor.id) if tiff_upload_id else None
-    staged_files = [workdir.claim_upload(i, "volume", editor.id) for i in tiff_upload_ids or []]
+    staged_files = [workdir.claim_upload(i, "volume", editor.id) for i in slice_ids]
     staged_mesh = workdir.claim_upload(mesh_upload_id, "mesh", editor.id) if mesh_upload_id else None
 
     vol_dir = _volume_dir(slug)
-    vol_dir.mkdir(parents=True, exist_ok=False)
+    try:
+        vol_dir.mkdir(parents=True, exist_ok=False)
+    except FileExistsError:  # a folder without a database row (left over, or a concurrent request for the same slug)
+        raise HTTPException(status_code=409, detail="A volume with this slug already exists")
 
     source_kind = "tiff" if has_zip else "tiff-files"
     upload_fd = None
     upload_fds = []
+    # Staged uploads (files nginx already wrote to the processing directory) as (staged path,
+    # destination in the scratch folder). Nothing is renamed in this request: that is one
+    # filesystem operation per slice, so the response would wait for it. _process_upload does
+    # it, and the browser is released as soon as the last byte has arrived.
+    moves = []
     try:
         work_dir = workdir.prepare_work_dir("volumes", slug, vol_dir)
         thumbnail_name = write_thumbnail(vol_dir, *thumbnail) if thumbnail else None
         # A multipart upload is copied into the scratch folder by the background task, so
-        # the response isn't held up by it (see workdir.detach_upload). One that nginx already
-        # wrote to the processing directory is simply renamed into the scratch folder here.
+        # the response isn't held up by it (see workdir.detach_upload).
         if has_zip:
-            upload_fd = workdir.accept_upload(tiff_zip, staged_zip, work_dir / ZIP_NAME)
+            if staged_zip is not None:
+                moves = [(staged_zip.path, work_dir / ZIP_NAME)]
+            else:
+                upload_fd = workdir.detach_upload(tiff_zip)
         elif staged_files:
-            upload_fds = [
-                workdir.accept_upload(None, staged, work_dir / f"flice_{i:05d}.tiff")
-                for i, staged in enumerate(staged_files)
-            ]
+            moves = [(staged.path, work_dir / f"flice_{i:05d}.tiff") for i, staged in enumerate(staged_files)]
         else:
             upload_fds = [workdir.detach_upload(f) for f in tiff_files]
+        workdir.reserve_uploads([src for src, _dst in moves])
     except Exception as exc:  # noqa: BLE001 - surface save errors to the caller
+        workdir.drop_staged(moves)
         if upload_fd is not None:
             workdir.close_detached(upload_fd)
         for fd in upload_fds:
@@ -255,6 +290,7 @@ def create_volume(
         try:
             mesh = attach_mesh_to_volume(session, volume, mesh_file, editor, background_tasks, staged_mesh)
         except Exception:
+            workdir.drop_staged(moves)
             if upload_fd is not None:
                 workdir.close_detached(upload_fd)
             for fd in upload_fds:
@@ -272,20 +308,24 @@ def create_volume(
         source_kind,
         upload_fd if has_zip else upload_fds,
         spacing,
+        moves,
     )
 
     return _volume_read(volume, mesh)
 
 
-def _process_upload(volume_id: int, vol_dir_str: str, source_kind: str, upload_fd: int | List[int], spacing=(1,1,1)) -> None:
+def _process_upload(volume_id: int, vol_dir_str: str, source_kind: str, upload_fd: int | List[int], spacing=(1,1,1),
+                    staged_moves=()) -> None:
     """Runs after create_volume's response has already been sent. Opens its
     own DB session — the request-scoped one from create_volume is closed by
-    the time this runs."""
+    the time this runs. `staged_moves`: the staged uploads still to be renamed into the
+    scratch folder (workdir.move_staged)."""
     vol_dir = Path(vol_dir_str)
     with Session(engine) as session:
         volume = session.get(Volume, volume_id)
         if volume is None:
             workdir.close_detached(upload_fd)
+            workdir.drop_staged(staged_moves)
             return
 
         def log(message: str) -> None:
@@ -297,6 +337,7 @@ def _process_upload(volume_id: int, vol_dir_str: str, source_kind: str, upload_f
         work_dir = _work_dir(volume.slug)
         try:
             log("Saving upload")
+            workdir.move_staged(staged_moves)  # renames only: the bytes are already on this filesystem
             if source_kind == "tiff":
                 zip_path = work_dir / ZIP_NAME
                 workdir.save_detached(upload_fd, zip_path)
@@ -315,6 +356,7 @@ def _process_upload(volume_id: int, vol_dir_str: str, source_kind: str, upload_f
             log(f"Failed: {exc}")
         finally:
             workdir.discard_job("volumes", volume.slug)  # success or failure: scratch is never kept
+            workdir.drop_staged(staged_moves)  # whatever a failure left unmoved, and the reservation
         session.add(volume)
         session.commit()
         _invalidate_volume_cache(volume_id)
@@ -517,13 +559,20 @@ def volume_data_access_url(
             status_code=400,
             detail=f"min_level must be less than this volume's {volume.num_lod_levels} levels",
         )
+    # A share link's resolution cap is enforced here, not left to the viewer: whatever min_level
+    # the caller sends (or leaves out), the token never lets through a finer level than the share.
+    scope = getattr(user, "_share_scope", None)
+    if scope is not None and scope.get("min_lod"):
+        min_level = max(min_level or 0, scope["min_lod"])
+        if volume.num_lod_levels:
+            min_level = min(min_level, volume.num_lod_levels - 1)
     base = str(request.base_url).rstrip("/")
     ver_input = f"{volume.id}:{volume.created_at.isoformat()}:{volume.slug}"
     version = hashlib.sha256(ver_input.encode("utf-8")).hexdigest()[:16]
 
     vol_dir = _volume_dir(volume.slug).resolve()
     if volume_meta_path(vol_dir).is_file():
-        token = create_file_token(subject=user.username, asset_id=volume_id, kind="sharded", min_lod=min_level)
+        token = create_file_token(subject=user.username, user=user, asset_id=volume_id, kind="sharded", min_lod=min_level)
         return FileAccessUrl(
             url=f"{base}/api/volumes/{volume_id}/dataset/{token}",
             expires_in_minutes=settings.FILE_TOKEN_EXPIRE_MINUTES,
@@ -531,6 +580,13 @@ def volume_data_access_url(
         )
     else:
         raise HTTPException(status_code=404, detail="Volume not found")
+
+
+def _require_download(user: User) -> None:
+    """A share link without can_download may look at an asset but not take the original files."""
+    scope = getattr(user, "_share_scope", None)
+    if scope is not None and not scope.get("can_download"):
+        raise HTTPException(status_code=403, detail="This share link does not allow downloads")
 
 
 @router.get("/{volume_id}/mesh-access-url", response_model=FileAccessUrl)
@@ -544,7 +600,8 @@ def mesh_access_url(
         raise HTTPException(status_code=404, detail="Volume not found")
     if not volume.has_mesh:
         raise HTTPException(status_code=404, detail="This volume has no mesh")
-    token = create_file_token(subject=user.username, asset_id=volume_id, kind="volume-mesh-download")
+    _require_download(user)
+    token = create_file_token(subject=user.username, user=user, asset_id=volume_id, kind="volume-mesh-download")
     return FileAccessUrl(
         url=f"/api/volumes/{volume_id}/mesh-file/{token}",
         expires_in_minutes=settings.FILE_TOKEN_EXPIRE_MINUTES,
@@ -568,7 +625,7 @@ def mesh_view_url(
             status_code=409,
             detail="Mesh is still processing" if mesh.status == AssetStatus.processing else "Mesh processing failed — see the volume's mesh status",
         )
-    token = create_file_token(subject=user.username, asset_id=volume_id, kind="volume-mesh-view")
+    token = create_file_token(subject=user.username, user=user, asset_id=volume_id, kind="volume-mesh-view")
     base = str(request.base_url).rstrip("/")
     return FileAccessUrl(
         url=f"{base}/api/volumes/{volume_id}/mesh-view-file/{token}",
@@ -597,7 +654,13 @@ def slice_access_url(
                 else "Volume processing failed — see its status log"
             ),
         )
-    token = create_file_token(subject=user.username, asset_id=volume_id, kind="slice")
+    # Same cap as volume-data-access-url: the share's min_lod is carried by the token and
+    # applied in _slice_store (a guest asking for level 0 gets the share's coarsest allowed level).
+    scope = getattr(user, "_share_scope", None)
+    slice_min_lod = scope["min_lod"] if scope is not None and scope.get("min_lod") else None
+    if slice_min_lod is not None and volume.num_lod_levels:
+        slice_min_lod = min(slice_min_lod, volume.num_lod_levels - 1)
+    token = create_file_token(subject=user.username, user=user, asset_id=volume_id, kind="slice", min_lod=slice_min_lod)
     return FileAccessUrl(
         url=f"/api/volumes/{volume_id}/slices/{token}/",
         expires_in_minutes=settings.FILE_TOKEN_EXPIRE_MINUTES,
@@ -605,7 +668,8 @@ def slice_access_url(
 
 
 def _slice_store(volume_id: int, token: str, level: int, session: Session):
-    _check_file_token(token, volume_id, "slice")
+    payload = _check_file_token(token, volume_id, "slice")
+    level = max(level, int(payload.get("min_lod") or 0))  # a share link's resolution cap
     volume = session.get(Volume, volume_id)
     if not volume:
         raise HTTPException(status_code=404, detail="Volume not found")
@@ -685,6 +749,7 @@ def _check_file_token(token: str, volume_id: int, kind: str) -> dict:
         or payload.get("type") != "file"
         or payload.get("kind") != kind
         or payload.get("vol") != volume_id
+        or file_token_revoked(payload)
     ):
         raise HTTPException(status_code=403, detail="Invalid or expired link")
     return payload
@@ -700,7 +765,7 @@ async def serve_sharded_file(volume_id: int, token: str, path: str):
     """
     clean_path = _validate_rel_path(path)
     payload = _check_file_token_cached(token, volume_id, "sharded")
-    match = _SHARDED_FILE_RE.match(clean_path)
+    match = _SHARDED_FILE_RE.fullmatch(clean_path)
     if not match:
         raise HTTPException(status_code=404, detail="Not found")
     slug, data_rel, data_root = _get_volume_shard_loc(volume_id)

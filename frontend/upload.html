@@ -375,10 +375,16 @@
     const fileProgressList = document.getElementById("file-progress-list");
 
     let activeUploadFiles = [];
+    let activeUploadTotal = 1;
+    // A row per file is thousands of DOM nodes for a TIFF stack, all rewritten on every progress
+    // event of every file in flight, which slows the page down (and so the upload). Past this many
+    // files only the overall bar is shown.
+    const FILE_LIST_MAX = 50;
 
     function initFileProgressList(files) {
-        activeUploadFiles = files;
-        if (!files || files.length === 0) {
+        activeUploadFiles = files || [];
+        activeUploadTotal = activeUploadFiles.reduce((acc, f) => acc + (f.size || 1), 0) || 1;
+        if (!files || files.length === 0 || files.length > FILE_LIST_MAX) {
             fileProgressList.style.display = "none";
             fileProgressList.innerHTML = "";
             return;
@@ -399,7 +405,11 @@
 
     function updateFileProgressList(fraction) {
         if (!activeUploadFiles || activeUploadFiles.length === 0) return;
-        const totalSize = activeUploadFiles.reduce((acc, f) => acc + (f.size || 1), 0) || 1;
+        if (activeUploadFiles.length > FILE_LIST_MAX) {
+            if (fraction < 1) progressLabel.textContent = `Uploading ${activeUploadFiles.length} files\u2026`;
+            return;
+        }
+        const totalSize = activeUploadTotal;
         const uploadedBytes = fraction * totalSize;
         let cumulative = 0;
         let currentIdx = 0;

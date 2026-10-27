@@ -27,8 +27,11 @@ def convert_pointcloud(source_path: Path, output_dir: Path, log=None) -> None:
     log("Building Potree octree from point cloud...")
     cmd = settings.POTREE_CONVERTER_BIN, str(source_path.resolve()), "-o", str(output_dir.resolve())
     try:
-        subprocess.run(cmd, check=True)
+        subprocess.run(cmd, check=True, timeout=settings.CONVERTER_TIMEOUT_SECONDS or None)
         log(f"Successfully generated potree folder: {output_dir}")
+    except subprocess.TimeoutExpired:
+        shutil.rmtree(output_dir, ignore_errors=True)
+        raise ValueError(f"Potree conversion timed out after {settings.CONVERTER_TIMEOUT_SECONDS / 3600:g} hours (VG_CONVERTER_TIMEOUT_HOURS)")
     except subprocess.CalledProcessError as e:
         shutil.rmtree(output_dir, ignore_errors=True)
         raise ValueError(f"Error during Potree conversion: {e}")
