@@ -14,5 +14,5 @@ dask==2026.8.0
 isal==1.8.0
 zstandard==0.25.0
 # --- Mesh and point cloud processing (backend/app/helpers/mesh.py) ---
-trimesh==5.1.1
+trimesh==5.2.0
 
