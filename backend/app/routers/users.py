@@ -1,9 +1,11 @@
 from typing import List
 from fastapi import APIRouter, Depends, HTTPException
-from sqlmodel import Session, select
+from sqlmodel import Session, delete, select, update
 
 from ..database import get_session
-from ..models import User, Role
+from ..models import (
+    User, Role, Volume, VolumeAccess, Mesh, MeshAccess, PointCloud, PointCloudAccess, ShareLink,
+)
 from ..schemas import UserCreate, UserRead, UserUpdate, PasswordChange, Token
 from ..security import (
     hash_password, verify_password, validate_new_password, create_access_token, password_fingerprint,
@@ -85,6 +87,15 @@ def delete_user(
     user = session.get(User, user_id)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
+    # SQLite does not enforce the foreign keys, so rows that point at the user would stay behind:
+    # the user's own grants go; for the rest (who granted, who created) the pointer is cleared and
+    # the grant, asset or share link stays.
+    for access in (VolumeAccess, MeshAccess, PointCloudAccess):
+        session.exec(delete(access).where(access.user_id == user_id))
+        session.exec(update(access).where(access.granted_by == user_id).values(granted_by=None))
+    for asset in (Volume, Mesh, PointCloud):
+        session.exec(update(asset).where(asset.created_by == user_id).values(created_by=None))
+    session.exec(update(ShareLink).where(ShareLink.created_by == user_id).values(created_by=None))
     session.delete(user)
     session.commit()
     return {"ok": True}

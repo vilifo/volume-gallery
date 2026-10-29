@@ -63,6 +63,8 @@ export function clearSession() {
     localStorage.removeItem(ROLE_KEY);
     localStorage.removeItem(USER_KEY);
     clearShareSession();
+    // The volume bricks the service worker (js/sw.js) cached belong to whoever was signed in.
+    try { navigator.serviceWorker?.controller?.postMessage({ type: "CLEAR_BRICK_CACHE" }); } catch (_) { /* no worker */ }
 }
 
 // ---- branding (branding/branding.toml on the server; see the README) ----

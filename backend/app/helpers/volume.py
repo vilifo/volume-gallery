@@ -785,29 +785,96 @@ def histogram_path(vol_dir: Path) -> Path:
     return vol_dir / HISTOGRAM_NAME
 
 
+def _block_bincount(block: np.ndarray, n_values: int) -> np.ndarray:
+    """Single-pass exact value counting for 8-bit and 16-bit integer chunks."""
+    u_dtype = np.dtype(f"{block.dtype.byteorder}u{block.dtype.itemsize}")
+    counts = np.bincount(block.view(u_dtype).ravel(), minlength=n_values)
+    return counts.reshape((1,) * block.ndim + (n_values,))
+
+
+def _block_finite_minmax(block: np.ndarray) -> np.ndarray:
+    """Single-allocation finite (min, max) per chunk for floating-point volumes."""
+    out = np.empty((1,) * block.ndim + (2,), dtype=block.dtype)
+    if block.size == 0:
+        out[..., 0] = np.inf
+        out[..., 1] = -np.inf
+        return out
+    lo = block.min()
+    hi = block.max()
+    # NaN and +-inf always propagate to min() or max(). Only allocate a
+    # filtered array if this specific chunk actually contains non-finite values.
+    if not (np.isfinite(lo) and np.isfinite(hi)):
+        finite = block[np.isfinite(block)]
+        if finite.size == 0:
+            lo, hi = block.dtype.type(np.inf), block.dtype.type(-np.inf)
+        else:
+            lo, hi = finite.min(), finite.max()
+    out[..., 0] = lo
+    out[..., 1] = hi
+    return out
+
+
 def compute_histogram(dask_array: da.Array, hist_path: Path, bins: int = HISTOGRAM_BINS) -> dict:
     """Computes the histogram of the finest level and writes it to hist_path (atomically).
-    Reads the volume twice (range, then counts). Returns what was written."""
-    is_float = np.issubdtype(dask_array.dtype, np.floating)
+    Uses a single bincount pass for 8/16-bit integers, or two passes for floats/32-bit+ ints."""
+    dtype = dask_array.dtype
+    is_float = np.issubdtype(dtype, np.floating)
+    is_small_int = np.issubdtype(dtype, np.integer) and dtype.itemsize <= 2
+    axes = tuple(range(dask_array.ndim))
 
     with dask.config.set(scheduler="threads", num_workers=max(1, settings.HISTOGRAM_THREADS)):
-        if is_float:  # NaN / +-inf voxels are not data
-            finite = da.isfinite(dask_array)
-            lo, hi = da.min(da.where(finite, dask_array, np.inf)), da.max(da.where(finite, dask_array, -np.inf))
+        if is_small_int:
+            # --- Fast path: 1 pass over the volume via bincount ---
+            info = np.iinfo(dtype)
+            n_values = info.max - info.min + 1  # 256 (8-bit) or 65536 (16-bit)
+            block_counts = da.map_blocks(
+                _block_bincount,
+                dask_array,
+                n_values=n_values,
+                dtype=np.int64,
+                chunks=((1,) * dask_array.ndim) + ((n_values,),),
+                new_axis=dask_array.ndim,
+            )
+            exact_counts = block_counts.sum(axis=axes).compute()
+            if info.min < 0:
+                # Viewing signed int8/int16 as uint8/uint16 places negative values in the upper half
+                exact_counts = np.roll(exact_counts, -info.min)
+
+            nz = np.flatnonzero(exact_counts)
+            vmin = dtype.type(info.min + int(nz[0]))
+            vmax = dtype.type(info.min + int(nz[-1]))
+            if vmin == vmax:
+                counts = np.zeros(bins, dtype=np.int64)
+                counts[0] = int(exact_counts[nz[0]])
+            else:
+                vals = np.arange(int(vmin), int(vmax) + 1, dtype=dtype)
+                weights = exact_counts[nz[0] : nz[-1] + 1]
+                counts, _ = np.histogram(vals, bins=bins, range=(vmin, vmax), weights=weights)
         else:
-            lo, hi = da.min(dask_array), da.max(dask_array)
-        vmin, vmax = dask.compute(lo, hi)
-        if is_float and not (np.isfinite(vmin) and np.isfinite(vmax)):
-            raise ValueError("the volume has no finite values")
-        if vmin == vmax:  # constant volume: one spike, np.histogram would need a range
-            counts = np.zeros(bins, dtype=np.int64)
-            counts[0] = int(np.prod(dask_array.shape))
-        else:
-            counts = da.histogram(dask_array, bins=bins, range=(vmin, vmax))[0].compute()
+            # --- 2-pass path for floats and 32/64-bit integers ---
+            if is_float:
+                mm = da.map_blocks(
+                    _block_finite_minmax,
+                    dask_array,
+                    dtype=dtype,
+                    chunks=((1,) * dask_array.ndim) + ((2,),),
+                    new_axis=dask_array.ndim,
+                )
+                vmin, vmax = dask.compute(mm[..., 0].min(axis=axes), mm[..., 1].max(axis=axes))
+                if not (np.isfinite(vmin) and np.isfinite(vmax)):
+                    raise ValueError("the volume has no finite values")
+            else:
+                vmin, vmax = dask.compute(da.min(dask_array), da.max(dask_array))
+
+            if vmin == vmax:
+                counts = np.zeros(bins, dtype=np.int64)
+                counts[0] = int(np.prod(dask_array.shape))
+            else:
+                counts = da.histogram(dask_array, bins=bins, range=(vmin, vmax))[0].compute()
 
     result = {
         "version": 1,
-        "dtype": str(dask_array.dtype),
+        "dtype": str(dtype),
         "min": vmin.item(),
         "max": vmax.item(),
         "bins": bins,
