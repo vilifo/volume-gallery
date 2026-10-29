@@ -439,7 +439,7 @@
   <div class="app-shell" id="shell"></div>
 
   <script type="module">
-    import { api, requireLogin, getRole, getUsername, renderShell, wireLogout } from "/js/api.js?v=help2";
+    import { api, requireLogin, getRole, getUsername, renderShell, wireLogout } from "/js/api.js?v=sw1";
     import { syncHistogram } from "/js/histogram.js?v=hist1";
     import { KilnViewer } from "/vendor/kiln-render/lib/kiln-render.js?v=atlas2";
     import {
@@ -452,6 +452,7 @@
     import { setupSliceIntegration } from "/js/slice/slice-integration.js?v=slice2";
     import { niceScaleLength } from "/js/scalebar.js?v=sb1";
     import { toggleHelpPanel } from "/js/help.js?v=help2";
+    import { startBrickCache, watchDataAccess, resetDataAccessWatch } from "/js/data-access.js?v=sw1";
 
     requireLogin();
     const role = getRole();
@@ -509,16 +510,6 @@
         };
       }
       return { ok: true };
-    }
-
-    async function retireLegacyServiceWorker() {
-      if (!("serviceWorker" in navigator)) return;
-      try {
-        const registrations = await navigator.serviceWorker.getRegistrations();
-        await Promise.all(registrations.filter((r) =>
-          [r.active, r.waiting, r.installing].some((w) => w?.scriptURL?.includes("/js/sw.js"))
-        ).map((r) => r.unregister()));
-      } catch (err) { console.warn("Could not retire legacy volume cache worker:", err); }
     }
 
     // ------------------------------------------------------------------
@@ -830,7 +821,11 @@
           histogramPromise = histogramPromise || api.volumeHistogram(volumeId); // fetched once, in parallel
           const access = await api.volumeDataAccessUrl(volumeId, minLevel);
           if (token !== loadToken) return;
-          await retireLegacyServiceWorker();
+          // The brick cache worker (js/sw.js). On the first visit this waits until it controls the page,
+          // so the first load is cached too; it never blocks for long or fails the load.
+          await startBrickCache();
+          watchDataAccess(volumeId); // asks for a reload when the data link expires
+          resetDataAccessWatch();    // this is a fresh link: allow the notice again
 
           if (token !== loadToken) return;
 

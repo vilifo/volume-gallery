@@ -76,6 +76,16 @@ def _check_file_token_cached(token: str, volume_id: int, kind: str) -> dict:
     return payload
 
 
+def _volume_level_count(volume: Volume) -> Optional[int]:
+    """How many levels the volume really has, read from its volume.json. Volume.num_lod_levels is not
+    that: it stores the number of the highest level (maxLod), one less than the count."""
+    try:
+        meta = json.loads(volume_meta_path(_volume_dir(volume.slug)).read_bytes())
+        return len(meta["levels"]) or None
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
 def _volume_dir(slug: str) -> Path:
     return settings.VOLUMES_DIR / slug
 
@@ -564,15 +574,16 @@ def volume_data_access_url(
     scope = getattr(user, "_share_scope", None)
     if scope is not None and scope.get("min_lod"):
         min_level = max(min_level or 0, scope["min_lod"])
-        if volume.num_lod_levels:
-            min_level = min(min_level, volume.num_lod_levels - 1)
+        levels = _volume_level_count(volume)
+        if levels:  # a cap past the coarsest level means the coarsest level
+            min_level = min(min_level, levels - 1)
     base = str(request.base_url).rstrip("/")
     ver_input = f"{volume.id}:{volume.created_at.isoformat()}:{volume.slug}"
     version = hashlib.sha256(ver_input.encode("utf-8")).hexdigest()[:16]
 
     vol_dir = _volume_dir(volume.slug).resolve()
     if volume_meta_path(vol_dir).is_file():
-        token = create_file_token(subject=user.username, user=user, asset_id=volume_id, kind="sharded", min_lod=min_level)
+        token = create_file_token(subject=user.username, user=user, asset_id=volume_id, kind="sharded", min_lod=min_level, ver=version)
         return FileAccessUrl(
             url=f"{base}/api/volumes/{volume_id}/dataset/{token}",
             expires_in_minutes=settings.FILE_TOKEN_EXPIRE_MINUTES,
@@ -658,8 +669,9 @@ def slice_access_url(
     # applied in _slice_store (a guest asking for level 0 gets the share's coarsest allowed level).
     scope = getattr(user, "_share_scope", None)
     slice_min_lod = scope["min_lod"] if scope is not None and scope.get("min_lod") else None
-    if slice_min_lod is not None and volume.num_lod_levels:
-        slice_min_lod = min(slice_min_lod, volume.num_lod_levels - 1)
+    levels = _volume_level_count(volume) if slice_min_lod is not None else None
+    if levels:
+        slice_min_lod = min(slice_min_lod, levels - 1)
     token = create_file_token(subject=user.username, user=user, asset_id=volume_id, kind="slice", min_lod=slice_min_lod)
     return FileAccessUrl(
         url=f"/api/volumes/{volume_id}/slices/{token}/",

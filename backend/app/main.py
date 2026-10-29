@@ -91,7 +91,7 @@ app.include_router(uploads.router)
 # Serve the frontend (single-page-ish static site) at the root.
 @app.get("/js/sw.js", include_in_schema=False)
 def service_worker():
-    """The chunk-cache service worker lives in /js but is registered with scope "/" (it has to
+    """The brick-cache service worker lives in /js but is registered with scope "/" (it has to
     control the viewer page); browsers refuse that unless the script is served with this header."""
     return FileResponse(
         Path(settings.FRONTEND_DIR) / "js" / "sw.js",

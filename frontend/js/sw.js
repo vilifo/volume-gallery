@@ -1,128 +1,140 @@
-// Service Worker for caching immutable OME-Zarr chunks across page loads
-// (where the short-lived JWT in the URL path changes on every reload).
+// Service worker: keeps a volume's bricks in the browser between page loads.
+//
+// kiln-render reads a volume with one Range request per brick into lodN.bin (plus lodN_index.json),
+// all under /api/volumes/{id}/dataset/{token}/. The token in that URL is short-lived and different on
+// every page load, so the browser's own HTTP cache never gets a hit (and it does not store partial
+// responses anyway). This worker stores what it fetches under a key made of the volume, its version
+// and the file + byte range instead, so a reload is served from disk.
+//
+// What is stored: lodN.bin ranges (the 206 is kept as a plain 200 entry and rebuilt on a hit) and
+// lodN_index.json. volume.json is never touched: the server rewrites it per token (a share link's
+// resolution cap), so every page load asks for it, and that request also proves the token is good.
+//
+// A cached brick is only handed out while the token that asks for it is accepted by the server:
+// the first hit of a token (and then one every VERIFY_TTL_MS) re-asks the server about it, so a
+// revoked share link or a disabled account stops working here too, as it does for the network path.
 
-const CACHE_NAME = "vg-zarr-chunks-v1";
-// Match /api/volumes/{id}/dataset.ome.zarr/{token}/{path}
-const ZARR_URL_RE = /^\/api\/volumes\/(\d+)\/dataset\.ome\.zarr\/[^/]+\/(.+)$/;
+const CACHE_NAME = "vg-brick-cache-v1";
+const OLD_CACHES = ["vg-zarr-chunks-v1"]; // from the OME-Zarr days: unreadable now, so deleted on activation
 
-// Maps volumeId (string) -> version hash supplied by volume-data-access-url
-const volumeVersions = new Map();
+// /api/volumes/{id}/dataset/{token}/{lodN.bin | lodN_index.json}
+const URL_RE = /^\/api\/volumes\/(\d+)\/dataset\/([^/]+)\/(lod(\d+)\.bin|lod(\d+)_index\.json)$/;
 
-// The service worker is stopped after ~30 s idle and restarted by the next fetch, which empties
-// volumeVersions. Without persisting it, chunks fetched after such a restart were looked up (and
-// stored) under the "default" version, missing everything cached earlier. The map is therefore
-// kept in the cache itself and reloaded on demand.
-const META_URL = `${self.location.origin}/__vg_zarr_cache__/meta/versions`;
-let versionsLoaded = null;
-
-function loadVersions() {
-    if (!versionsLoaded) {
-        versionsLoaded = (async () => {
-            try {
-                const cache = await caches.open(CACHE_NAME);
-                const r = await cache.match(META_URL);
-                if (!r) return;
-                const stored = await r.json();
-                for (const [k, v] of Object.entries(stored)) {
-                    if (!volumeVersions.has(k)) volumeVersions.set(k, String(v));
-                }
-            } catch (_) {
-            }
-        })();
-    }
-    return versionsLoaded;
-}
-
-async function saveVersions() {
-    try {
-        const cache = await caches.open(CACHE_NAME);
-        await cache.put(META_URL, new Response(JSON.stringify(Object.fromEntries(volumeVersions)), {
-            headers: {"Content-Type": "application/json"},
-        }));
-    } catch (_) {
-    }
-}
-
-// Eviction hysteresis: evict oldest entries when storage exceeds high-water mark
-const MAX_CACHE_BYTES_FALLBACK = 512 * 1024 * 1024; // 512 MB fallback if estimate() unavailable
+const VERIFY_TTL_MS = 45 * 1000;
+const MAX_ENTRIES = 40000;
+const MAX_CACHE_BYTES_FALLBACK = 512 * 1024 * 1024; // when storage.estimate() is unavailable
 const QUOTA_FRACTION_LIMIT = 0.5;
-let opsSinceCheck = 0;
-let entryCount = null; // chunk entries in the cache; counted once, then tracked
-let evictionInFlight = null;
+const MAX_CACHE_BYTES = 2 * 1024 * 1024 * 1024;
 
 self.addEventListener("install", () => {
     self.skipWaiting();
 });
 
 self.addEventListener("activate", (event) => {
-    event.waitUntil(self.clients.claim());
+    event.waitUntil((async () => {
+        await Promise.all(OLD_CACHES.map((name) => caches.delete(name)));
+        await self.clients.claim();
+    })());
 });
 
+// The page asks for this on sign-out: what is cached belongs to whoever was signed in.
 self.addEventListener("message", (event) => {
     const data = event.data;
-    if (!data || typeof data !== "object") return;
-
-    if (data.type === "SET_VOLUME_VERSION" && data.volumeId != null && data.version) {
-        const port = event.ports && event.ports[0];
-        event.waitUntil((async () => {
-            await loadVersions();
-            const volId = String(data.volumeId);
-            const version = String(data.version);
-            const prev = volumeVersions.get(volId);
-            volumeVersions.set(volId, version);
-            if (prev !== version) {
-                await saveVersions();
-                if (prev) await purgeVolumeStaleVersions(volId, version);
-            }
-            if (port) port.postMessage({ok: true});
-        })());
-    } else if (data.type === "CLEAR_ZARR_CACHE") {
-        volumeVersions.clear();
+    if (data && data.type === "CLEAR_BRICK_CACHE") {
+        verified.clear();
         entryCount = null;
         event.waitUntil(caches.delete(CACHE_NAME));
     }
 });
 
-async function purgeVolumeStaleVersions(volumeId, keepVersion) {
+// The token is a JWT; its payload says which volume version the bricks belong to (ver), how far
+// down the share link allows (min_lod) and when it runs out (exp). Reading it here is only for
+// choosing a cache key and skipping hopeless requests: the server is the one that checks it.
+function claimsOf(token) {
     try {
-        const cache = await caches.open(CACHE_NAME);
-        const keys = await cache.keys();
-        const prefix = `${self.location.origin}/__vg_zarr_cache__/v/${volumeId}/`;
-        const keepPrefix = `${prefix}${keepVersion}/`;
-        await Promise.all(
-            keys
-                .filter((req) => req.url.startsWith(prefix) && !req.url.startsWith(keepPrefix))
-                .map((req) => cache.delete(req))
-        );
+        const b64 = token.split(".")[1].replace(/-/g, "+").replace(/_/g, "/");
+        return JSON.parse(atob(b64.padEnd(Math.ceil(b64.length / 4) * 4, "=")));
     } catch (_) {
+        return null;
     }
 }
 
+function keyFor(volumeId, ver, file, range) {
+    const suffix = range ? `?r=${range[0]}-${range[1]}` : "";
+    return new Request(`${self.location.origin}/__vg_bricks__/${volumeId}/${ver}/${file}${suffix}`);
+}
+
+// ---- is this token still accepted by the server? ----
+
+const verified = new Map();  // token -> time (ms) until which it counts as accepted
+const inflight = new Map();  // token -> pending check, shared by concurrent requests
+
+function markValid(token) {
+    const now = Date.now();
+    verified.set(token, now + VERIFY_TTL_MS);
+    if (verified.size > 500) {
+        for (const [t, until] of verified) if (until <= now) verified.delete(t);
+    }
+}
+
+// true: accepted; false: refused (revoked, expired, volume gone); null: could not ask (offline)
+function tokenStillValid(volumeId, token) {
+    const until = verified.get(token);
+    if (until && until > Date.now()) return Promise.resolve(true);
+    let pending = inflight.get(token);
+    if (!pending) {
+        pending = (async () => {
+            try {
+                const r = await fetch(`/api/volumes/${volumeId}/dataset/${token}/volume.json`, {cache: "no-store"});
+                if (r.ok) {
+                    markValid(token);
+                    return true;
+                }
+                if (r.status === 401 || r.status === 403 || r.status === 404) {
+                    verified.delete(token);
+                    return false;
+                }
+                return null;
+            } catch (_) {
+                return null;
+            } finally {
+                inflight.delete(token);
+            }
+        })();
+        inflight.set(token, pending);
+    }
+    return pending;
+}
+
+// ---- the cache ----
+
+let opsSinceCheck = 0;
+let entryCount = null; // entries in the cache; counted once, then tracked
+let evictionInFlight = null;
+
+// Oldest entries go first when the cache gets too big (cache.keys() lists them in insertion order).
 async function maybeEvict() {
     if (++opsSinceCheck < 50) return;
     opsSinceCheck = 0;
     if (evictionInFlight) return evictionInFlight;
-
     evictionInFlight = (async () => {
         try {
             let overLimit = false;
             if (navigator.storage && navigator.storage.estimate) {
                 const {usage = 0, quota = 0} = await navigator.storage.estimate();
-                const cap = quota > 0 ? Math.min(quota * QUOTA_FRACTION_LIMIT, 2 * 1024 * 1024 * 1024) : MAX_CACHE_BYTES_FALLBACK;
+                const cap = quota > 0 ? Math.min(quota * QUOTA_FRACTION_LIMIT, MAX_CACHE_BYTES) : MAX_CACHE_BYTES_FALLBACK;
                 overLimit = usage > cap;
             }
-            // cache.keys() walks every entry, so it is only called when needed (first run, to
-            // count the entries, or when a limit is hit) rather than on every check.
-            if (!overLimit && entryCount !== null && entryCount <= 8000) return;
+            // cache.keys() walks every entry, so it only runs to count them the first time
+            // or when a limit has been hit.
+            if (!overLimit && entryCount !== null && entryCount <= MAX_ENTRIES) return;
             const cache = await caches.open(CACHE_NAME);
-            const keys = (await cache.keys()).filter((req) => req.url !== META_URL);
+            const keys = await cache.keys();
             entryCount = keys.length;
-            if (overLimit || keys.length > 8000) {
-                // Delete oldest ~20% of cached chunk entries (Cache API keys() returns insertion order)
+            if (overLimit || keys.length > MAX_ENTRIES) {
                 const removeCount = Math.max(1, Math.floor(keys.length * 0.2));
-                for (let i = 0; i < removeCount; i++) {
-                    await cache.delete(keys[i]);
-                }
+                for (let i = 0; i < removeCount; i++) await cache.delete(keys[i]);
+                entryCount -= removeCount;
             }
         } catch (_) {
         } finally {
@@ -132,55 +144,86 @@ async function maybeEvict() {
     return evictionInFlight;
 }
 
-// Tells the open pages that the access token in a chunk URL was rejected (expired), so they can
-// ask the user to reload. Chunk requests come in thousands: at most one notice per volume per 3 s.
-const lastAccessNotice = new Map();
+// Keeps a network response if it is exactly what was asked for. A 206 is stored as a 200 (the Cache
+// API refuses partial responses); the total size of the file rides along for the Content-Range.
+async function store(cache, key, resp, range) {
+    const headers = new Headers({"Content-Type": resp.headers.get("Content-Type") || "application/octet-stream"});
+    if (range) {
+        const m = /^bytes (\d+)-(\d+)\/(\d+|\*)$/.exec(resp.headers.get("Content-Range") || "");
+        if (resp.status !== 206 || !m || Number(m[1]) !== range[0] || Number(m[2]) !== range[1]) return;
+        headers.set("X-VG-Total", m[3]);
+    } else if (resp.status !== 200) {
+        return;
+    }
+    await cache.put(key, new Response(resp.body, {status: 200, headers}));
+    if (entryCount !== null) entryCount++;
+    await maybeEvict();
+}
 
-async function notifyAccessDenied(volumeId) {
-    const now = Date.now();
-    if (now - (lastAccessNotice.get(volumeId) || 0) < 3000) return;
-    lastAccessNotice.set(volumeId, now);
-    const windows = await self.clients.matchAll({type: "window", includeUncontrolled: true});
-    for (const client of windows) client.postMessage({type: "ZARR_ACCESS_DENIED", volumeId});
+function fromCache(hit, range) {
+    if (!range) return hit;
+    return new Response(hit.body, {
+        status: 206,
+        headers: {
+            "Content-Type": hit.headers.get("Content-Type") || "application/octet-stream",
+            "Content-Range": `bytes ${range[0]}-${range[1]}/${hit.headers.get("X-VG-Total") || "*"}`,
+            "Content-Length": String(range[1] - range[0] + 1),
+            "Accept-Ranges": "bytes",
+        },
+    });
+}
+
+async function handle(event, req, {volumeId, token, file, range, ver}) {
+    const cache = await caches.open(CACHE_NAME);
+    const key = keyFor(volumeId, ver, file, range);
+
+    const hit = await cache.match(key);
+    if (hit) {
+        const accepted = await tokenStillValid(volumeId, token);
+        if (accepted === false) {
+            // what the server itself answers for a token it no longer accepts
+            return new Response(JSON.stringify({detail: "Invalid or expired link"}), {
+                status: 403, statusText: "Forbidden", headers: {"Content-Type": "application/json"},
+            });
+        }
+        return fromCache(hit, range); // accepted, or the server could not be reached: the bytes are already here
+    }
+
+    const resp = await fetch(req);
+    if (resp.status === 200 || resp.status === 206) markValid(token);
+    else if (resp.status === 403) verified.delete(token);
+    if (resp.status === 200 || resp.status === 206) {
+        event.waitUntil(store(cache, key, resp.clone(), range).catch(() => {}));
+    }
+    return resp;
 }
 
 self.addEventListener("fetch", (event) => {
     const req = event.request;
     if (req.method !== "GET") return;
-    // Do not cache partial range requests; regular Zarr v3 chunks are full-object GETs
-    if (req.headers.has("Range")) return;
-
     const url = new URL(req.url);
     if (url.origin !== self.location.origin) return;
-
-    const m = ZARR_URL_RE.exec(url.pathname);
+    const m = URL_RE.exec(url.pathname);
     if (!m) return;
+    const [, volumeId, token, file] = m;
+    const lod = Number(m[4] !== undefined ? m[4] : m[5]);
 
-    const volumeId = m[1];
-    const innerPath = m[2];
-
-    // Never cache root zarr.json or .zattrs (network-first: rewritten dynamically when min_lod changes)
-    if (!innerPath.includes("/") && (innerPath === "zarr.json" || innerPath === ".zattrs")) {
+    // A brick is requested as exactly "bytes=start-end"; anything else (whole file, open-ended or
+    // several ranges) goes to the network untouched, as does an index request with a Range.
+    let range = null;
+    const rangeHeader = req.headers.get("Range");
+    if (file.endsWith(".bin")) {
+        const r = /^bytes=(\d+)-(\d+)$/.exec(rangeHeader || "");
+        if (!r || Number(r[2]) < Number(r[1])) return;
+        range = [Number(r[1]), Number(r[2])];
+    } else if (rangeHeader) {
         return;
     }
 
-    event.respondWith(
-        (async () => {
-            await loadVersions();
-            const ver = volumeVersions.get(volumeId) || url.searchParams.get("v") || "default";
-            const cacheKeyUrl = `${self.location.origin}/__vg_zarr_cache__/v/${volumeId}/${ver}/${innerPath}`;
-            const cacheKeyReq = new Request(cacheKeyUrl, {method: "GET"});
-            const cache = await caches.open(CACHE_NAME);
-            const hit = await cache.match(cacheKeyReq);
-            if (hit) return hit;
+    const claims = claimsOf(token);
+    if (!claims || !/^[0-9a-f]{8,64}$/.test(String(claims.ver || ""))) return; // no version, no key
+    if (claims.exp && claims.exp * 1000 < Date.now()) return;                   // expired: let the server say so
+    if (lod < (claims.min_lod || 0)) return;                                    // below the share's cap: the server refuses it
 
-            const resp = await fetch(req);
-            if (resp.status === 403) event.waitUntil(notifyAccessDenied(volumeId));
-            if (resp.status === 200) {
-                cache.put(cacheKeyReq, resp.clone()).then(() => { if (entryCount !== null) entryCount++; return maybeEvict(); }).catch(() => {
-                });
-            }
-            return resp;
-        })()
-    );
+    event.respondWith(handle(event, req, {volumeId, token, file, range, ver: claims.ver}));
 });
