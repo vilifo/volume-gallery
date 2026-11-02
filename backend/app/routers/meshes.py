@@ -8,11 +8,12 @@ from sqlmodel import Session, select
 
 from ..database import get_session, engine
 from ..models import User, Role, Mesh, MeshAccess, AssetStatus
-from ..schemas import MeshRead, AssetStatusRead, AccessGrant, GrantedUserRead, FileAccessUrl
+from ..schemas import MeshRead, AssetStatusRead, AssetUpdate, AccessGrant, GrantedUserRead, FileAccessUrl
 from ..deps import file_token_revoked, get_current_user, require_editor
 from ..security import create_file_token, decode_token
 from ..config import settings
 from .. import workdir
+from ..organize import apply_asset_update, split_tags
 from ..helpers import convert_mesh_to_nxz, read_thumbnail, write_thumbnail, store_thumbnail, remove_thumbnail, thumbnail_response, mesh_path
 from ..utils import SLUG_RE, _now  # shared slug validation + timestamp helper
 
@@ -64,6 +65,7 @@ def _mesh_read(m: Mesh, can_download: bool = False) -> MeshRead:
     return MeshRead(
         id=m.id, slug=m.slug, title=m.title, description=m.description, created_at=m.created_at.isoformat(),
         status=m.status, status_log=log_lines, can_download=can_download, has_thumbnail=bool(m.thumbnail_path),
+        folder_id=m.folder_id, tags=split_tags(m.tags),
     )
 
 
@@ -257,6 +259,22 @@ def _process_mesh_upload(mesh_id: int, mesh_dir_str: str, upload_fd: int) -> Non
             workdir.discard_job("meshes", mesh.slug)  # success or failure: scratch is never kept
         session.add(mesh)
         session.commit()
+
+
+@router.patch("/{mesh_id}", response_model=MeshRead)
+def update_mesh(
+    mesh_id: int, payload: AssetUpdate,
+    session: Session = Depends(get_session), _editor: User = Depends(require_editor),
+):
+    """Edit the mesh's title, description, tags and folder. (The slug names its folder on disk and stays.)"""
+    mesh = session.get(Mesh, mesh_id)
+    if not mesh:
+        raise HTTPException(status_code=404, detail="Mesh not found")
+    _require_standalone(mesh, "Edit the volume instead")
+    apply_asset_update(session, mesh, payload)
+    session.commit()
+    session.refresh(mesh)
+    return _mesh_read(mesh, can_download=True)
 
 
 @router.get("/{mesh_id}/thumbnail")

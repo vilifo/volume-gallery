@@ -12,11 +12,12 @@ from sqlmodel import Session, select
 
 from ..database import get_session, engine
 from ..models import User, Role, Volume, VolumeAccess, Mesh, AssetStatus
-from ..schemas import VolumeRead, AssetStatusRead, AccessGrant, FileAccessUrl, UserRead
+from ..schemas import VolumeRead, AssetStatusRead, AssetUpdate, AccessGrant, FileAccessUrl, UserRead
 from ..deps import file_token_revoked, get_current_user, require_editor
 from ..security import create_file_token, decode_token
 from ..config import settings
 from .. import workdir
+from ..organize import apply_asset_update, split_tags
 from ..helpers.slices import SliceError, open_volume_slices, plane_response_parts
 from ..helpers import volume_meta_path, process_zip, decompose_tiff_stack
 from ..helpers import read_thumbnail, write_thumbnail, store_thumbnail, remove_thumbnail, thumbnail_response
@@ -127,6 +128,8 @@ def _volume_read(v: Volume, mesh: Optional[Mesh] = None) -> VolumeRead:
         status=v.status,
         status_log=log_lines,
         num_lod_levels=v.num_lod_levels,
+        folder_id=v.folder_id,
+        tags=split_tags(v.tags),
     )
 
 
@@ -420,6 +423,26 @@ def upload_or_replace_mesh(
         raise HTTPException(status_code=404, detail="Volume not found")
     staged = workdir.claim_upload(mesh_upload_id, "mesh", editor.id) if mesh_upload_id else None
     mesh = attach_mesh_to_volume(session, volume, mesh_file, editor, background_tasks, staged)
+    session.refresh(volume)
+    return _volume_read(volume, mesh)
+
+
+@router.patch("/{volume_id}", response_model=VolumeRead)
+def update_volume(
+    volume_id: int, payload: AssetUpdate,
+    session: Session = Depends(get_session), _editor: User = Depends(require_editor),
+):
+    """Edit the volume's title, description, tags and folder. (The slug names its folder on disk and stays.)"""
+    volume = session.get(Volume, volume_id)
+    if not volume:
+        raise HTTPException(status_code=404, detail="Volume not found")
+    old_title = volume.title
+    apply_asset_update(session, volume, payload)
+    mesh = get_volume_mesh(session, volume.id)
+    if mesh is not None and volume.title != old_title and mesh.title == f"{old_title} (mesh)":
+        mesh.title = f"{volume.title} (mesh)"  # the attached mesh is titled after its volume
+        session.add(mesh)
+    session.commit()
     session.refresh(volume)
     return _volume_read(volume, mesh)
 

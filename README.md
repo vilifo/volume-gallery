@@ -19,6 +19,11 @@ Volumes, meshes and point clouds can have an optional thumbnail (PNG, JPEG or We
 Admins and editors can see and manage every volume; readers only see volumes
 an editor has explicitly granted them.
 
+Editors can rename an item, edit its description and tags, and file it in a folder (folders
+nest, and deleting one moves its contents up). The gallery can be searched, filtered, sorted
+and laid out by folder, flat or by type. Share links last from 1 hour up to 1 year, or never
+expire (until revoked). Databases from older versions get the new columns added on startup.
+
 ## How it's put together
 
 ```

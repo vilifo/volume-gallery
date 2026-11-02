@@ -45,6 +45,8 @@ class AssetRead(BaseModel):
     can_download: bool = False
     # True when a thumbnail image is stored: fetch it from <asset api>/{id}/thumbnail
     has_thumbnail: bool = False
+    folder_id: Optional[int] = None
+    tags: List[str] = []
 
 
 class VolumeRead(AssetRead):
@@ -54,6 +56,32 @@ class VolumeRead(AssetRead):
     mesh_status: Optional[AssetStatus] = None
     mesh_status_log: List[str] = []
     num_lod_levels: Optional[int] = None
+
+
+class AssetUpdate(BaseModel):
+    """Editable details of an asset. Only the fields that are sent are changed;
+    `"folder_id": null` moves the asset to the top level."""
+    title: Optional[str] = None
+    description: Optional[str] = None
+    tags: Optional[List[str]] = None
+    folder_id: Optional[int] = None
+
+
+class FolderRead(BaseModel):
+    id: int
+    name: str
+    parent_id: Optional[int] = None
+
+
+class FolderCreate(BaseModel):
+    name: str
+    parent_id: Optional[int] = None
+
+
+class FolderUpdate(BaseModel):
+    """Only the fields that are sent are changed; `"parent_id": null` moves the folder to the top level."""
+    name: Optional[str] = None
+    parent_id: Optional[int] = None
 
 
 class AssetStatusRead(BaseModel):
@@ -97,7 +125,7 @@ class ShareLinkCreate(BaseModel):
     code: Optional[str] = None
     asset_type: str  # "volume" | "mesh" | "pointcloud"
     asset_id: int
-    expires_in_minutes: int = 1440  # default 24 hours
+    expires_in_minutes: int = 1440  # default 24 hours; 0 = never expires
     view_query: str = ""
     can_download: bool = False
     min_lod: Optional[int] = None
@@ -114,6 +142,7 @@ class ShareLinkRead(BaseModel):
     min_lod: Optional[int] = None
     created_at: str
     expires_at: str
+    never_expires: bool = False
     revoked: bool = False
     expired: bool = False
     views_count: int = 0

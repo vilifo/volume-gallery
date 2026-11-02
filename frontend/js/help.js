@@ -84,6 +84,7 @@ function overview(role, branding) {
       <li><strong>PTS</strong>: a point cloud.</li>
     </ul>
     <p>Click a title or <strong>Open</strong> to view an item. ${empty}</p>
+    <p>Above the list you can <strong>search</strong> (title, description, slug and tags), show only one kind of item, and <strong>sort</strong> by newest, oldest, name, type or status. <strong>Organise</strong> chooses how the list is laid out: <em>Folders</em> (the default) shows one folder at a time with a path above it, <em>Flat list</em> shows everything in one list, and <em>Grouped by type</em> separates volumes, meshes and point clouds. A search always looks through every folder. Click a tag on an item, or in the tag bar, to show only the items that have it; click it again to undo. Your choices are remembered in this browser.</p>
     <p>An item that is still being prepared shows a <em>processing</em> badge and cannot be opened until it is done. The list updates by itself. A <em>failed</em> item shows the reason in red${role === "reader" ? "; ask an editor to upload it again" : ""}.</p>`;
 }
 
@@ -99,7 +100,19 @@ function volumeViewer() {
       <li><strong>Advanced</strong>: <em>Render scale</em> trades sharpness for speed, <em>Max detail level</em> limits the resolution that is streamed (0 is full resolution), and <em>VRAM allocation</em> sets how much graphics memory may cache the volume.</li>
       <li><strong>Share</strong> copies a link to exactly this view. Whoever opens it must sign in and have access to the item.</li>
       <li><strong>View mesh</strong> appears when a mesh is attached to the volume. <strong>Fullscreen</strong> enlarges the view.</li>
-    </ul>`;
+    </ul>
+    <h4>Artifacts of out-of-core rendering</h4>
+    <p>A large volume is never held in memory as a whole. It is stored as bricks of 64\u00d764\u00d764 voxels at several resolution levels (each level halves the one before it by averaging 2\u00d72\u00d72 voxels), and the viewer streams only the bricks the current view needs into a fixed-size cache in graphics memory: fine ones near the camera, coarse ones further away or while you move. This is what makes very large scans usable, but it produces a few patterns that belong to the display and not to the sample:</p>
+    <ul>
+      <li><strong>Moir\u00e9 patterns</strong>: wavy, swirling or fan-shaped stripes over anything that repeats regularly, such as lattices, honeycombs, meshes, woven or layered fibres, threads and fine parallel walls. They appear when the period of the structure is close to the spacing at which the image is sampled: the screen pixels, the steps along each ray, or the voxels of a coarse level. The two beat against each other (aliasing). The pattern shifts, shimmers or changes spacing when you rotate or zoom, and it is absent in the slice views.</li>
+      <li><strong>Rings, \u201cwood grain\u201d and banding</strong> on smooth, curved or tilted surfaces, especially in ISO mode or with a steep opacity curve. Every ray is sampled in discrete steps, so the surface position is quantised differently for neighbouring rays. The bands follow the camera, not the object. (Ring artifacts of the scanner itself are different: they are circles around the rotation axis and are visible in the XY slices too.)</li>
+      <li><strong>Blocky patches and visible brick seams</strong>: square or cube-shaped areas that differ in sharpness or brightness from their neighbours, with straight edges. Neighbouring bricks are at different resolution levels because the finer ones have not arrived yet or do not fit in the cache. Coarser levels are averaged, so they look smoother and lower in contrast.</li>
+      <li><strong>Popping and flicker</strong> while moving: areas sharpen suddenly, or alternate between blurry and sharp. The cache is too small for the view, so bricks are dropped and streamed again, or the connection is slow.</li>
+      <li><strong>Lost or thinned details</strong> at coarse levels: thin walls, cracks, small pores and fine fibres fade, look thicker or disappear, because averaging lowers their contrast. Do not judge porosity, crack widths or wall thickness from a view that has not finished refining.</li>
+      <li><strong>Stair-stepped edges</strong> when <em>Render scale</em> is below 1.00: the image is drawn at a lower resolution and enlarged, so edges look jagged and thin features break up. When you zoom in far enough to see single voxels as blocks, that is the real resolution of the scan.</li>
+    </ul>
+    <p><strong>How to tell an artifact from the sample.</strong> Hold still and wait for the view to finish refining. Set <em>Render scale</em> to 1.00 and <em>Max detail level</em> to 0 (full resolution) under Advanced, and raise <em>VRAM allocation</em> if it still flickers. Then rotate and zoom a little: something that moves, changes spacing or disappears is an artifact, while a feature of the sample stays attached to the object. The slice views are cut by the server from the stored data, normally at full resolution, so use them to confirm a finding and to measure.</p>
+    <p>Artifacts that are in the scan itself (ring artifacts, beam-hardening streaks and cupping, metal streaks, noise, seams between stitched scans) look the same at any zoom and in the slices. The viewer cannot remove them; they have to be corrected during reconstruction.</p>`;
 }
 
 function meshViewer(role) {
@@ -128,8 +141,19 @@ function uploading() {
       <li><strong>Mesh file</strong>: <code>.stl</code>, <code>.3mf</code>, <code>.ply</code>, <code>.obj</code> or <code>.glb</code>. Added to a volume upload, a mesh becomes the volume\u2019s attached mesh.</li>
       <li><strong>Point cloud file</strong>: <code>.laz</code>, <code>.las</code>, <code>.ply</code>, <code>.xyz</code>, <code>.ptx</code>, <code>.pts</code> or <code>.e57</code>.</li>
     </ul>
-    <p>Give every item a <strong>slug</strong> (the short name used in URLs: lowercase letters, digits, <code>-</code> and <code>_</code>, 2\u201363 characters, starting with a letter or digit) and a title. A description and a <strong>thumbnail</strong> (PNG, JPEG or WebP, 5 MB by default) are optional.</p>
+    <p>Give every item a <strong>slug</strong> (the short name used in URLs: lowercase letters, digits, <code>-</code> and <code>_</code>, 2\u201363 characters, starting with a letter or digit) and a title. A description and a <strong>thumbnail</strong> (PNG, JPEG or WebP, 5 MB by default) are optional. The title, description, tags and folder can be changed later with <strong>Edit</strong> in the gallery.</p>
     <p>Uploads are processed in the background: you can leave the page and watch the progress in the gallery.</p>`;
+}
+
+function organising() {
+  return `<p>Every item has a title, a description and optional tags, and can be filed in a folder. Folders can contain other folders, up to 8 levels deep, and hold any kind of item.</p>
+    <ul>
+      <li><strong>Edit</strong> on a row (or <em>Details</em> on its Manage page) changes the <strong>title</strong>, <strong>description</strong>, <strong>tags</strong> and <strong>folder</strong>. The slug is the name of the item\u2019s folder on the server and cannot be changed.</li>
+      <li><strong>New folder</strong> (top right of the gallery) creates a folder inside the one you are looking at. <strong>Edit</strong> on a folder renames it, moves it into another folder or deletes it. Deleting a folder never deletes items: they and its subfolders move up into the folder above.</li>
+      <li>Drag a row onto a folder, or onto a folder in the path above the list, to move it there. Drag a folder the same way to nest it. Dropping on <em>Gallery</em> in the path moves it back to the top level.</li>
+      <li>Tags are separated by commas and are not case sensitive (<em>Battery</em> and <em>battery</em> are the same tag).</li>
+    </ul>
+    <p>Folders and tags are visible to everybody who can see the items in them: readers see a folder only if it holds something shared with them. Moving an item does not change who has access to it.</p>`;
 }
 
 function managing(role) {
@@ -140,7 +164,9 @@ function managing(role) {
     <ul>
       <li>upload, replace or remove the item\u2019s <strong>thumbnail</strong>;</li>
       <li>for volumes, add, replace or remove the <strong>attached mesh</strong>;</li>
+      <li>change the item\u2019s <strong>title, description, tags and folder</strong> (see <em>Organising the gallery</em>);</li>
       <li>see who has access and <strong>revoke</strong> it. ${pick} For meshes you can also allow a reader to download the file;</li>
+      <li>create <strong>time-limited share links</strong> that give access without an account. A link can last 1 hour, 24 hours, 7 days, 30 days, 6 months or 1 year, or <strong>never expire</strong>. Any link can be revoked at any time, which is the only way to end a link that never expires;</li>
       <li><strong>delete</strong> the item. This removes its data and cannot be undone. A failed upload can be deleted here and uploaded again.</li>
     </ul>
     <p>Editors and administrators always see every item. Readers see only the items shared with them.</p>`;
@@ -206,6 +232,7 @@ const TOPICS = [
   { id: "mesh", title: "Viewing a mesh", body: (c) => meshViewer(c.role) },
   { id: "pointcloud", title: "Viewing a point cloud", body: () => pointcloudViewer() },
   { id: "uploading", title: "Uploading items", when: isEditor, body: () => uploading() },
+  { id: "organising", title: "Organising the gallery", when: isEditor, body: () => organising() },
   { id: "managing", title: "Managing items and access", when: isEditor, body: (c) => managing(c.role) },
   { id: "users", title: "Managing users", when: (role) => role === "admin", body: () => userAdmin() },
   { id: "account", title: "Your account", body: () => account() },
@@ -265,8 +292,8 @@ const PAGE_HINTS = {
   gallery: {
     topic: "overview",
     text: (role) => role === "reader"
-      ? "The CT volumes, meshes and point clouds shared with you. Click a title or Open to view one; an item that is still processing cannot be opened yet."
-      : "Every CT volume, mesh and point cloud. Click a title or Open to view one, Manage to change its thumbnail, access or attached mesh. Items still processing update by themselves.",
+      ? "The CT volumes, meshes and point clouds shared with you. Search, sort or filter by tag; click a title or Open to view one. An item that is still processing cannot be opened yet."
+      : "Every CT volume, mesh and point cloud. Search, sort and organise them in folders and with tags; click a title or Open to view one, Edit to rename it or change its description, tags and folder, Manage for its thumbnail, access and share links. Items still processing update by themselves.",
   },
   upload: {
     topic: "uploading",
@@ -275,8 +302,8 @@ const PAGE_HINTS = {
   manage: {
     topic: "managing",
     text: (role) => role === "admin"
-      ? "Replace the thumbnail or the attached mesh, share the item with readers (or revoke access), or delete the item for good."
-      : "Replace the thumbnail or the attached mesh, manage who can see the item, or delete it for good. Choosing new readers needs an administrator.",
+      ? "Edit the item\u2019s details, replace the thumbnail or the attached mesh, share the item with readers (or revoke access), create share links, or delete the item for good."
+      : "Edit the item\u2019s details, replace the thumbnail or the attached mesh, manage who can see the item, create share links, or delete it for good. Choosing new readers needs an administrator.",
   },
   admin: {
     topic: "users",

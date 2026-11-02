@@ -451,7 +451,7 @@
     } from "/js/atlas-budget.js?v=atlas3";
     import { setupSliceIntegration } from "/js/slice/slice-integration.js?v=slice2";
     import { niceScaleLength } from "/js/scalebar.js?v=sb1";
-    import { toggleHelpPanel } from "/js/help.js?v=help2";
+    import { toggleHelpPanel } from "/js/help.js?v=help3";
     import { startBrickCache, watchDataAccess, resetDataAccessWatch } from "/js/data-access.js?v=sw1";
 
     requireLogin();
@@ -981,6 +981,9 @@
                         <option value="1440" selected>24 hours</option>
                         <option value="10080">7 days</option>
                         <option value="43200">30 days</option>
+                        <option value="262800">6 months</option>
+                        <option value="525600">1 year</option>
+                        <option value="0">Never</option>
                       </select>
                     </div>
                   </div>
