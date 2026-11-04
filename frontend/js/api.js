@@ -454,6 +454,57 @@ export const api = {
         });
     },
 
+    // saved ways of showing a volume (camera paths etc.); reading: anybody who can see the volume,
+    // writing: editor / admin
+    listVolumePaths(volumeId) {
+        return request(`/api/volumes/${volumeId}/paths`);
+    },
+    getVolumePath(volumeId, pathId) {
+        return request(`/api/volumes/${volumeId}/paths/${pathId}`);
+    },
+    createVolumePath(volumeId, {name, spec}) {
+        return request(`/api/volumes/${volumeId}/paths`, {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({name, spec}),
+        });
+    },
+    updateVolumePath(volumeId, pathId, {name, spec}) {
+        return request(`/api/volumes/${volumeId}/paths/${pathId}`, {
+            method: "PUT",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({name, spec}),
+        });
+    },
+    deleteVolumePath(volumeId, pathId) {
+        return request(`/api/volumes/${volumeId}/paths/${pathId}`, {method: "DELETE"});
+    },
+
+    // bookmarks: saved views of a volume (same rules as the saved paths above)
+    listVolumeBookmarks(volumeId) {
+        return request(`/api/volumes/${volumeId}/bookmarks`);
+    },
+    getVolumeBookmark(volumeId, id) {
+        return request(`/api/volumes/${volumeId}/bookmarks/${id}`);
+    },
+    createVolumeBookmark(volumeId, {name, spec}) {
+        return request(`/api/volumes/${volumeId}/bookmarks`, {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({name, spec}),
+        });
+    },
+    updateVolumeBookmark(volumeId, id, {name, spec}) {
+        return request(`/api/volumes/${volumeId}/bookmarks/${id}`, {
+            method: "PUT",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({name, spec}),
+        });
+    },
+    deleteVolumeBookmark(volumeId, id) {
+        return request(`/api/volumes/${volumeId}/bookmarks/${id}`, {method: "DELETE"});
+    },
+
     // gallery folders
     listFolders() {
         return request("/api/folders");

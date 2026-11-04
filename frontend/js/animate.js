@@ -4,7 +4,7 @@
 
 import { openFloatingPanel } from "/js/floating-panel.js?v=org2";
 import { Mp4Sink, ZipSink, canEncodeVideo } from "/js/animate-io.js?v=org3";
-import { waitForRefined, captureRgba, afterFrames, resizeCanvasTo, accessExpiredError } from "/js/render-capture.js?v=org3";
+import { waitForRefined, captureRgba, afterFrames, resizeCanvasTo, accessExpiredError } from "/js/render-capture.js?v=org4";
 
 // ------------------------------------------------------------------------- camera poses (pure maths)
 
@@ -73,12 +73,32 @@ const smooth = (t) => t * t * (3 - 2 * t);
 
 /** The pose at frame i of `count` along a path of keyframes. */
 export function pathPose(keys, i, count, { loop = false, ease = "smooth" } = {}) {
+  return pathPoseAt(keys, loop ? i / count : count > 1 ? i / (count - 1) : 0, { loop, ease });
+}
+
+/** The pose a fraction u (0..1) of the way along a path of keyframes; `loop` closes it back to the first. */
+export function pathPoseAt(keys, u, { loop = false, ease = "smooth" } = {}) {
   const segments = loop ? keys.length : keys.length - 1;
-  const u = loop ? i / count : count > 1 ? i / (count - 1) : 0;
-  const s = u * segments;
+  const s = Math.min(1, Math.max(0, u)) * segments;
   const seg = Math.min(Math.floor(s), segments - 1);
   const t = s - seg;
   return interpolatePose(keys[seg], keys[(seg + 1) % keys.length], ease === "smooth" ? smooth(t) : t);
+}
+
+/**
+ * The camera pose `t` seconds into a 3D animation described by a spec (see PlaybackSpec in the backend):
+ * `end` "stop" runs once and holds the last pose, "return" loops (a path closes back to its first view, a
+ * turntable ends where it began), "pingpong" runs there and back. `duration` is the time of one pass.
+ */
+export function playPose(spec, base, worldUp, t) {
+  const D = spec.duration;
+  let u;
+  if (spec.end === "stop") u = Math.min(1, t / D);
+  else if (spec.end === "pingpong") { const c = (t % (2 * D)) / D; u = c < 1 ? c : 2 - c; }
+  else u = (t % D) / D;
+  if (spec.kind === "turntable") return turntablePose(base, worldUp, (spec.angle * Math.PI) / 180 * spec.direction * u);
+  const closed = spec.end === "return";
+  return pathPoseAt(spec.keys, u, { loop: closed, ease: spec.ease });
 }
 
 export function readPose(camera) {
@@ -163,11 +183,14 @@ let savedKeyframes = []; // camera poses, kept while the page is open
  * @param {() => object|null} o.getSlices       the SliceViews, once the slice service is up
  * @param {() => HTMLCanvasElement} o.getCanvas  the render canvas (it is replaced when the volume reloads)
  * @param {HTMLElement} o.pane                  the element holding the canvas
+ * @param {object} [o.player]  plays an animation on screen (playback.js)
+ * @param {object} [o.store]   saved paths (saved-paths.js)
+ * @param {object} [o.bookmarks] bookmarks (saved-paths.js): their camera poses can be keyframes / the turntable's start
  * @param {object} [o.access]  keeps the data access token valid while 3D frames are rendered:
  *   expiresAt() -> ms timestamp or null, ttlMs() -> token lifetime, renew() -> Promise<new viewer> (reloads the
  *   volume with a fresh token, carrying the view over), onExpired(fn) -> unsubscribe (fn runs when bricks are refused)
  */
-export function openAnimatePanel({ anchor, baseName, description, getViewer, getSlices, getCanvas, pane, access = null, onClose }) {
+export function openAnimatePanel({ anchor, baseName, description, getViewer, getSlices, getCanvas, pane, access = null, player = null, store = null, bookmarks = null, onClose }) {
   const root = document.createElement("div");
   root.className = "export-form";
   const sizeOptions = Object.entries(SIZES).map(([k, v]) => `<option value="${k}">${v}</option>`).join("");
@@ -186,7 +209,8 @@ export function openAnimatePanel({ anchor, baseName, description, getViewer, get
         <div class="field"><label for="an-pingpong">Direction</label><select id="an-pingpong"><option value="0">One way</option><option value="1">Back and forth</option></select></div>
         <div class="field"><label for="an-area">Area</label><select id="an-area"><option value="whole">Whole slice</option><option value="visible">Visible area</option></select></div>
       </div>
-      <p class="hint">Slices are drawn at one pixel per voxel with the window and colours of the slice view.</p>
+      <div class="field"><label for="an-speed">Slices per second (playing on screen)</label><input id="an-speed" type="number" min="1" max="240" value="10" /></div>
+      <p class="hint">Rendered slices are drawn at one pixel per voxel with the window and colours of the slice view.</p>
     </div>
 
     <div data-for="turntable">
@@ -194,15 +218,17 @@ export function openAnimatePanel({ anchor, baseName, description, getViewer, get
         <div class="field"><label for="an-angle">Turn (degrees)</label><input id="an-angle" type="number" min="1" max="3600" value="360" /></div>
         <div class="field"><label for="an-dir">Direction</label><select id="an-dir"><option value="1">Counter-clockwise</option><option value="-1">Clockwise</option></select></div>
       </div>
-      <p class="hint">The camera circles the volume about the up axis, from the view you have now. A full turn ends where it began, so it loops.</p>
+      <div class="field" id="an-start-wrap"><label for="an-start">Start from</label><select id="an-start"><option value="">The current view</option></select></div>
+      <div class="field"><label for="an-tend">Each pass</label><select id="an-tend"><option value="return">Full turn, then again</option><option value="pingpong">Back and forth</option></select></div>
+      <p class="hint">The camera circles the volume about the up axis, from the view you have now. A full turn ends where it began, so it loops. The duration is that of one pass.</p>
     </div>
 
     <div data-for="path">
       <div class="field"><label>Views on the path</label><div id="an-keys" class="hint" style="margin:0"></div>
-        <div class="actions" style="margin-top:0.4em"><button type="button" id="an-addkey">Add current view</button><button type="button" id="an-clearkeys">Clear</button></div></div>
+        <div class="actions" style="margin-top:0.4em"><button type="button" id="an-addkey">Add current view</button><span id="an-bm-wrap" style="display:contents"><select id="an-bm" style="width:auto;max-width:11em"></select><button type="button" id="an-addbm">Add bookmark</button></span><button type="button" id="an-clearkeys">Clear</button></div></div>
       <div class="row">
         <div class="field"><label for="an-ease">Movement</label><select id="an-ease"><option value="smooth">Ease in and out</option><option value="linear">Constant speed</option></select></div>
-        <div class="field"><label for="an-loop">At the end</label><select id="an-loop"><option value="0">Stop at the last view</option><option value="1">Return to the first view</option></select></div>
+        <div class="field"><label for="an-loop">At the end</label><select id="an-loop"><option value="stop">Stop at the last view</option><option value="return">Return to the first view</option><option value="pingpong">Back and forth</option></select></div>
       </div>
     </div>
 
@@ -221,7 +247,16 @@ export function openAnimatePanel({ anchor, baseName, description, getViewer, get
     </div>
 
     <p class="hint" id="an-info"></p>
-    <div class="actions"><button type="button" class="primary" id="an-go">Render animation</button><span class="status" id="an-status" role="status"></span></div>`;
+    <div class="actions"><button type="button" class="primary" id="an-go">Render animation</button><button type="button" id="an-play">Play on screen</button></div>
+    <label style="display:flex;gap:0.5em;align-items:center;font-size:0.85em;margin:0.5em 0 0"><input type="checkbox" id="an-preload" checked style="width:auto" /> Load the data of the whole path first (smoother loops)</label>
+    <label style="display:flex;gap:0.5em;align-items:center;font-size:0.85em;margin:0.2em 0 0.4em"><input type="checkbox" id="an-touch" checked style="width:auto" /> Pause when I touch the view</label>
+    <div class="actions"><span class="status" id="an-status" role="status"></span></div>
+    <hr style="border:0;border-top:1px solid var(--line);margin:0.8em 0" />
+    <div class="field"><label for="an-saved">Saved paths</label><select id="an-saved"></select>
+      <div class="actions" style="margin-top:0.4em;flex-wrap:wrap"><button type="button" id="an-load">Load</button><button type="button" id="an-playsaved">Play</button><button type="button" id="an-link">Copy link</button><button type="button" id="an-delete">Delete</button></div></div>
+    <div class="field"><label for="an-name">Save the settings above as</label><input id="an-name" maxlength="80" placeholder="Name" />
+      <div class="actions" style="margin-top:0.4em;flex-wrap:wrap"><button type="button" id="an-save-local">Save in this browser</button><button type="button" id="an-save-shared">Save for everyone</button></div>
+      <p class="hint" id="an-save-hint"></p></div>`;
   const $ = (id) => root.querySelector(`#${id}`);
   const num = (id) => Number($(id).value);
 
@@ -247,10 +282,32 @@ export function openAnimatePanel({ anchor, baseName, description, getViewer, get
   }
 
   function renderKeys() {
+    const esc = (t) => String(t).replace(/&/g, "&amp;").replace(/</g, "&lt;");
+    const btn = (act, i, label, title, off) => `<button type="button" data-${act}="${i}" title="${title}" style="padding:0 0.45em"${off ? " disabled" : ""}>${label}</button>`;
     $("an-keys").innerHTML = savedKeyframes.length
-      ? savedKeyframes.map((_, i) => `<div style="display:flex;align-items:center;gap:0.5em">View ${i + 1} <button type="button" data-rm="${i}" style="padding:0 0.5em">Remove</button></div>`).join("")
-      : "Turn the 3D view to where the path should start, then add it; repeat for each view the camera should pass through. Two or more are needed.";
+      ? savedKeyframes.map((k, i) => `<div style="display:flex;align-items:center;gap:0.35em"><span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${i + 1}. ${k.name ? esc(k.name) : "View"}</span>${btn("up", i, "\u2191", "Move up", i === 0)}${btn("down", i, "\u2193", "Move down", i === savedKeyframes.length - 1)}${btn("rm", i, "Remove", "Remove", false)}</div>`).join("")
+      : "Turn the 3D view to where the path should start, then add it; repeat for each view the camera should pass through. Bookmarks can be added too. Two or more are needed.";
+    const move = (i, d) => { const [k] = savedKeyframes.splice(i, 1); savedKeyframes.splice(i + d, 0, k); renderKeys(); refresh(); };
     $("an-keys").querySelectorAll("[data-rm]").forEach((b) => b.addEventListener("click", () => { savedKeyframes.splice(Number(b.dataset.rm), 1); renderKeys(); refresh(); }));
+    $("an-keys").querySelectorAll("[data-up]").forEach((b) => b.addEventListener("click", () => move(Number(b.dataset.up), -1)));
+    $("an-keys").querySelectorAll("[data-down]").forEach((b) => b.addEventListener("click", () => move(Number(b.dataset.down), 1)));
+  }
+
+  let savedStart = null; // the turntable's start view that came with a loaded path
+
+  // Bookmarks with a camera pose, for the "Add bookmark" button and the turntable's "Start from"
+  let bookmarkList = [];
+  const bmKey = (e) => `${e.scope}:${e.id}`;
+  async function refreshBookmarks() {
+    bookmarkList = bookmarks ? (await bookmarks.list()).filter((e) => e.spec.pose) : [];
+    const esc = (t) => String(t).replace(/&/g, "&amp;").replace(/</g, "&lt;");
+    const label = (e) => `${esc(e.name)}${e.scope === "local" ? " (this browser)" : ""}`;
+    $("an-bm").innerHTML = bookmarkList.length ? bookmarkList.map((e) => `<option value="${bmKey(e)}">${label(e)}</option>`).join("") : `<option value="">No bookmarks</option>`;
+    $("an-addbm").disabled = !bookmarkList.length;
+    const keep = $("an-start").value;
+    const saved = $("an-start").querySelector('option[value="saved"]');
+    $("an-start").innerHTML = `<option value="">The current view</option>` + (saved ? saved.outerHTML : "") + bookmarkList.map((e) => `<option value="${bmKey(e)}">${label(e)}</option>`).join("");
+    if ([...$("an-start").options].some((o) => o.value === keep)) $("an-start").value = keep;
   }
 
   function sizeOfRun() {
@@ -277,9 +334,81 @@ export function openAnimatePanel({ anchor, baseName, description, getViewer, get
       return { kind, count: indices.length, indices, axis: s.axis, fps };
     }
     if (!threeDVisible()) return { error: "Switch to the 3D or quad layout first" };
-    const count = Math.max(2, Math.round(num("an-duration") * fps));
     if (kind === "path" && savedKeyframes.length < 2) return { error: "Add at least two views to the path" };
+    const spec = buildSpec().spec;
+    const count = Math.max(2, Math.round(num("an-duration") * fps * (spec.end === "pingpong" ? 2 : 1)));
     return { kind, count, fps };
+  }
+
+  /** The settings of the panel as a PlaybackSpec (the form that is saved and played). */
+  function buildSpec() {
+    const kind = $("an-kind").value;
+    const spec = {
+      kind,
+      duration: Math.max(1, num("an-duration") || 10),
+      end: "return",
+      ease: $("an-ease").value,
+      angle: Math.max(1, num("an-angle") || 360),
+      direction: Number($("an-dir").value),
+      keys: savedKeyframes.map((k) => structuredClone(k)),
+      step: Math.max(1, Math.round(num("an-step") || 1)),
+      speed: Math.min(240, Math.max(0.5, num("an-speed") || 10)),
+      preload: $("an-preload").checked,
+      pause_on_touch: $("an-touch").checked,
+    };
+    if (kind === "turntable") {
+      spec.end = $("an-tend").value;
+      const start = $("an-start").value;
+      if (start === "saved" && savedStart) spec.start = structuredClone(savedStart);
+      else if (start) {
+        const e = bookmarkList.find((b) => bmKey(b) === start);
+        if (e) spec.start = { ...structuredClone(e.spec.pose), name: e.name };
+      }
+    }
+    if (kind === "path") spec.end = $("an-loop").value;
+    if (kind === "slices") {
+      const s = sliceInfo();
+      if (!s) return { error: "Open a slice view first" };
+      spec.axis = s.axis;
+      spec.from_index = Math.max(0, Math.round(num("an-from")));
+      spec.to_index = Math.max(0, Math.round(num("an-to")));
+      spec.end = $("an-pingpong").value === "1" ? "pingpong" : "return";
+    }
+    if (kind === "path" && spec.keys.length < 2) return { error: "Add at least two views to the path" };
+    return { spec };
+  }
+
+  /** Puts a saved spec into the panel's fields. */
+  function applySpec(spec) {
+    $("an-kind").value = spec.kind;
+    $("an-duration").value = spec.duration;
+    $("an-ease").value = spec.ease;
+    $("an-angle").value = spec.angle;
+    $("an-dir").value = String(spec.direction);
+    $("an-step").value = spec.step;
+    $("an-speed").value = spec.speed;
+    $("an-preload").checked = spec.preload;
+    $("an-touch").checked = spec.pause_on_touch;
+    if (spec.kind === "turntable") {
+      $("an-tend").value = spec.end === "pingpong" ? "pingpong" : "return";
+      $("an-start").querySelector('option[value="saved"]')?.remove();
+      savedStart = spec.start ? structuredClone(spec.start) : null;
+      if (savedStart) {
+        const opt = new Option(`${savedStart.name || "A saved view"} (saved with the path)`, "saved");
+        $("an-start").insertBefore(opt, $("an-start").options[1] ?? null);
+      }
+      $("an-start").value = savedStart ? "saved" : "";
+    }
+    if (spec.kind === "path") { savedKeyframes = spec.keys.map((k) => structuredClone(k)); $("an-loop").value = spec.end; renderKeys(); }
+    if (spec.kind === "slices") {
+      fillSlices();
+      if (spec.axis && slicesList().some((s) => s.axis === spec.axis)) $("an-slice").value = spec.axis;
+      $("an-from").value = spec.from_index;
+      $("an-to").value = spec.to_index;
+      $("an-pingpong").value = spec.end === "pingpong" ? "1" : "0";
+      root.dataset.rangeFor = spec.axis || "";
+    }
+    refresh();
   }
 
   function refresh() {
@@ -290,6 +419,7 @@ export function openAnimatePanel({ anchor, baseName, description, getViewer, get
     const p = plan();
     const size = sizeOfRun();
     $("an-go").disabled = !!p.error;
+    $("an-play").disabled = !!buildSpec().error;
     $("an-info").textContent = p.error ? p.error
       : `${p.count} frames, ${(p.count / p.fps).toFixed(p.count / p.fps < 10 ? 1 : 0)} s at ${p.fps} per second${size ? `, ${size.width} \u00d7 ${size.height} px` : ""}.${kind === "slices" ? "" : " Each frame waits until its data is loaded and the image is clean, so this takes a while."}`;
   }
@@ -313,6 +443,7 @@ export function openAnimatePanel({ anchor, baseName, description, getViewer, get
     const kind = p.kind;
     const size = sizeOfRun();
     const toVideo = $("an-out").value === "mp4";
+    player?.stop(); // the render takes over the camera
     const abort = new AbortController();
     let sink;
     let overlay;
@@ -338,8 +469,8 @@ export function openAnimatePanel({ anchor, baseName, description, getViewer, get
         const area = $("an-area").value;
         renderFrame = (i) => views.exportSlice(p.axis, { area, index: p.indices[i] });
       } else {
-        // The 3D view. Its data access token is short-lived: a long animation renews it (reloading the volume,
-        // which carries the view over) shortly before it runs out, or at once if bricks start being refused.
+        // The 3D view. Its data access token is short-lived. The page renews it in the background (data-access.js);
+        // only if that has failed does the animation fall back to reloading the volume (the view carries over).
         let viewer = getViewer();
         const base = readPose(viewer.camera);
         const wasFree = viewer.camera.isFreeRotation?.();
@@ -378,20 +509,20 @@ export function openAnimatePanel({ anchor, baseName, description, getViewer, get
         };
         const dueForRenewal = () => {
           const at = access?.expiresAt();
-          return expired || (at != null && at - Date.now() < Math.min(3 * 60000, (access.ttlMs() || 0) / 4));
+          return expired || (at != null && at - Date.now() < Math.min(60000, (access.ttlMs() || 0) / 10));
         };
 
         const worldUp = viewer.camera.upVector ?? [0, 1, 0];
-        const angle = (num("an-angle") * Math.PI) / 180 * Number($("an-dir").value);
-        const loop = $("an-loop").value === "1";
-        const ease = $("an-ease").value;
-        const keys = savedKeyframes.map((k) => structuredClone(k));
+        const spec = buildSpec().spec;
+        const origin = spec.start ?? base; // a turntable can begin from a bookmark
+        const cycle = spec.end === "pingpong" ? 2 * spec.duration : spec.duration;
         renderFrame = async (i, onProgress) => {
           for (let attempt = 0; ; attempt++) {
             try {
               if (dueForRenewal()) await renew(onProgress);
               const v = viewer;
-              const pose = kind === "turntable" ? turntablePose(base, worldUp, (angle * i) / p.count) : pathPose(keys, i, p.count, { loop, ease });
+              const t = spec.end === "stop" ? (i / Math.max(1, p.count - 1)) * spec.duration : (i / p.count) * cycle;
+              const pose = playPose(spec, origin, worldUp, t);
               writePose(v.camera, pose);
               await afterFrames();
               await waitForRefined(v, { isCurrent: () => getViewer() === v, onProgress, minMs: 300, expired: () => expired });
@@ -451,13 +582,109 @@ export function openAnimatePanel({ anchor, baseName, description, getViewer, get
     renderKeys();
     refresh();
   });
+  $("an-addbm").addEventListener("click", () => {
+    const e = bookmarkList.find((b) => bmKey(b) === $("an-bm").value);
+    if (!e) return;
+    savedKeyframes.push({ ...structuredClone(e.spec.pose), name: e.name });
+    renderKeys();
+    refresh();
+  });
+  for (const id of ["an-bm", "an-start"]) $(id).addEventListener("pointerdown", () => { refreshBookmarks(); }); // the list may have changed
+  $("an-bm-wrap").style.display = bookmarks ? "contents" : "none";
+  $("an-start-wrap").hidden = !bookmarks;
   $("an-clearkeys").addEventListener("click", () => { savedKeyframes = []; renderKeys(); refresh(); });
   $("an-go").addEventListener("click", start);
+
+  // ---- play on screen
+  async function playSpec(spec) {
+    if (!player) return;
+    setStatus(spec.preload && spec.kind !== "slices" ? "Loading the data first\u2026" : "");
+    try {
+      await player.play(spec);
+      setStatus(player.state === "idle" ? "" : "Playing. The bar over the view pauses or stops it.");
+    } catch (err) {
+      console.error("[play]", err);
+      setStatus(err.message || String(err), true);
+    }
+  }
+  $("an-play").addEventListener("click", () => {
+    const built = buildSpec();
+    if (built.error) setStatus(built.error, true); else playSpec(built.spec);
+  });
+  if (!player) $("an-play").hidden = true;
+
+  // ---- saved paths
+  let saved = [];
+  const key = (e) => `${e.scope}:${e.id}`;
+  const selected = () => saved.find((e) => key(e) === $("an-saved").value);
+
+  async function refreshSaved(select) {
+    saved = store ? await store.list() : [];
+    const opt = (e) => `<option value="${key(e)}">${e.name.replace(/&/g, "&amp;").replace(/</g, "&lt;")}${e.scope === "shared" && e.author ? ` (${e.author.replace(/&/g, "&amp;").replace(/</g, "&lt;")})` : ""}</option>`;
+    const group = (label, scope) => {
+      const list = saved.filter((e) => e.scope === scope);
+      return list.length ? `<optgroup label="${label}">${list.map(opt).join("")}</optgroup>` : "";
+    };
+    $("an-saved").innerHTML = saved.length ? group("For everyone", "shared") + group("In this browser", "local") : `<option value="">No saved paths yet</option>`;
+    if (select && saved.some((e) => key(e) === select)) $("an-saved").value = select;
+    updateSavedButtons();
+  }
+
+  function updateSavedButtons() {
+    const e = selected();
+    for (const id of ["an-load", "an-playsaved", "an-delete"]) $(id).disabled = !e;
+    $("an-link").disabled = !e || e.scope !== "shared";
+    $("an-delete").disabled = !e || (e.scope === "shared" && !store?.canShare);
+    $("an-playsaved").hidden = !player;
+  }
+
+  if (store) {
+    $("an-save-shared").hidden = !store.canShare;
+    $("an-save-hint").textContent = store.canShare
+      ? "A path saved in this browser is private to you. A path saved for everyone is kept on the server: everybody who can see this volume can play it, and it has a link that starts it by itself."
+      : "A path saved here stays in this browser. Editors can also save paths for everybody.";
+    $("an-saved").addEventListener("change", updateSavedButtons);
+    $("an-load").addEventListener("click", () => {
+      const e = selected();
+      if (!e) return;
+      applySpec(e.spec);
+      $("an-name").value = e.name;
+      setStatus(`Loaded \u201c${e.name}\u201d.`);
+    });
+    $("an-playsaved").addEventListener("click", () => { const e = selected(); if (e) { applySpec(e.spec); playSpec(e.spec); } });
+    $("an-link").addEventListener("click", async () => {
+      const e = selected();
+      const url = e && store.link(e);
+      if (!url) return;
+      try { await navigator.clipboard.writeText(url); setStatus("Link copied. Opening it plays this path."); } catch (_) { window.prompt("Copy this link", url); }
+    });
+    $("an-delete").addEventListener("click", async () => {
+      const e = selected();
+      if (!e || !confirm(`Delete the saved path \u201c${e.name}\u201d${e.scope === "shared" ? " for everybody" : ""}?`)) return;
+      try { await store.remove(e); await refreshSaved(); setStatus("Deleted."); } catch (err) { setStatus(err.message, true); }
+    });
+    for (const scope of ["local", "shared"]) {
+      $(`an-save-${scope}`).addEventListener("click", async () => {
+        const built = buildSpec();
+        if (built.error) { setStatus(built.error, true); return; }
+        try {
+          const entry = await store.save(scope, $("an-name").value, built.spec);
+          await refreshSaved(key(entry));
+          setStatus(`Saved \u201c${entry.name}\u201d ${scope === "shared" ? "for everyone" : "in this browser"}.`);
+        } catch (err) { setStatus(err.message || String(err), true); }
+      });
+    }
+  } else {
+    root.querySelector("#an-saved").closest(".field").hidden = true;
+    root.querySelector("#an-name").closest(".field").hidden = true;
+  }
 
   const panel = openFloatingPanel({ id: "animate", title: "Animation", content: root, anchor, align: "right", width: 360, onClose });
   if (panel) {
     fillSlices();
     renderKeys();
+    refreshSaved();
+    refreshBookmarks();
     // start on what is on screen: a slice sweep when only slices are shown
     if (!threeDVisible() && slicesList().length) $("an-kind").value = "slices";
     else if (threeDVisible() && !slicesList().length) $("an-kind").value = "turntable";

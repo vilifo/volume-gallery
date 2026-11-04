@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Viewer — Volume Gallery</title>
 <script src="/js/theme-init.js?v=hist1"></script>
-<link rel="stylesheet" href="/css/style.css?v=org2" />
+<link rel="stylesheet" href="/css/style.css?v=org5" />
 <style>
   /* This page trades the app's normal padded/max-width main column for an
      edge-to-edge canvas — the render is the point of the page, everything
@@ -439,7 +439,7 @@
   <div class="app-shell" id="shell"></div>
 
   <script type="module">
-    import { api, requireLogin, getRole, getUsername, renderShell, wireLogout } from "/js/api.js?v=sw1";
+    import { api, requireLogin, getRole, getUsername, renderShell, wireLogout } from "/js/api.js?v=org5";
     import { syncHistogram } from "/js/histogram.js?v=hist1";
     import { KilnViewer } from "/vendor/kiln-render/lib/kiln-render.js?v=atlas2";
     import {
@@ -449,14 +449,18 @@
       planAtlas,
       saveAtlasMB,
     } from "/js/atlas-budget.js?v=atlas3";
-    import { setupSliceIntegration } from "/js/slice/slice-integration.js?v=slice3";
+    import { setupSliceIntegration } from "/js/slice/slice-integration.js?v=slice4";
     import { niceScaleLength } from "/js/scalebar.js?v=sb1";
-    import { toggleHelpPanel } from "/js/help.js?v=help3";
+    import { toggleHelpPanel } from "/js/help.js?v=help5";
     import { makeDescriptionExpandable } from "/js/description.js?v=org2";
     import { openExportPanel } from "/js/export-image.js?v=org2";
-    import { openAnimatePanel } from "/js/animate.js?v=org3";
-    import { captureStill } from "/js/render-capture.js?v=org3";
-    import { startBrickCache, watchDataAccess, resetDataAccessWatch, onDataAccessExpired } from "/js/data-access.js?v=org3";
+    import { openAnimatePanel } from "/js/animate.js?v=org5";
+    import { createPlayer } from "/js/playback.js?v=org5";
+    import { createPathStore, createBookmarkStore } from "/js/saved-paths.js?v=org5";
+    import { openBookmarksPanel } from "/js/bookmarks.js?v=org5";
+    import { interpolatePose, readPose, writePose } from "/js/animate.js?v=org5";
+    import { captureStill } from "/js/render-capture.js?v=org4";
+    import { startBrickCache, watchDataAccess, resetDataAccessWatch, onDataAccessExpired, setDataAccess, dataAccessExpiresAt, dataAccessTtlMs } from "/js/data-access.js?v=org4";
 
     requireLogin();
     const role = getRole();
@@ -472,6 +476,7 @@
     const HELP_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.1 9a3 3 0 0 1 5.8 1c0 2-3 3-3 3M12 17h.01"/></svg>`;
     const DOWNLOAD_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>`;
     const ANIMATE_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polygon points="10 8 16 12 10 16 10 8"/></svg>`;
+    const BOOKMARK_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>`;
     const LINK_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>`;
 
     document.getElementById("shell").innerHTML = `
@@ -691,6 +696,7 @@
               <button type="button" data-layout="yz" title="YZ plane: slices along X">YZ</button>
             </div>
             <button id="help-btn" class="icon-btn" aria-pressed="false" title="Show help for this viewer next to the view">${HELP_ICON}<span class="icon-btn-label">Help</span></button>
+            <button id="bookmarks-btn" class="icon-btn" title="Save this view and come back to it later">${BOOKMARK_ICON}<span class="icon-btn-label">Bookmarks</span></button>
             <button id="animate-btn" class="icon-btn" title="Render an animation: a sweep through the slices, a 3D turntable or a camera path">${ANIMATE_ICON}<span class="icon-btn-label">Animate</span></button>
             <button id="export-btn" class="icon-btn" title="Save the view or a slice as an image file at full resolution">${DOWNLOAD_ICON}<span class="icon-btn-label">Export</span></button>
             <button id="share-btn" class="icon-btn" title="Copy a link to this exact view">${LINK_ICON}<span class="icon-btn-label">Share</span></button>
@@ -765,9 +771,7 @@
       // a brand-new canvas (starting at 1x1, so a resize is always seen).
       // loadToken discards the result of a load superseded by a newer one.
       let loadToken = 0;
-      // When the signed data URL the viewer is using stops working (ms timestamp; see refreshDataAccess)
-      let dataAccessExpiresAt = null;
-      let dataAccessTtlMs = 0;
+
       let stopStats = null;
       let stopScaleBar = null;
       let urlSync = null;
@@ -797,7 +801,7 @@
         return canvas;
       }
 
-      async function loadVolume(minLevel) {
+      async function loadVolume(minLevel, overrideOptions = null) {
         const token = ++loadToken;
         activeMinLevel = minLevel;
 
@@ -808,6 +812,7 @@
           urlSync = null;
           nextOptions = stateToOptions(currentViewer.getState());
         }
+        if (overrideOptions) nextOptions = { ...nextOptions, ...overrideOptions }; // e.g. a bookmark's render settings
         showStatus(currentViewer ? "Reloading volume\u2026" : "Requesting WebGPU device\u2026");
         setLoadUi("indeterminate", 0, "Loading\u2026");
         if (stopStats) {
@@ -835,13 +840,17 @@
           histogramPromise = histogramPromise || api.volumeHistogram(volumeId); // fetched once, in parallel
           const access = await api.volumeDataAccessUrl(volumeId, minLevel);
           if (token !== loadToken) return;
-          dataAccessTtlMs = (access.expires_in_minutes || 0) * 60000;
-          dataAccessExpiresAt = dataAccessTtlMs ? Date.now() + dataAccessTtlMs : null;
           // The brick cache worker (js/sw.js). On the first visit this waits until it controls the page,
           // so the first load is cached too; it never blocks for long or fails the load.
           await startBrickCache();
           watchDataAccess(volumeId); // asks for a reload when the data link expires
           resetDataAccessWatch();    // this is a fresh link: allow the notice again
+          // Renew the token in the background before it runs out, without rebuilding the viewer
+          setDataAccess({
+            url: access.url,
+            ttlMs: (access.expires_in_minutes || 0) * 60000,
+            renew: async () => (await api.volumeDataAccessUrl(volumeId, minLevel)).url,
+          });
 
           if (token !== loadToken) return;
 
@@ -888,6 +897,8 @@
             initialLayoutApplied = true;
             slices.applyInitial();
           }
+          startAutoplay();
+          openBookmarkLink();
         } catch (err) {
           if (token !== loadToken) return;
           console.error(err);
@@ -898,9 +909,132 @@
 
       loadVolume(activeMinLevel);
 
-      // Gets a fresh data URL (token) by reloading the viewer in place: the view, transfer function and
-      // clipping carry over, the bricks come back from the browser's brick cache or the server. For long jobs
-      // (animation, export) that must not stop when the token runs out. Resolves with the new viewer.
+      // ---- Bookmarks: saved views (camera, render settings, slice position)
+      const bookmarkStore = createBookmarkStore({ api, volumeId, canShare: role === "admin" || role === "editor" });
+
+      // A small JPEG of the current 3D view, for the list. Best effort: a bookmark is fine without it.
+      async function viewThumbnail(viewer) {
+        try {
+          const bitmap = await createImageBitmap(await viewer.captureImage("image/png"), { resizeWidth: 240, resizeQuality: "medium" });
+          const c = document.createElement("canvas");
+          c.width = bitmap.width;
+          c.height = bitmap.height;
+          c.getContext("2d").drawImage(bitmap, 0, 0);
+          bitmap.close?.();
+          const url = c.toDataURL("image/jpeg", 0.72);
+          return url.length < 55000 ? url : null;
+        } catch (_) {
+          return null;
+        }
+      }
+
+      async function captureBookmark() {
+        const viewer = currentViewer;
+        if (!viewer) throw new Error("The 3D view is not ready yet");
+        const options = stateToOptions(viewer.getState());
+        delete options.renderScale; // a performance setting of this screen, not part of a view
+        let pose = null;
+        try { pose = readPose(viewer.camera); } catch (_) { /* no free-rotation camera: the view still restores */ }
+        const sliceParams = {};
+        for (const [k, val] of Object.entries(sliceUrlParams())) sliceParams[k] = String(val);
+        return {
+          options,
+          pose,
+          min_level: Number.isInteger(activeMinLevel) ? activeMinLevel : null,
+          slices: Object.keys(sliceParams).length ? sliceParams : null,
+          thumb: await viewThumbnail(viewer),
+        };
+      }
+
+      // The camera glides to a pose in a moment instead of jumping
+      function flyTo(viewer, target, ms = 800) {
+        return new Promise((resolve) => {
+          let from;
+          try { from = readPose(viewer.camera); } catch (_) { writePose(viewer.camera, target); resolve(); return; }
+          viewer.camera.setFreeRotation?.(true);
+          const t0 = performance.now();
+          const step = (now) => {
+            if (viewer !== currentViewer) { resolve(); return; }
+            const t = Math.min(1, (now - t0) / ms);
+            const eased = t * t * (3 - 2 * t);
+            writePose(viewer.camera, t >= 1 ? target : interpolatePose(from, target, eased));
+            if (t < 1) requestAnimationFrame(step); else resolve();
+          };
+          requestAnimationFrame(step);
+        });
+      }
+
+      async function restoreBookmark(entry) {
+        const b = entry.spec;
+        player.stop(); // a running path would fight the camera
+        if (b.slices || slices.views) {
+          const layout = b.slices?.layout || "3d";
+          await slices.requestLayout(layout);
+          if (slices.views && b.slices) slices.views.state.applyParams({ ...b.slices, layout });
+        }
+        const viewer = currentViewer;
+        if (!viewer) return;
+        const current = stateToOptions(viewer.getState());
+        const { cam, ...want } = b.options;
+        const levelChanged = Number.isInteger(b.min_level) && b.min_level !== activeMinLevel;
+        const settingsChanged = Object.keys(want).some((k) => JSON.stringify(want[k]) !== JSON.stringify(current[k]));
+        if (settingsChanged || levelChanged) {
+          // other render settings (mode, transfer function, clipping, ...): rebuild the viewer with them
+          await loadVolume(levelChanged ? b.min_level : activeMinLevel, { ...want, ...(cam ? { cam } : {}) });
+        } else if (b.pose) {
+          await flyTo(viewer, b.pose);
+        } else if (cam) {
+          await loadVolume(activeMinLevel, { cam });
+        }
+      }
+
+      // Playing a camera path, turntable or slice sweep on screen by itself, and the saved paths (this browser's,
+      // and the shared ones editors keep on the server). ?play=<id> in the link starts a shared one.
+      const player = createPlayer({
+        host: canvasWrap,
+        getViewer: () => currentViewer,
+        getSlices: () => slices.views,
+        is3dVisible: () => $("pane-3d").dataset.visible === "1" && !!currentViewer,
+        onChange: (state) => {
+          if (state !== "idle") return;
+          const url = new URL(window.location.href); // stopped: the link no longer starts it again
+          if (url.searchParams.has("play")) {
+            url.searchParams.delete("play");
+            history.replaceState(history.state, "", url.pathname + url.search + url.hash);
+          }
+        },
+      });
+      const pathStore = createPathStore({ api, volumeId, canShare: role === "admin" || role === "editor" });
+      let autoplayStarted = false;
+      let bookmarkLinkOpened = false;
+      async function openBookmarkLink() { // ?bookmark=<id>
+        const id = params.get("bookmark");
+        if (!id || bookmarkLinkOpened) return;
+        bookmarkLinkOpened = true;
+        try {
+          await restoreBookmark(await bookmarkStore.getShared(id));
+        } catch (err) {
+          console.error("[bookmark link]", err);
+          showStatus(`Could not open the bookmark: ${err.message}`, { busy: false });
+        }
+      }
+      async function startAutoplay() {
+        const id = params.get("play");
+        if (!id || autoplayStarted) return;
+        autoplayStarted = true;
+        try {
+          const entry = await pathStore.getShared(id);
+          if (entry.spec.kind === "slices") await slices.requestLayout(entry.spec.axis);
+          await player.play(entry.spec);
+        } catch (err) {
+          console.error("[autoplay]", err);
+          showStatus(`Could not start the saved path: ${err.message}`, { busy: false });
+        }
+      }
+
+      // Last resort when the background renewal of the data token (see setDataAccess) has failed: rebuilds the
+      // viewer with a fresh one. The view, transfer function and clipping carry over, the bricks come back
+      // from the browser's brick cache or the server. Resolves with the new viewer.
       async function refreshDataAccess() {
         await loadVolume(activeMinLevel);
         if (!currentViewer) throw new Error("Access to the volume\u2019s data could not be renewed");
@@ -924,7 +1058,7 @@
           let expired = false;
           const unsubscribe = onDataAccessExpired(() => { expired = true; });
           try {
-            if (dataAccessExpiresAt != null && dataAccessExpiresAt - Date.now() < Math.min(60000, dataAccessTtlMs / 4)) {
+            if (dataAccessExpiresAt() != null && dataAccessExpiresAt() - Date.now() < Math.min(60000, dataAccessTtlMs() / 10)) {
               onProgress("Renewing access to the data\u2026");
               viewer = await refreshDataAccess();
             }
@@ -969,6 +1103,18 @@
         exportBtn.setAttribute("aria-pressed", String(!!open));
       });
 
+      const bookmarksBtn = document.getElementById("bookmarks-btn");
+      bookmarksBtn.addEventListener("click", () => {
+        const open = openBookmarksPanel({
+          anchor: bookmarksBtn,
+          store: bookmarkStore,
+          capture: captureBookmark,
+          restore: restoreBookmark,
+          onClose: () => bookmarksBtn.setAttribute("aria-pressed", "false"),
+        });
+        bookmarksBtn.setAttribute("aria-pressed", String(!!open));
+      });
+
       const animateBtn = document.getElementById("animate-btn");
       animateBtn.addEventListener("click", () => {
         const open = openAnimatePanel({
@@ -979,9 +1125,12 @@
           getSlices: () => slices.views,
           getCanvas: () => $("canvas"),
           pane: $("pane-3d"),
+          player,
+          store: pathStore,
+          bookmarks: bookmarkStore,
           access: {
-            expiresAt: () => dataAccessExpiresAt,
-            ttlMs: () => dataAccessTtlMs,
+            expiresAt: dataAccessExpiresAt,
+            ttlMs: dataAccessTtlMs,
             renew: refreshDataAccess,
             onExpired: onDataAccessExpired,
           },
@@ -1192,6 +1341,8 @@
         try {
           const p = stateToParams(viewer.getState(), getMinLevel());
           for (const [k, v] of Object.entries(sliceUrlParams())) p.set(k, v);
+          const play = new URLSearchParams(window.location.search).get("play"); // a link that plays a saved path
+          if (play) p.set("play", play);
           const qs = "?" + p.toString();
           if (qs !== last) {
             history.replaceState(history.state, "", window.location.pathname + qs + window.location.hash);

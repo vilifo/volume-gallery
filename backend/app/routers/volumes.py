@@ -11,7 +11,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from sqlmodel import Session, select
 
 from ..database import get_session, engine
-from ..models import User, Role, Volume, VolumeAccess, Mesh, AssetStatus
+from ..models import User, Role, Volume, VolumeAccess, Mesh, AssetStatus, AnimationPath, ViewBookmark
 from ..schemas import VolumeRead, AssetStatusRead, AssetUpdate, AccessGrant, FileAccessUrl, UserRead
 from ..deps import file_token_revoked, get_current_user, require_editor
 from ..security import create_file_token, decode_token
@@ -502,6 +502,10 @@ def delete_volume(
     delete_volume_mesh(session, volume)
     for grant in session.exec(select(VolumeAccess).where(VolumeAccess.volume_id == volume_id)).all():
         session.delete(grant)
+    for saved in session.exec(select(AnimationPath).where(AnimationPath.volume_id == volume_id)).all():
+        session.delete(saved)
+    for saved in session.exec(select(ViewBookmark).where(ViewBookmark.volume_id == volume_id)).all():
+        session.delete(saved)
     session.delete(volume)
     session.commit()
     return {"ok": True}

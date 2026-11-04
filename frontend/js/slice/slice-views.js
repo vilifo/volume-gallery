@@ -560,7 +560,7 @@ export class SliceViews {
     return AXES.filter((a) => this.panes[a].visible).map((axis) => {
       const info = AXIS_INFO[axis];
       const index = planeIndex(axis, this.state.cursor);
-      return { axis, label: `${info.label} slice (${info.normal.toUpperCase()} = ${index})`, name: `${info.label}-${info.normal}${index}`, index, count: this.state.dims[info.normal] };
+      return { axis, label: `${info.label} slice (${info.normal.toUpperCase()} = ${index})`, name: `${info.label}-${info.normal}${index}`, index, count: this.state.dims[info.normal], normal: info.normal };
     });
   }
 

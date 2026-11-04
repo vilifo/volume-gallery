@@ -37,6 +37,25 @@ export async function waitForRefined(viewer, { isCurrent = () => true, onProgres
   return { complete: true };
 }
 
+/**
+ * Waits until everything the current view needs has been streamed in (no pending bricks for a few checks
+ * in a row), without waiting for the image to converge. For preloading the data of a path.
+ * @returns {Promise<{complete: boolean}>} complete is false when `timeoutMs` ran out first
+ */
+export async function waitForLoaded(viewer, { isCurrent = () => true, timeoutMs = 30000, minMs = 0, onProgress = () => {} } = {}) {
+  const started = performance.now();
+  let calm = 0;
+  while (calm < 3 || performance.now() - started < minMs) {
+    if (!isCurrent()) throw new Error("The volume was reloaded");
+    const { pendingCount } = viewer.streamingManager.getStats();
+    calm = pendingCount === 0 ? calm + 1 : 0;
+    if (performance.now() - started > timeoutMs) return { complete: false };
+    onProgress(pendingCount);
+    await sleep(100);
+  }
+  return { complete: true };
+}
+
 /** The current render as {width, height, rgba} (opaque). Call after waitForRefined. */
 export async function captureRgba(viewer) {
   const bitmap = await createImageBitmap(await viewer.captureImage("image/png"));

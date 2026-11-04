@@ -26,7 +26,13 @@ expire (until revoked). Databases from older versions get the new columns added 
 
 In the volume viewer, **Export** saves the 3D render or a slice as PNG / JPEG / WebP / TIFF (slices at one
 pixel per voxel, optionally as raw voxel values), and **Animate** renders a slice sweep, a 3D turntable or a
-camera path to an H.264 MP4 or a zip of images. Both run in the browser on the viewer's own GPU.
+camera path to an H.264 MP4 or a zip of images. Both run in the browser on the viewer's own GPU. The same
+paths can also be played live and looped on screen; they can be saved in the browser or, by editors, in the
+database (`/api/volumes/{id}/paths`), and a shared path's link (`viewer ... ?id=<volume>&play=<path>`) starts it
+automatically. **Bookmarks** save a view (camera, render settings, slice position, thumbnail) the same two ways
+(`/api/volumes/{id}/bookmarks`, link `?id=<volume>&bookmark=<id>`), and their camera poses can be keyframes of a
+path or the start of a turntable. While anything long-running is going on, the viewer renews its data access token in the
+background (it is a path segment of the brick URLs), so a display can run for hours.
 
 ## How it's put together
 
@@ -108,27 +114,6 @@ uvicorn app.main:app --reload --port 8000
 Then open `http://localhost:8000`, sign in as `admin` with the password you set.
 
 ## Running with Docker Compose
-
-The fast path — one script does the `.env` setup, cert generation, and
-`docker compose up` in one go:
-
-```bash
-./setup.sh <your-host-ip-or-name>          # e.g. ./setup.sh 192.168.1.50
-```
-
-It fills in a generated `VG_SECRET_KEY`, prompts for an admin password (or
-generates and prints one if run non-interactively), generates a self-signed
-cert for the host/IP you gave it, and starts everything. Safe to re-run — it
-never overwrites an existing `.env` or existing certs, only fills in what's
-missing. Pass alternate ports as a second/third argument if you want
-something other than the 8443/8080 default (see "Putting it behind HTTPS"
-below for why those aren't 443/80 by default):
-
-```bash
-./setup.sh 192.168.1.50 8443 8080
-```
-
-Or do the same steps by hand if you'd rather see each one:
 
 ```bash
 cp .env.example .env
