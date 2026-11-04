@@ -24,6 +24,10 @@ nest, and deleting one moves its contents up). The gallery can be searched, filt
 and laid out by folder, flat or by type. Share links last from 1 hour up to 1 year, or never
 expire (until revoked). Databases from older versions get the new columns added on startup.
 
+In the volume viewer, **Export** saves the 3D render or a slice as PNG / JPEG / WebP / TIFF (slices at one
+pixel per voxel, optionally as raw voxel values), and **Animate** renders a slice sweep, a 3D turntable or a
+camera path to an H.264 MP4 or a zip of images. Both run in the browser on the viewer's own GPU.
+
 ## How it's put together
 
 ```

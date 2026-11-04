@@ -19,6 +19,18 @@ let installed = false;
 let dialogOpen = false;
 let dismissed = false; // "Not now": stay quiet until a fresh token arrives or the page reloads
 let cacheStarted = null;
+const expiredListeners = new Set();
+
+/**
+ * Registers a function to call whenever a brick request of the watched volume is refused (the access
+ * token ran out). While at least one is registered the "Session expired" dialog is not shown: whoever
+ * registered takes care of renewing access (an animation being rendered does). Returns a function that
+ * unregisters it.
+ */
+export function onDataAccessExpired(listener) {
+  expiredListeners.add(listener);
+  return () => expiredListeners.delete(listener);
+}
 
 function timeout(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -101,7 +113,10 @@ export function watchDataAccess(volumeId) {
     const response = await originalFetch(input, init);
     if (response.status === 403) {
       const url = typeof input === "string" ? input : input && input.url;
-      if (url && isThisVolumesData(url)) showReloadDialog();
+      if (url && isThisVolumesData(url)) {
+        if (expiredListeners.size) expiredListeners.forEach((fn) => { try { fn(); } catch (_) { /* a listener must not break loading */ } });
+        else showReloadDialog();
+      }
     }
     return response;
   };

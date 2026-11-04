@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Viewer — Volume Gallery</title>
 <script src="/js/theme-init.js?v=hist1"></script>
-<link rel="stylesheet" href="/css/style.css?v=theme1" />
+<link rel="stylesheet" href="/css/style.css?v=org2" />
 <style>
   /* This page trades the app's normal padded/max-width main column for an
      edge-to-edge canvas — the render is the point of the page, everything
@@ -449,10 +449,14 @@
       planAtlas,
       saveAtlasMB,
     } from "/js/atlas-budget.js?v=atlas3";
-    import { setupSliceIntegration } from "/js/slice/slice-integration.js?v=slice2";
+    import { setupSliceIntegration } from "/js/slice/slice-integration.js?v=slice3";
     import { niceScaleLength } from "/js/scalebar.js?v=sb1";
     import { toggleHelpPanel } from "/js/help.js?v=help3";
-    import { startBrickCache, watchDataAccess, resetDataAccessWatch } from "/js/data-access.js?v=sw1";
+    import { makeDescriptionExpandable } from "/js/description.js?v=org2";
+    import { openExportPanel } from "/js/export-image.js?v=org2";
+    import { openAnimatePanel } from "/js/animate.js?v=org3";
+    import { captureStill } from "/js/render-capture.js?v=org3";
+    import { startBrickCache, watchDataAccess, resetDataAccessWatch, onDataAccessExpired } from "/js/data-access.js?v=org3";
 
     requireLogin();
     const role = getRole();
@@ -466,6 +470,8 @@
     const COLLAPSE_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3v3a2 2 0 0 1-2 2H4M15 3v3a2 2 0 0 0 2 2h3M4 16h3a2 2 0 0 1 2 2v3M20 16h-3a2 2 0 0 0-2 2v3"/></svg>`;
     const CUBE_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8 12 3 3 8m18 0v8l-9 5m9-13-9 5m0 8-9-5V8m9 13v-8M3 8l9 5"/></svg>`;
     const HELP_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.1 9a3 3 0 0 1 5.8 1c0 2-3 3-3 3M12 17h.01"/></svg>`;
+    const DOWNLOAD_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>`;
+    const ANIMATE_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polygon points="10 8 16 12 10 16 10 8"/></svg>`;
     const LINK_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>`;
 
     document.getElementById("shell").innerHTML = `
@@ -685,6 +691,8 @@
               <button type="button" data-layout="yz" title="YZ plane: slices along X">YZ</button>
             </div>
             <button id="help-btn" class="icon-btn" aria-pressed="false" title="Show help for this viewer next to the view">${HELP_ICON}<span class="icon-btn-label">Help</span></button>
+            <button id="animate-btn" class="icon-btn" title="Render an animation: a sweep through the slices, a 3D turntable or a camera path">${ANIMATE_ICON}<span class="icon-btn-label">Animate</span></button>
+            <button id="export-btn" class="icon-btn" title="Save the view or a slice as an image file at full resolution">${DOWNLOAD_ICON}<span class="icon-btn-label">Export</span></button>
             <button id="share-btn" class="icon-btn" title="Copy a link to this exact view">${LINK_ICON}<span class="icon-btn-label">Share</span></button>
             ${
               volume.mesh_status === "ready"
@@ -707,6 +715,9 @@
           </div>
         </div>
       `;
+
+      const descEl = content.querySelector(".viewer-desc");
+      if (descEl) makeDescriptionExpandable(descEl, { title: volume.title, text: volume.description });
 
       const canvasWrap = $("canvas-wrap");
       const canvasArea = $("canvas-area");
@@ -754,6 +765,9 @@
       // a brand-new canvas (starting at 1x1, so a resize is always seen).
       // loadToken discards the result of a load superseded by a newer one.
       let loadToken = 0;
+      // When the signed data URL the viewer is using stops working (ms timestamp; see refreshDataAccess)
+      let dataAccessExpiresAt = null;
+      let dataAccessTtlMs = 0;
       let stopStats = null;
       let stopScaleBar = null;
       let urlSync = null;
@@ -821,6 +835,8 @@
           histogramPromise = histogramPromise || api.volumeHistogram(volumeId); // fetched once, in parallel
           const access = await api.volumeDataAccessUrl(volumeId, minLevel);
           if (token !== loadToken) return;
+          dataAccessTtlMs = (access.expires_in_minutes || 0) * 60000;
+          dataAccessExpiresAt = dataAccessTtlMs ? Date.now() + dataAccessTtlMs : null;
           // The brick cache worker (js/sw.js). On the first visit this waits until it controls the page,
           // so the first load is cached too; it never blocks for long or fails the load.
           await startBrickCache();
@@ -882,12 +898,96 @@
 
       loadVolume(activeMinLevel);
 
+      // Gets a fresh data URL (token) by reloading the viewer in place: the view, transfer function and
+      // clipping carry over, the bricks come back from the browser's brick cache or the server. For long jobs
+      // (animation, export) that must not stop when the token runs out. Resolves with the new viewer.
+      async function refreshDataAccess() {
+        await loadVolume(activeMinLevel);
+        if (!currentViewer) throw new Error("Access to the volume\u2019s data could not be renewed");
+        return currentViewer;
+      }
+
       // Share view URL button
       // Help: a floating panel, not a dialog, so the view stays usable while it is open.
       const helpBtn = document.getElementById("help-btn");
       helpBtn.addEventListener("click", () => {
         const open = toggleHelpPanel({ topic: "volume", role: getRole(), onClose: () => helpBtn.setAttribute("aria-pressed", "false") });
         helpBtn.setAttribute("aria-pressed", String(open));
+      });
+
+      // Export: the 3D render at render scale 1.00 once everything has been streamed in, or a slice at
+      // one pixel per voxel. Not modal, so it can stay open while you move to the next slice.
+      const capture3d = async (onProgress) => {
+        for (let attempt = 0; ; attempt++) {
+          let viewer = currentViewer;
+          if (!viewer) throw new Error("The 3D view is not ready yet");
+          let expired = false;
+          const unsubscribe = onDataAccessExpired(() => { expired = true; });
+          try {
+            if (dataAccessExpiresAt != null && dataAccessExpiresAt - Date.now() < Math.min(60000, dataAccessTtlMs / 4)) {
+              onProgress("Renewing access to the data\u2026");
+              viewer = await refreshDataAccess();
+            }
+            const current = viewer;
+            return await captureStill(current, { isCurrent: () => current === currentViewer, onProgress, expired: () => expired });
+          } catch (err) {
+            if (!err.expired || attempt >= 2) throw err;
+            onProgress("Renewing access to the data\u2026");
+            await refreshDataAccess(); // then draw it again
+          } finally {
+            unsubscribe();
+          }
+        }
+      };
+
+      const exportBtn = document.getElementById("export-btn");
+      exportBtn.addEventListener("click", () => {
+        const open = openExportPanel({
+          anchor: exportBtn,
+          baseName: volume.slug,
+          description: volume.title,
+          onClose: () => exportBtn.setAttribute("aria-pressed", "false"),
+          targets: () => {
+            const list = [];
+            if (currentViewer && $("pane-3d").dataset.visible === "1") list.push({ id: "3d", kind: "3d", label: "3D render", name: "3d" });
+            for (const s of slices.views?.visibleSlices() ?? []) list.push({ id: s.axis, kind: "slice", label: s.label, name: s.name });
+            return list;
+          },
+          sizeOf: (id, area) => {
+            if (id === "3d") { const c = $("canvas"); return c ? { width: c.width, height: c.height } : null; }
+            return slices.views ? slices.views.exportRegion(id, area) : null;
+          },
+          capture: (id, opts, onProgress) => {
+            if (id === "3d") return capture3d(onProgress);
+            onProgress("Loading the slice\u2026");
+            return slices.views.exportSlice(id, opts);
+          },
+          note3d: () => (activeMinLevel > 0
+            ? `It uses the data up to Max detail level ${activeMinLevel}; set that to 0 under Advanced for the finest detail.`
+            : ""),
+        });
+        exportBtn.setAttribute("aria-pressed", String(!!open));
+      });
+
+      const animateBtn = document.getElementById("animate-btn");
+      animateBtn.addEventListener("click", () => {
+        const open = openAnimatePanel({
+          anchor: animateBtn,
+          baseName: volume.slug,
+          description: volume.title,
+          getViewer: () => currentViewer,
+          getSlices: () => slices.views,
+          getCanvas: () => $("canvas"),
+          pane: $("pane-3d"),
+          access: {
+            expiresAt: () => dataAccessExpiresAt,
+            ttlMs: () => dataAccessTtlMs,
+            renew: refreshDataAccess,
+            onExpired: onDataAccessExpired,
+          },
+          onClose: () => animateBtn.setAttribute("aria-pressed", "false"),
+        });
+        animateBtn.setAttribute("aria-pressed", String(!!open));
       });
 
       document.getElementById("share-btn").addEventListener("click", async () => {

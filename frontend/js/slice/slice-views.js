@@ -9,7 +9,7 @@
 // others re-request their plane and move their crosshair lines.
 
 import { PlaneClient, prefetchIndices } from "./plane-client.js";
-import { SliceRenderer, requestSliceDevice } from "./slice-renderer.js";
+import { SliceRenderer, requestSliceDevice } from "./slice-renderer.js?v=org3";
 import { SliceState } from "./cursor.js";
 import { buildLut, isGrayRamp } from "./transfer-function.js";
 import { Overlay3D } from "./overlay-3d.js";
@@ -551,6 +551,90 @@ export class SliceViews {
       for (const p of Object.values(this.panes)) p.draw();
       this.onRender?.();
     });
+  }
+
+  // ------------------------------------------------------------ saving a slice as an image
+
+  /** The slice panes on screen now: [{ axis, label, index }]. */
+  visibleSlices() {
+    return AXES.filter((a) => this.panes[a].visible).map((axis) => {
+      const info = AXIS_INFO[axis];
+      const index = planeIndex(axis, this.state.cursor);
+      return { axis, label: `${info.label} slice (${info.normal.toUpperCase()} = ${index})`, name: `${info.label}-${info.normal}${index}`, index, count: this.state.dims[info.normal] };
+    });
+  }
+
+  /**
+   * The part of a plane that is saved: [u0, u1) x [v0, v1) in voxels. "whole" = the full plane,
+   * "visible" = what the pane shows at its current zoom and pan (clipped to the plane).
+   */
+  exportRegion(axis, area) {
+    const ext = planeExtents(axis, this.state.dims);
+    if (area !== "visible") return { u0: 0, v0: 0, width: ext.u, height: ext.v };
+    const pane = this.panes[axis];
+    const ppv = pane.ppv();
+    const view = this.state.views[axis];
+    const halfU = pane.size.width / ppv.u / 2;
+    const halfV = pane.size.height / ppv.v / 2;
+    const u0 = Math.max(0, Math.floor(view.centerU - halfU));
+    const u1 = Math.min(ext.u, Math.ceil(view.centerU + halfU));
+    const v0 = Math.max(0, Math.floor(view.centerV - halfV));
+    const v1 = Math.min(ext.v, Math.ceil(view.centerV + halfV));
+    return { u0, v0, width: Math.max(0, u1 - u0), height: Math.max(0, v1 - v0) };
+  }
+
+  /**
+   * Saves a slice at the full resolution of the data: one image pixel per voxel, whatever the zoom.
+   * Orientation (flips), window / level, invert and the colour table are those of the pane.
+   * @param {"xy"|"xz"|"yz"} axis
+   * @param {{area?: "whole"|"visible", raw?: boolean, index?: number}} [o]  raw: the voxel values themselves,
+   *   not the picture; index: a slice other than the cursor's (the cursor is not moved)
+   * @returns {Promise<{width, height, rgba, gray} | {width, height, raw}>}
+   */
+  async exportSlice(axis, { area = "whole", raw = false, index } = {}) {
+    const st = this.state;
+    const region = this.exportRegion(axis, area);
+    if (region.width < 1 || region.height < 1) throw new Error("The slice is not in view");
+    const idx = index ?? planeIndex(axis, st.cursor);
+    // always the full-resolution plane (the pane may be showing a coarser preview)
+    const plane = await this.client.get(axis, idx, { channel: st.channel, stride: 1, priority: 2 });
+    const { width, height } = region;
+    const flip = st.flips[axis];
+    const cu = region.u0 + width / 2;
+    const cv = region.v0 + height / 2;
+
+    if (raw) {
+      // the same orientation as the picture; voxel (i, j) of the output is read straight from the plane
+      const data = new plane.data.constructor(width * height);
+      for (let j = 0; j < height; j++) {
+        const pv = Math.min(plane.height - 1, Math.max(0, Math.floor(cv + (flip.v * (j + 0.5 - height / 2)))));
+        for (let i = 0; i < width; i++) {
+          const pu = Math.min(plane.width - 1, Math.max(0, Math.floor(cu + (flip.u * (i + 0.5 - width / 2)))));
+          data[j * width + i] = plane.data[pv * plane.width + pu];
+        }
+      }
+      return { width, height, raw: data };
+    }
+
+    const gpu = this.renderer.createPane();
+    try {
+      this.renderer.upload(gpu, plane);
+      const gray = isGrayRamp(st.tf.stops);
+      const rgba = await this.renderer.renderToPixels(gpu, {
+        width,
+        height,
+        extent: planeExtents(axis, st.dims),
+        view: { centerU: cu, centerV: cv },
+        ppv: { u: 1, v: 1 },
+        flip,
+        window: st.window,
+        invert: st.invert,
+        lut: !gray,
+      });
+      return { width, height, rgba, gray };
+    } finally {
+      this.renderer.destroyPane(gpu);
+    }
   }
 
   // ----------------------------------------------------------------- the rest

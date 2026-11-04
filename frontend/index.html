@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Gallery — Volume Gallery</title>
 <script src="/js/theme-init.js?v=hist1"></script>
-<link rel="stylesheet" href="/css/style.css?v=org1" />
+<link rel="stylesheet" href="/css/style.css?v=org2" />
 <style>
   .status-badge {
     display: inline-flex;
@@ -53,6 +53,7 @@
   <script type="module">
     import { api, requireLogin, getRole, getUsername, renderShell, wireLogout } from "/js/api.js?v=org1";
     import { pageHint } from "/js/help.js?v=help3";
+    import { makeDescriptionExpandable } from "/js/description.js?v=org2";
     import {
       escapeHtml, compareNames, folderIndex, openEditDialog, openFolderDialog,
     } from "/js/organize.js?v=org1";
@@ -442,6 +443,11 @@
         });
       });
       listEl.querySelectorAll("[data-tag]").forEach((chip) => chip.addEventListener("click", () => toggleTag(chip.dataset.tag)));
+      listEl.querySelectorAll(".asset-row .desc").forEach((el) => {
+        const row = el.closest(".asset-row");
+        const item = state.assets.find((a) => a.asset_type === row.dataset.kind && a.id === Number(row.dataset.assetRow));
+        if (item) makeDescriptionExpandable(el, { title: item.title, text: item.description });
+      });
 
       if (!isEditor) return;
       // Drag an item (or a folder) onto a folder row, or onto a folder in the path above the list.

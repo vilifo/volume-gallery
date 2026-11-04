@@ -1,8 +1,7 @@
 import subprocess
 import os
-import trimesh
 from pathlib import Path
-
+from pymeshlab import MeshSet
 from ..config import settings
 
 
@@ -34,9 +33,13 @@ def convert_mesh_to_nxz(work_dir: Path, mesh_dir: Path, log) -> Path:
     output_file = mesh_dir / OUTPUT_FILE
 
     # nxsbuild favors PLY. For 3MF and STL, we route through trimesh first.
-    mesh = trimesh.load(input_file, force='mesh')
     log(f"Normalizing geometry to temporary PLY: {temp_mesh_file}")
-    mesh.export(temp_mesh_file)
+    ms = MeshSet()
+    ms.load_new_mesh(str(input_file))
+    if ms.current_mesh().texture_number() > 0:
+        for i in range(ms.current_mesh().texture_number()):
+            ms.current_mesh().texture(i).save(str(work_dir / f"texture_{i}.png"))
+    ms.save_current_mesh(str(temp_mesh_file), save_textures=False)
 
     log(f"Generating multi-resolution Nexus file...")
     # nxsbuild handles the spatial indexing and compression for 3DHOP
