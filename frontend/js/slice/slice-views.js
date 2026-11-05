@@ -11,6 +11,7 @@
 import { PlaneClient, prefetchIndices } from "./plane-client.js";
 import { SliceRenderer, requestSliceDevice } from "./slice-renderer.js?v=org3";
 import { SliceState } from "./cursor.js";
+import { bindTouchGestures } from "./touch-gestures.js?v=org6";
 import { buildLut, isGrayRamp } from "./transfer-function.js";
 import { Overlay3D } from "./overlay-3d.js";
 import { niceScaleLength } from "../scalebar.js";
@@ -48,7 +49,30 @@ export function scaleBarSvg(umPerPx, width, height) {
 
 // ------------------------------------------------------------------------- pane
 
-class Pane {
+/**
+ * Calls `handler(button)` for a click on a button inside `container`. For touch it does not wait for the
+ * click: it acts on pointerup when the finger lifts on the button it touched, and ignores the click that
+ * follows.
+ */
+function onButtonTap(container, handler) {
+  let downOn = null;
+  let handledAt = -Infinity;
+  container.addEventListener("pointerdown", (e) => { downOn = e.pointerType === "touch" ? e.target.closest("button") : null; });
+  container.addEventListener("pointerup", (e) => {
+    if (e.pointerType !== "touch") return;
+    const btn = e.target.closest("button");
+    if (!btn || btn !== downOn) return;
+    handledAt = performance.now();
+    handler(btn);
+  });
+  container.addEventListener("click", (e) => {
+    if (performance.now() - handledAt < 700) return; // the touch tap was dealt with above
+    const btn = e.target.closest("button");
+    if (btn) handler(btn);
+  });
+}
+
+export class Pane {
   constructor(views, axis, el) {
     this.views = views;
     this.axis = axis;
@@ -83,6 +107,12 @@ class Pane {
           <button type="button" data-act="max" title="Maximize / restore">\u2922</button>
         </span>
       </div>
+      <div class="slice-tools" role="group" aria-label="What one finger does">
+        <button type="button" data-tool="cursor" title="One finger: move the crosshair">\u2316</button>
+        <button type="button" data-tool="pan" title="One finger: pan">\u2725</button>
+        <button type="button" data-tool="scroll" title="One finger: scroll through the slices">\u2195</button>
+        <button type="button" data-tool="window" title="One finger: window / level">\u25d0</button>
+      </div>
       <div class="slice-hud"></div>
       <div class="slice-busy" hidden></div>`;
     this.canvas = el.querySelector("canvas");
@@ -99,6 +129,8 @@ class Pane {
     this.ro = new ResizeObserver(() => this.resize());
     this.ro.observe(el);
     this.bindInput();
+    this.bindTouch();
+    this.showTouchTool();
     this.resize();
   }
 
@@ -311,7 +343,7 @@ class Pane {
     el.addEventListener("contextmenu", (e) => e.preventDefault());
 
     el.addEventListener("pointerdown", (e) => {
-      if (e.target.closest(".slice-head")) return;
+      if (e.pointerType === "touch" || e.target.closest(".slice-head, .slice-tools")) return; // touch: see bindTouch()
       el.focus({ preventScroll: true });
       const mode = e.button === 1 || (e.button === 0 && (e.shiftKey || spaceDown)) ? "pan" : e.button === 0 ? "cursor" : e.button === 2 ? "window" : null;
       if (!mode) return;
@@ -324,6 +356,7 @@ class Pane {
     });
 
     el.addEventListener("pointermove", (e) => {
+      if (e.pointerType === "touch") return;
       const { x, y } = this.local(e);
       if (!this.drag) {
         this.hover(x, y);
@@ -396,13 +429,65 @@ class Pane {
     });
     el.addEventListener("keyup", (e) => { if (e.key === " ") spaceDown = false; });
 
-    el.querySelector(".slice-btns").addEventListener("click", (e) => {
-      const act = e.target.closest("button")?.dataset.act;
+    // A tap on a button acts when the finger lifts: after a quick drag or pinch some touch screens do not
+    // send the click of the next tap, and a button that sometimes ignores a tap is worse than none.
+    onButtonTap(el.querySelector(".slice-tools"), (btn) => {
+      if (btn.dataset.tool) this.views.setTouchTool(btn.dataset.tool);
+    });
+    onButtonTap(el.querySelector(".slice-btns"), (btn) => {
+      const act = btn.dataset.act;
       if (act === "reset") st().resetView(this.axis);
       else if (act === "flip-u") st().toggleFlip(this.axis, "u");
       else if (act === "flip-v") st().toggleFlip(this.axis, "v");
       else if (act === "max") st().setLayout(st().layout === this.axis ? "quad" : this.axis);
     });
+  }
+
+  // Touch: one finger taps and drags (what a drag does is the chosen tool), two fingers pinch and pan.
+  bindTouch() {
+    this.scrollAcc = 0;
+    bindTouchGestures(this.el, {
+      local: (e) => this.local(e),
+      tool: () => this.views.touchTool,
+      focus: () => this.el.focus({ preventScroll: true }),
+      begin: () => { this.scrollAcc = 0; this.state.beginInteraction(); },
+      end: () => this.state.endInteraction(),
+      tap: (x, y) => { this.moveCursorTo(x, y); this.hover(x, y); },
+      doubleTap: () => this.state.resetView(this.axis),
+      drag: (tool, x, y, dx, dy) => this.touchDrag(tool, x, y, dx, dy),
+      pinch: (g) => this.touchPinch(g),
+    });
+  }
+
+  touchDrag(tool, x, y, dx, dy) {
+    const s = this.state;
+    if (tool === "pan") {
+      const ppv = this.ppv(), flip = s.flips[this.axis], v = s.views[this.axis];
+      s.setView(this.axis, { centerU: v.centerU - (flip.u * dx) / ppv.u, centerV: v.centerV - (flip.v * dy) / ppv.v });
+    } else if (tool === "window") {
+      s.setWindow(dragWindow(s.window, dx, dy, s.dtype));
+    } else if (tool === "scroll") {
+      // dragging up goes to the next slice, like scrolling a page; about one slice per 10 px
+      this.scrollAcc -= dy;
+      const steps = Math.trunc(this.scrollAcc / 10);
+      if (!steps) return;
+      this.scrollAcc -= steps * 10;
+      this.lastDir = steps > 0 ? 1 : -1;
+      s.moveAlong(this.axis, steps, this.axis);
+    } else {
+      this.moveCursorTo(x, y);
+    }
+  }
+
+  touchPinch({ factor, cx, cy, dx, dy }) {
+    const s = this.state, axis = this.axis;
+    s.setView(axis, zoomAt(s.views[axis], factor, cx, cy, this.size.width, this.size.height, this.ppv(), s.flips[axis]));
+    const ppv = this.ppv(), flip = s.flips[axis], v = s.views[axis];
+    s.setView(axis, { centerU: v.centerU - (flip.u * dx) / ppv.u, centerV: v.centerV - (flip.v * dy) / ppv.v });
+  }
+
+  showTouchTool() {
+    for (const b of this.el.querySelectorAll(".slice-tools button")) b.setAttribute("aria-pressed", String(b.dataset.tool === this.views.touchTool));
   }
 
   hover(x, y) {
@@ -468,6 +553,12 @@ export class SliceViews {
     this.info = info;
     this.device = device;
     this.state = state;
+    // What one finger drags do on a touch screen (see Pane.bindTouch); remembered in this browser
+    this.touchTool = "cursor";
+    try {
+      const saved = localStorage.getItem("vg_slice_touch_tool");
+      if (["cursor", "pan", "scroll", "window"].includes(saved)) this.touchTool = saved;
+    } catch (_) { /* storage unavailable */ }
     this.renderer = new SliceRenderer(device);
     this.renderer.setLut(buildLut(state.tf.stops));
     this._raf = 0;
@@ -652,6 +743,12 @@ export class SliceViews {
       uploadMB: +(this.renderer.uploadBytes / 1e6).toFixed(1),
       panes: Object.fromEntries(AXES.map((a) => [a, { shown: this.panes[a].shownKey, pending: this.panes[a].pendingKey }])),
     };
+  }
+
+  setTouchTool(tool) {
+    this.touchTool = tool;
+    try { localStorage.setItem("vg_slice_touch_tool", tool); } catch (_) { /* storage unavailable */ }
+    for (const axis of AXES) this.panes[axis].showTouchTool();
   }
 
   dispose() {

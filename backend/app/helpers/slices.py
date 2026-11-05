@@ -1,39 +1,19 @@
-"""Plane extraction for the slice views (XY / XZ / YZ planes).
-
-A plane is named by the two physical axes it spans and indexed along the third:
-"xy" at index z, "xz" at index y, "yz" at index x.
-
-Why the server does this
-------------------------
-Volumes are stored as kiln sharded binary with cubic 64^3 bricks. Showing ONE plane of a
-chunked 3D array needs every chunk the plane crosses (for a 2000^3 volume:
-32 x 32 = 1024 chunks), whichever axis is chosen. Done in the browser that is
-1024 HTTP requests plus 1024 decodes per plane, and ~0.5 GB per 64-plane slab.
-Done here the chunks are read from local disk, and only the finished plane
-(a few MB, zstd-compressed) crosses the network.
-
-How it stays fast while scrolling
----------------------------------
-A "slab" is the chunk-thick layer of the volume that contains a plane: decoding
-it once yields all 64 neighbouring planes. Decoded slabs are kept in a
-byte-budgeted LRU cache (``VG_SLICE_CACHE_MB``), shared by every viewer of the
-volume, so scrolling inside a slab costs a memory copy plus compression. Slab
-builds are single-flight: concurrent requests for the same slab wait for one
-decode. Planes too large for the budget are read directly (slower, but exact).
-"""
+"""Plane extraction for orthogonal (XY / XZ / YZ) and arbitrary oblique slice views."""
 from __future__ import annotations
 
+import json
+import os
 import threading
 import time
+import zlib
 from collections import OrderedDict
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
-from typing import Dict, Optional, Tuple
-import gzip
-import json
-import os
+from typing import Dict, List, Optional, Tuple
+
 import numpy as np
-import zlib
+from scipy.ndimage import map_coordinates
+from scipy.spatial.transform import Rotation
 
 from ..config import settings
 
@@ -48,7 +28,6 @@ except ImportError:
 AXIS_NORMAL = {"xy": "z", "xz": "y", "yz": "x"}
 AXES = tuple(AXIS_NORMAL)
 
-# dtype name -> (little-endian numpy dtype sent to the browser, display range)
 _NATIVE = {
     "uint8": (np.dtype("u1"), (0.0, 255.0)),
     "int8": (np.dtype("i1"), (-128.0, 127.0)),
@@ -63,8 +42,21 @@ INDEX_DTYPE = np.dtype([
     ("max", "<f4"),
     ("avg", "<f4"),
 ])
-# Shared thread pool for GIL-releasing pread + decompression
-_IO_POOL = ThreadPoolExecutor(max_workers=min(16, (os.cpu_count() or 4) * 2))
+
+# Physical (66^3) sub-block bounds for the 17 + 16 + 16 + 17 = 66 decomposition
+_TILED66_PHYS_BOUNDS: Tuple[Tuple[int, int], ...] = ((0, 17), (17, 33), (33, 49), (49, 66))
+_TILED66_PHYS_SIZES: Tuple[int, ...] = (17, 16, 16, 17)
+# Slice inside each physical sub-block that strips the 1-voxel outer brick border -> always 16 wide!
+_TILED66_CORE_TRIM: Tuple[slice, ...] = (
+    slice(1, 17),   # block 0: [0..17) -> [1..17) = 16 logical voxels (0..15)
+    slice(0, 16),   # block 1: [17..33) -> [0..16) = 16 logical voxels (16..31)
+    slice(0, 16),   # block 2: [33..49) -> [0..16) = 16 logical voxels (32..47)
+    slice(0, 16),   # block 3: [49..66) -> [0..16) = 16 logical voxels (48..63)
+)
+
+_NUM_WORKERS = min(16, (os.cpu_count() or 4) * 2)
+_IO_POOL = ThreadPoolExecutor(max_workers=_NUM_WORKERS)
+_DEFLATE_EOF_BLOCK = b"\x03\x00"
 
 
 class SliceError(Exception):
@@ -106,11 +98,9 @@ class SlabCache:
             return slab
 
     def fits(self, nbytes: int) -> bool:
-        """Whether a slab of this size may be cached at all (never evict everything for one slab)."""
         return self.max_bytes > 0 and nbytes <= self.max_bytes * 0.75
 
     def get_or_build(self, key: tuple, nbytes: int, build) -> np.ndarray:
-        """Returns the slab, building it (once, even under concurrency) if needed."""
         with self._lock:
             slab = self._slabs.get(key)
             if slab is not None:
@@ -139,7 +129,6 @@ class SlabCache:
                 self._building.pop(key, None)
 
     def _make_room(self, nbytes: int) -> None:
-        # caller holds the lock
         while self._slabs and self._bytes + self._reserved + nbytes > self.max_bytes:
             _, old = self._slabs.popitem(last=False)
             self._bytes -= old.nbytes
@@ -169,306 +158,46 @@ def slab_cache() -> SlabCache:
         return _cache
 
 
-# ----------------------------------------------------------------------- the store
+# ----------------------------------------------------------------------- decompression
 def _decompress_gzip(data: bytes | memoryview) -> bytes:
     if _fast_gzip is not None:
         return _fast_gzip.decompress(data)
-    return zlib.decompress(data, 16 + zlib.MAX_WBITS)
+    return _fast_zlib.decompress(data, 16 + zlib.MAX_WBITS)
 
 
 def _decompress_raw_deflate(data: bytes | memoryview) -> bytes:
-    return _fast_zlib.decompress(data, -zlib.MAX_WBITS)
+    try:
+        # Works if the block already has BFINAL=1 (e.g., the last sub-block 63)
+        return _fast_zlib.decompress(data, -zlib.MAX_WBITS)
+    except Exception:
+        # Z_FULL_FLUSH blocks have BFINAL=0 and end on a byte-aligned 00 00 ff ff sync marker;
+        # appending _DEFLATE_EOF_BLOCK cleanly closes the stream for igzip_lib / isal_zlib.
+        return _fast_zlib.decompress(bytes(data) + _DEFLATE_EOF_BLOCK, -zlib.MAX_WBITS)
 
 
-class VolumeSlicesKiln_old:
-    """Read access to the planes of one binary-sharded volume (one resolution level)."""
+def _decompress_raw_deflate_prefix(data: bytes | memoryview, max_length: int) -> bytes:
+    dobj = _fast_zlib.decompressobj(-zlib.MAX_WBITS)
+    return dobj.decompress(data, max_length)
 
-    def __init__(self, dataset_root: Path, level: int = 0, cache: Optional[SlabCache] = None):
-        self.root = Path(dataset_root).resolve()
-        self.level = level
-        self._cache = cache
-        self.dtype = np.uint16
 
-        vol_json_path = self.root / "volume.json"
-        if not vol_json_path.exists():
-            raise SliceError(f"Cannot open volume metadata: {vol_json_path} not found", 404)
-
-        try:
-            with open(vol_json_path, "r", encoding="utf-8") as f:
-                vol_meta = json.load(f)
-        except Exception as exc:
-            raise SliceError(f"Cannot read volume.json: {exc}", 404) from exc
-
-        levels = vol_meta.get("levels") or []
-        if not 0 <= level < len(levels):
-            raise SliceError(f"Level {level} does not exist (volume has {len(levels)} levels)")
-        self.level_count = len(levels)
-
-        lvl_meta = next((l for l in levels if l.get("lod") == level), levels[level])
-
-        self.brick_size = int(vol_meta.get("brickSize", 64))
-        self.physical_size = int(vol_meta.get("physicalSize", self.brick_size + 2))
-
-        # Dimensions in volume.json are [W, H, D] -> [x, y, z]
-        w, h, d = lvl_meta["dimensions"]
-        self.dims = {"x": int(w), "y": int(h), "z": int(d)}
-        self.chunk = {a: int(min(self.brick_size, self.dims[a])) for a in "xyz"}
-
-        bx, by, bz = lvl_meta["bricks"]
-        self.bricks = {"x": int(bx), "y": int(by), "z": int(bz)}
-        self.channels = 1  # Sharded format is single-channel scalar volume
-
-        fmt = vol_meta.get("format", "uint8")
-        src = np.dtype(fmt)
-        if src.name in _NATIVE:
-            self.dtype = src.name
-        elif src.kind in "iuf":
-            self.dtype = "float32"
-        else:
-            raise SliceError(f"Unsupported data type {src}")
-        self.source_dtype = src.name
-        self._np_dtype = src
-
-        # Scale base voxelSpacing [sx, sy, sz] by 2^level for downsampled LODs
-        base_spacing = vol_meta.get("voxelSpacing") or [1.0, 1.0, 1.0]
-        scale_factor = float(1 << level)
-        self.spacing = {
-            "x": float(base_spacing[0] or 1.0) * scale_factor,
-            "y": float(base_spacing[1] or 1.0) * scale_factor,
-            "z": float(base_spacing[2] or 1.0) * scale_factor,
-        }
-        self.unit = vol_meta.get("unit", None)
-        levels = vol_meta.get("levels") or []
-        if level < 0 or level >= len(levels):
-            raise SliceError(f"Invalid level {level}", 404)
-
-        # Load brick index (lodN_index.json) and verify shard binary (lodN.bin)
-        index_name = lvl_meta.get("indexFile", f"lod{level}_index.json")
-        # index_file = self.root / lvl_meta.get("indexFile", f"lod{level}_index.json")
-        bin_name = lvl_meta.get("binFile", f"lod{level}.bin")
-        index_file = (self.root / index_name).resolve()
-        self.bin_file = (self.root / bin_name).resolve()
-        if self.root not in index_file.parents or self.root not in self.bin_file.parents:
-            raise SliceError("Invalid shard file path", 404)
-        try:
-            index_file.relative_to(self.root)
-            self.bin_file.relative_to(self.root)
-        except ValueError:
-            raise SliceError(f"Invalid shard paths for level {level}", 404)
-
-        if not index_file.exists() or not self.bin_file.exists():
-            raise SliceError(f"Missing shard binary or index file for level {level}", 404)
-
-        try:
-            with open(index_file, "r", encoding="utf-8") as f:
-                idx_meta = json.load(f)
-        except Exception as exc:
-            raise SliceError(f"Cannot read {index_file.name}: {exc}", 404) from exc
-
-        self._compressed = bool(idx_meta.get("compressed", vol_meta.get("compressed", True)))
-        self._entries: dict = idx_meta.get("entries") or {}
-
-        self._omero_window = None
-        self._window: Optional[dict] = None
-        self._window_lock = threading.Lock()
-
-        self.stamp = vol_json_path.stat().st_mtime_ns
-
-    # ------------------------------------------------------------------ metadata
-
-    def info(self) -> dict:
-        lo, hi = _NATIVE.get(self.dtype, (None, (0.0, 1.0)))[1]
-        return {
-            "level": self.level,
-            "levelCount": self.level_count,
-            "dims": self.dims,
-            "chunk": self.chunk,
-            "spacing": self.spacing,
-            "unit": self.unit,
-            "dtype": self.dtype,
-            "sourceDtype": self.source_dtype,
-            "channels": self.channels,
-            "range": [lo, hi],
-            "window": self.suggested_window(),
-        }
-
-    def suggested_window(self) -> dict:
-        """Robust percentiles of the middle xy plane."""
-        with self._window_lock:
-            if self._window is None:
-                if self._omero_window:
-                    start, end = self._omero_window
-                    self._window = {"center": (start + end) / 2, "width": end - start, "source": "omero"}
-                else:
-                    plane = self._read_direct("xy", self.dims["z"] // 2, 0)
-                    self._window = {**percentile_window(plane), "source": "auto"}
-            return self._window
-
-    # --------------------------------------------------------------------- reads
-
-    def _read_brick_core(self, fd: int, bx: int, by: int, bz: int) -> Optional[np.ndarray]:
-        """Read a single physical brick (66^3) from lodN.bin and return its logical core (64^3) in (z, y, x) order."""
-        entry = self._entries.get(f"{bx}/{by}/{bz}")
-        if not entry:
-            return None
-
-        raw_bytes = os.pread(fd, int(entry["size"]), int(entry["offset"]))
-        if self._compressed:
-            raw_bytes = gzip.decompress(raw_bytes)
-
-        p = self.physical_size
-        # Bricks are stored in x-fastest, y-middle, z-slowest order -> shape (z, y, x) in C order
-        brick = np.frombuffer(raw_bytes, dtype=self._np_dtype).reshape((p, p, p))
-        # Strip the 1-voxel border on all sides to get the logical 64^3 core
-        return brick[1:-1, 1:-1, 1:-1]
-
-    def _read_slab(self, axis: str, k: int, channel: int) -> np.ndarray:
-        """Assemble a full brick-thick 3D slab in (z, y, x) order along normal axis `n`."""
-        n = AXIS_NORMAL[axis]
-        bs = self.brick_size
-        start_n = k * bs
-        end_n = min((k + 1) * bs, self.dims[n])
-        thickness = end_n - start_n
-
-        slab_shape = {
-            "z": thickness if n == "z" else self.dims["z"],
-            "y": thickness if n == "y" else self.dims["y"],
-            "x": thickness if n == "x" else self.dims["x"],
-        }
-        slab = np.zeros((slab_shape["z"], slab_shape["y"], slab_shape["x"]), dtype=self._np_dtype)
-
-        bz_range = [k] if n == "z" else range(self.bricks["z"])
-        by_range = [k] if n == "y" else range(self.bricks["y"])
-        bx_range = [k] if n == "x" else range(self.bricks["x"])
-
-        fd = os.open(self.bin_file, os.O_RDONLY)
-        try:
-            for bz in bz_range:
-                z0 = 0 if n == "z" else bz * bs
-                dz = thickness if n == "z" else min(bs, self.dims["z"] - z0)
-                for by in by_range:
-                    y0 = 0 if n == "y" else by * bs
-                    dy = thickness if n == "y" else min(bs, self.dims["y"] - y0)
-                    for bx in bx_range:
-                        x0 = 0 if n == "x" else bx * bs
-                        dx = thickness if n == "x" else min(bs, self.dims["x"] - x0)
-
-                        core = self._read_brick_core(fd, bx, by, bz)
-                        if core is not None:
-                            slab[z0: z0 + dz, y0: y0 + dy, x0: x0 + dx] = core[:dz, :dy, :dx]
-        finally:
-            os.close(fd)
-
-        if self.dtype != self.source_dtype:
-            slab = slab.astype(self.dtype, copy=False)
-        return slab
-
-    def _read_direct(self, axis: str, index: int, channel: int) -> np.ndarray:
-        """Read a single 2D plane directly without allocating the full 64-slice slab in RAM."""
-        n = AXIS_NORMAL[axis]
-        bs = self.brick_size
-        k = index // bs
-        local = index - k * bs
-
-        if axis == "xy":  # (y, x) at fixed z = index
-            plane = np.zeros((self.dims["y"], self.dims["x"]), dtype=self._np_dtype)
-            fd = os.open(self.bin_file, os.O_RDONLY)
-            try:
-                for by in range(self.bricks["y"]):
-                    y0 = by * bs
-                    dy = min(bs, self.dims["y"] - y0)
-                    for bx in range(self.bricks["x"]):
-                        x0 = bx * bs
-                        dx = min(bs, self.dims["x"] - x0)
-                        core = self._read_brick_core(fd, bx, by, k)
-                        if core is not None:
-                            plane[y0: y0 + dy, x0: x0 + dx] = core[local, :dy, :dx]
-            finally:
-                os.close(fd)
-
-        elif axis == "xz":  # (z, x) at fixed y = index
-            plane = np.zeros((self.dims["z"], self.dims["x"]), dtype=self._np_dtype)
-            fd = os.open(self.bin_file, os.O_RDONLY)
-            try:
-                for bz in range(self.bricks["z"]):
-                    z0 = bz * bs
-                    dz = min(bs, self.dims["z"] - z0)
-                    for bx in range(self.bricks["x"]):
-                        x0 = bx * bs
-                        dx = min(bs, self.dims["x"] - x0)
-                        core = self._read_brick_core(fd, bx, k, bz)
-                        if core is not None:
-                            plane[z0: z0 + dz, x0: x0 + dx] = core[:dz, local, :dx]
-            finally:
-                os.close(fd)
-
-        else:  # "yz" -> (z, y) at fixed x = index
-            plane = np.zeros((self.dims["z"], self.dims["y"]), dtype=self._np_dtype)
-            fd = os.open(self.bin_file, os.O_RDONLY)
-            try:
-                for bz in range(self.bricks["z"]):
-                    z0 = bz * bs
-                    dz = min(bs, self.dims["z"] - z0)
-                    for by in range(self.bricks["y"]):
-                        y0 = by * bs
-                        dy = min(bs, self.dims["y"] - y0)
-                        core = self._read_brick_core(fd, k, by, bz)
-                        if core is not None:
-                            plane[z0: z0 + dz, y0: y0 + dy] = core[:dz, :dy, local]
-            finally:
-                os.close(fd)
-
-        if self.dtype != self.source_dtype:
-            plane = plane.astype(self.dtype, copy=False)
-        return plane
-
-    @staticmethod
-    def _plane_from_slab(slab: np.ndarray, axis: str, local: int) -> np.ndarray:
-        if axis == "xy":
-            return slab[local]
-        if axis == "xz":
-            return slab[:, local, :]
-        return slab[:, :, local]
-
-    def get_plane(self, axis: str, index: int, channel: int = 0) -> Tuple[np.ndarray, str]:
-        """The plane as a 2D array (rows = v, columns = u) and where it came from.
-
-        xy: (y, x); xz: (z, x); yz: (z, y).
-        """
-        if axis not in AXIS_NORMAL:
-            raise SliceError(f"axis must be one of {', '.join(AXES)}")
-        n = AXIS_NORMAL[axis]
-        if not 0 <= index < self.dims[n]:
-            raise SliceError(f"{axis} index must be in 0..{self.dims[n] - 1}")
-        if not 0 <= channel < self.channels:
-            raise SliceError(f"channel must be in 0..{self.channels - 1}")
-
-        cache = self._cache if self._cache is not None else slab_cache()
-        k = index // self.chunk[n]
-        thickness = min(self.chunk[n], self.dims[n] - k * self.chunk[n])
-        slab_bytes = (
-                self.dims["x"]
-                * self.dims["y"]
-                * self.dims["z"]
-                // self.dims[n]
-                * thickness
-                * self._np_dtype.itemsize
-        )
-        if cache.fits(slab_bytes):
-            key = (str(self.root), self.stamp, self.level, channel, axis, k)
-            slab = cache.get_or_build(key, slab_bytes, lambda: self._read_slab(axis, k, channel))
-            return self._plane_from_slab(slab, axis, index - k * self.chunk[n]), "slab"
-        return self._read_direct(axis, index, channel), "direct"
+# ----------------------------------------------------------------------- the store
 
 
 class VolumeSlicesKiln:
-    """Read access to the planes of one binary-sharded volume (one resolution level)."""
+    """
+    Read access to orthogonal (XY/XZ/YZ) and arbitrary oblique planes of one
+    binary-sharded Kiln volume level.
+    - On LOD 0 (`tiled66` with `lod0_subindex.npy`), uses 64 (17/16/16/17)^3
+      independently-decompressible sub-blocks per brick.
+    - On LOD > 0 (`z_sync` with `lod{N}_zindex.npy`), uses 66 Z-plane blocks.
+    """
 
     def __init__(self, dataset_root: Path, level: int = 0, cache: Optional[SlabCache] = None):
         self.root = Path(dataset_root)
         self.level = level
         self._cache = cache
         self.dtype = np.uint16
+        self._fd: Optional[int] = None
 
         vol_json_path = self.root / "volume.json"
         if not vol_json_path.exists():
@@ -489,9 +218,11 @@ class VolumeSlicesKiln:
 
         self.brick_size = int(vol_meta.get("brickSize", 64))
         self.physical_size = int(vol_meta.get("physicalSize", self.brick_size + 2))
+        self.brick_layout = lvl_meta.get("brickLayout") or vol_meta.get("brickLayout", "standard")
 
         w, h, d = lvl_meta["dimensions"]
         self.dims = {"x": int(w), "y": int(h), "z": int(d)}
+        self.orig_shape = (self.dims["z"], self.dims["y"], self.dims["x"])
         self.chunk = {a: int(min(self.brick_size, self.dims[a])) for a in "xyz"}
 
         bx, by, bz = lvl_meta["bricks"]
@@ -516,12 +247,18 @@ class VolumeSlicesKiln:
             "y": float(base_spacing[1] or 1.0) * scale_factor,
             "z": float(base_spacing[2] or 1.0) * scale_factor,
         }
+        # In (z, y, x) order to match BlockTiledVolume
+        self.voxel_spacing = np.array(
+            [self.spacing["z"], self.spacing["y"], self.spacing["x"]], dtype=np.float64
+        )
+        self.block_shape = (16, 16, 16)
         self.unit = vol_meta.get("unit", None)
 
         index_file = self.root / lvl_meta.get("indexFile", f"lod{level}_index.json")
         self.bin_file = self.root / lvl_meta.get("binFile", f"lod{level}.bin")
         npy_index_file = self.root / f"lod{level}_index.npy"
         npy_zindex_file = self.root / f"lod{level}_zindex.npy"
+        npy_subindex_file = self.root / f"lod{level}_subindex.npy"
 
         if not self.bin_file.exists() or (not npy_index_file.exists() and not index_file.exists()):
             raise SliceError(f"Missing shard binary or index file for level {level}", 404)
@@ -529,6 +266,12 @@ class VolumeSlicesKiln:
         self._compressed = bool(vol_meta.get("compressed", True))
         self._idx = self._load_or_build_binary_index(index_file, npy_index_file)
         self._zidx = np.load(npy_zindex_file, mmap_mode="r") if npy_zindex_file.exists() else None
+        self._subidx = np.load(npy_subindex_file, mmap_mode="r") if npy_subindex_file.exists() else None
+        if self._subidx is not None:
+            self.brick_layout = "tiled66"
+
+        # Persistent file descriptor (os.pread is thread-safe across _IO_POOL)
+        self._fd = os.open(self.bin_file, os.O_RDONLY)
 
         self._omero_window = None
         self._window: Optional[dict] = vol_meta.get("suggestedWindow")
@@ -540,6 +283,14 @@ class VolumeSlicesKiln:
         self._window_lock = threading.Lock()
 
         self.stamp = vol_json_path.stat().st_mtime_ns
+
+    def __del__(self):
+        if getattr(self, "_fd", None) is not None:
+            try:
+                os.close(self._fd)
+            except OSError:
+                pass
+            self._fd = None
 
     def _load_or_build_binary_index(self, json_path: Path, npy_path: Path) -> np.ndarray:
         """Load mmap binary index (.npy), or auto-build it once from legacy lodN_index.json."""
@@ -553,6 +304,8 @@ class VolumeSlicesKiln:
             raise SliceError(f"Cannot read {json_path.name}: {exc}", 404) from exc
 
         self._compressed = bool(idx_meta.get("compressed", self._compressed))
+        if "brickLayout" in idx_meta:
+            self.brick_layout = idx_meta["brickLayout"]
         entries = idx_meta.get("entries") or {}
         nx, ny, nz = self.bricks["x"], self.bricks["y"], self.bricks["z"]
         arr = np.zeros((nz, ny, nx), dtype=INDEX_DTYPE)
@@ -605,69 +358,252 @@ class VolumeSlicesKiln:
                     self._window = {**percentile_window(plane), "source": "auto"}
             return self._window
 
-    # --------------------------------------------------------------------- reads
+    # --------------------------------------------------- tiled66 (LOD 0) helpers
+
+    def _decode_tiled66_subblock_core(
+        self, raw_sub: bytes | memoryview, sz: int, sy: int, sx: int
+    ) -> np.ndarray:
+        """
+        Reshape a decompressed (17/16/16/17)^3 physical sub-block and strip the
+        1-voxel outer border on any face where sz/sy/sx == 0 or 3, returning a
+        logical (16, 16, 16) view.
+        """
+        shape = (
+            _TILED66_PHYS_SIZES[sz],
+            _TILED66_PHYS_SIZES[sy],
+            _TILED66_PHYS_SIZES[sx],
+        )
+        sub_phys = np.frombuffer(raw_sub, dtype=self._np_dtype).reshape(shape)
+        return sub_phys[
+            _TILED66_CORE_TRIM[sz],
+            _TILED66_CORE_TRIM[sy],
+            _TILED66_CORE_TRIM[sx],
+        ]
+
+    def _read_tiled66_subblocks(
+        self, bx: int, by: int, bz: int, sub_indices: List[int]
+    ) -> Dict[int, np.ndarray]:
+        """
+        Read and decode a subset of the 64 sub-blocks (0..63) of brick (bx, by, bz).
+        Adjacent sub-blocks in `sub_indices` are automatically coalesced into a
+        single `os.pread` call!
+        Returns dict mapping `sub_idx -> (16, 16, 16) logical ndarray`.
+        """
+        entry = self._idx[bz, by, bx]
+        size = int(entry["size"])
+        if size == 0:
+            return {}
+
+        base_off = int(entry["offset"])
+        s_offs = self._subidx[bz, by, bx]
+        sorted_indices = sorted(sub_indices)
+        result: Dict[int, np.ndarray] = {}
+
+        # Coalesce contiguous runs of sub-block indices into single pread calls
+        n = len(sorted_indices)
+        i = 0
+        while i < n:
+            run_start = sorted_indices[i]
+            j = i
+            while j + 1 < n and sorted_indices[j + 1] == sorted_indices[j] + 1:
+                j += 1
+            run_end = sorted_indices[j]
+
+            byte_start = int(s_offs[run_start])
+            byte_end = int(s_offs[run_end + 1])
+            if byte_end > byte_start:
+                buf = os.pread(self._fd, byte_end - byte_start, base_off + byte_start)
+                mv = memoryview(buf)
+                for k in range(i, j + 1):
+                    b_idx = sorted_indices[k]
+                    c0 = int(s_offs[b_idx]) - byte_start
+                    c1 = int(s_offs[b_idx + 1]) - byte_start
+                    raw = _decompress_raw_deflate(mv[c0:c1])
+                    sz = b_idx >> 4
+                    sy = (b_idx >> 2) & 3
+                    sx = b_idx & 3
+                    result[b_idx] = self._decode_tiled66_subblock_core(raw, sz, sy, sx)
+            i = j + 1
+
+        return result
+
+    def _read_tiled66_slab16(
+        self, bx: int, by: int, bz: int, n: str, sub_blk: int
+    ) -> Optional[np.ndarray]:
+        """
+        Read a 16-slice logical slab along normal axis `n` ('z', 'y', or 'x') at
+        `sub_blk` (0..3) from a `tiled66` brick.
+        Returns shape:
+          - n == 'z': (16, 64, 64)
+          - n == 'y': (64, 16, 64)
+          - n == 'x': (64, 64, 16)
+        """
+        if n == "z":
+            indices = [((sub_blk << 4) | (sy << 2) | sx) for sy in range(4) for sx in range(4)]
+            blocks = self._read_tiled66_subblocks(bx, by, bz, indices)
+            if not blocks:
+                return None
+            out = np.empty((16, 64, 64), dtype=self._np_dtype)
+            for sy in range(4):
+                for sx in range(4):
+                    b_idx = (sub_blk << 4) | (sy << 2) | sx
+                    out[:, sy*16:(sy+1)*16, sx*16:(sx+1)*16] = blocks[b_idx]
+            return out
+
+        if n == "y":
+            indices = [((sz << 4) | (sub_blk << 2) | sx) for sz in range(4) for sx in range(4)]
+            blocks = self._read_tiled66_subblocks(bx, by, bz, indices)
+            if not blocks:
+                return None
+            out = np.empty((64, 16, 64), dtype=self._np_dtype)
+            for sz in range(4):
+                for sx in range(4):
+                    b_idx = (sz << 4) | (sub_blk << 2) | sx
+                    out[sz*16:(sz+1)*16, :, sx*16:(sx+1)*16] = blocks[b_idx]
+            return out
+
+        # n == "x"
+        indices = [((sz << 4) | (sy << 2) | sub_blk) for sz in range(4) for sy in range(4)]
+        blocks = self._read_tiled66_subblocks(bx, by, bz, indices)
+        if not blocks:
+            return None
+        out = np.empty((64, 64, 16), dtype=self._np_dtype)
+        for sz in range(4):
+            for sy in range(4):
+                b_idx = (sz << 4) | (sy << 2) | sub_blk
+                out[sz*16:(sz+1)*16, sy*16:(sy+1)*16, :] = blocks[b_idx]
+        return out
+
+    def _read_tiled66_plane(
+        self, bx: int, by: int, bz: int, axis: str, local: int
+    ) -> Optional[np.ndarray]:
+        """
+        Read a single (64, 64) 2D logical plane at `local` (0..63) from a `tiled66` brick.
+        For XY (`axis == 'xy'`), uses partial deflate decompression (`_decompress_raw_deflate_prefix`)
+        to stop right after the target Z slice inside each of the 16 sub-blocks!
+        """
+        entry = self._idx[bz, by, bx]
+        if int(entry["size"]) == 0:
+            return None
+
+        sub_blk = local >> 4
+        sub_off = local & 15
+
+        if axis == "xy":
+            base_off = int(entry["offset"])
+            s_offs = self._subidx[bz, by, bx]
+            b0 = sub_blk << 4
+            r_start = int(s_offs[b0])
+            r_end = int(s_offs[b0 + 16])
+            chunk = os.pread(self._fd, r_end - r_start, base_off + r_start)
+            mv = memoryview(chunk)
+
+            # In sub_blk == 0, physical z=0 is the border plane, so logical sub_off=0 is at phys_z=1
+            phys_z_in_sub = sub_off + (1 if sub_blk == 0 else 0)
+            phys_z_total = _TILED66_PHYS_SIZES[sub_blk]
+            itemsize = self._np_dtype.itemsize
+            tile = np.empty((64, 64), dtype=self._np_dtype)
+
+            for idx_16 in range(16):
+                sy = idx_16 >> 2
+                sx = idx_16 & 3
+                py = _TILED66_PHYS_SIZES[sy]
+                px = _TILED66_PHYS_SIZES[sx]
+                plane_elems = py * px
+                plane_bytes = plane_elems * itemsize
+                needed_bytes = (phys_z_in_sub + 1) * plane_bytes
+
+                c0 = int(s_offs[b0 + idx_16]) - r_start
+                c1 = int(s_offs[b0 + idx_16 + 1]) - r_start
+                raw = (
+                    _decompress_raw_deflate_prefix(mv[c0:c1], needed_bytes)
+                    if phys_z_in_sub + 1 < phys_z_total
+                    else _decompress_raw_deflate(mv[c0:c1])
+                )
+                plane_2d = np.frombuffer(
+                    raw, dtype=self._np_dtype, count=plane_elems, offset=phys_z_in_sub * plane_bytes
+                ).reshape((py, px))
+                tile[sy*16:(sy+1)*16, sx*16:(sx+1)*16] = plane_2d[
+                    _TILED66_CORE_TRIM[sy], _TILED66_CORE_TRIM[sx]
+                ]
+            return tile
+
+        if axis == "xz":
+            slab16 = self._read_tiled66_slab16(bx, by, bz, "y", sub_blk)
+            return None if slab16 is None else slab16[:, sub_off, :]
+
+        # axis == "yz"
+        slab16 = self._read_tiled66_slab16(bx, by, bz, "x", sub_blk)
+        return None if slab16 is None else slab16[:, :, sub_off]
+
+    # ------------------------------------------------ full-brick & zindex reads
 
     def _decode_brick_core(self, raw_bytes: bytes | memoryview) -> np.ndarray:
         if self._compressed:
             raw_bytes = _decompress_gzip(raw_bytes)
+        if self.brick_layout == "tiled66":
+            out = np.empty((64, 64, 64), dtype=self._np_dtype)
+            mv = memoryview(raw_bytes)
+            itemsize = self._np_dtype.itemsize
+            pos = 0
+            for sz in range(4):
+                pz = _TILED66_PHYS_SIZES[sz]
+                for sy in range(4):
+                    py = _TILED66_PHYS_SIZES[sy]
+                    for sx in range(4):
+                        px = _TILED66_PHYS_SIZES[sx]
+                        nbytes = pz * py * px * itemsize
+                        sub = np.frombuffer(mv[pos : pos + nbytes], dtype=self._np_dtype).reshape((pz, py, px))
+                        pos += nbytes
+                        out[sz*16:(sz+1)*16, sy*16:(sy+1)*16, sx*16:(sx+1)*16] = sub[
+                            _TILED66_CORE_TRIM[sz],
+                            _TILED66_CORE_TRIM[sy],
+                            _TILED66_CORE_TRIM[sx],
+                        ]
+            return out
+
         p = self.physical_size
         brick = np.frombuffer(raw_bytes, dtype=self._np_dtype).reshape((p, p, p))
         return brick[1:-1, 1:-1, 1:-1]
 
-    def _read_brick_core(self, fd: int, bx: int, by: int, bz: int) -> Tuple[Optional[np.ndarray], float]:
-        """
-        Returns (core_array, const_val).
-        When a brick is uniform (min == max), returns (None, min) with ZERO disk I/O.
-        """
+    def _read_brick_core(self, bx: int, by: int, bz: int) -> Optional[np.ndarray]:
         entry = self._idx[bz, by, bx]
         size = int(entry["size"])
-        b_min = float(entry["min"])
-        b_max = float(entry["max"])
+        if size == 0:
+            return None
+        raw_bytes = os.pread(self._fd, size, int(entry["offset"]))
+        return self._decode_brick_core(raw_bytes)
 
-        if size == 0 or b_min == b_max:
-            return None, b_min
+    def _read_brick_xy_plane(self, bx: int, by: int, bz: int, local_z: int) -> Optional[np.ndarray]:
+        """Fast-path for XY _read_direct across both tiled66 (LOD 0) and z_sync (LOD > 0)."""
+        if self._subidx is not None and self._compressed:
+            return self._read_tiled66_plane(bx, by, bz, "xy", local_z)
 
-        raw_bytes = os.pread(fd, size, int(entry["offset"]))
-        return self._decode_brick_core(raw_bytes), 0.0
-
-    def _read_brick_xy_plane(
-            self, fd: int, bx: int, by: int, bz: int, local_z: int
-    ) -> Tuple[Optional[np.ndarray], float]:
-        """
-        Fast-path for XY _read_direct:
-        If lodN_zindex.npy exists, reads and decompresses ONLY the single Z-plane (66x less data).
-        Otherwise falls back to full brick decode.
-        """
         entry = self._idx[bz, by, bx]
         size = int(entry["size"])
-        b_min = float(entry["min"])
-        b_max = float(entry["max"])
-
-        if size == 0 or b_min == b_max:
-            return None, b_min
+        if size == 0:
+            return None
 
         if self._zidx is not None and self._compressed:
             z_offs = self._zidx[bz, by, bx]
             rel_start = int(z_offs[local_z + 1])
             rel_end = int(z_offs[local_z + 2])
             if rel_end > rel_start:
-                comp_plane = os.pread(fd, rel_end - rel_start, int(entry["offset"]) + rel_start)
+                comp_plane = os.pread(self._fd, rel_end - rel_start, int(entry["offset"]) + rel_start)
                 raw_plane = _decompress_raw_deflate(comp_plane)
                 p = self.physical_size
                 plane = np.frombuffer(raw_plane, dtype=self._np_dtype).reshape((p, p))
-                return plane[1:-1, 1:-1], 0.0
+                return plane[1:-1, 1:-1]
 
-        core, const_val = self._read_brick_core(fd, bx, by, bz)
-        if core is None:
-            return None, const_val
-        return core[local_z], 0.0
+        core = self._read_brick_core(bx, by, bz)
+        return None if core is None else core[local_z]
 
     def _read_slab(
-            self, axis: str, k: int, channel: int, sub_start: int = 0, sub_thickness: Optional[int] = None
+        self, axis: str, k: int, channel: int, sub_start: int = 0, sub_thickness: Optional[int] = None
     ) -> np.ndarray:
         """
         Assemble a 3D slab in (z, y, x) order along normal axis `n` in parallel.
-        Supports both full brick-thick slabs (64 slices) and thin sub-slabs (e.g., 16 slices).
+        Supports both full brick-thick slabs (64 slices) and 16-slice thin sub-slabs.
         """
         n = AXIS_NORMAL[axis]
         bs = self.brick_size
@@ -687,37 +623,64 @@ class VolumeSlicesKiln:
         by_range = [k] if n == "y" else range(self.bricks["y"])
         bx_range = [k] if n == "x" else range(self.bricks["x"])
 
-        coords = [(bx, by, bz) for bz in bz_range for by in by_range for bx in bx_range]
         s0 = sub_start
         s1 = sub_start + thickness
+        use_tiled66_sub = (
+            self._subidx is not None
+            and self._compressed
+            and (s0 & 15) == 0
+            and thickness <= 16
+        )
+        sub_blk = s0 >> 4
 
-        fd = os.open(self.bin_file, os.O_RDONLY)
-        try:
-            def load_one(c):
-                bx, by, bz = c
-                core, const_val = self._read_brick_core(fd, bx, by, bz)
-                if core is None and const_val == 0.0:
-                    return  # Destination is already zero-initialized
-
-                z0 = 0 if n == "z" else bz * bs
-                dz = thickness if n == "z" else min(bs, self.dims["z"] - z0)
+        io_tasks = []
+        for bz in bz_range:
+            z0 = 0 if n == "z" else bz * bs
+            dz = thickness if n == "z" else min(bs, self.dims["z"] - z0)
+            for by in by_range:
                 y0 = 0 if n == "y" else by * bs
                 dy = thickness if n == "y" else min(bs, self.dims["y"] - y0)
-                x0 = 0 if n == "x" else bx * bs
-                dx = thickness if n == "x" else min(bs, self.dims["x"] - x0)
+                for bx in bx_range:
+                    x0 = 0 if n == "x" else bx * bs
+                    dx = thickness if n == "x" else min(bs, self.dims["x"] - x0)
+                    entry = self._idx[bz, by, bx]
+                    if int(entry["size"]) == 0:
+                        continue
+                    io_tasks.append((int(entry["offset"]), bx, by, bz, x0, dx, y0, dy, z0, dz))
 
-                if core is None:
-                    slab[z0: z0 + dz, y0: y0 + dy, x0: x0 + dx] = const_val
-                elif n == "z":
-                    slab[z0: z0 + dz, y0: y0 + dy, x0: x0 + dx] = core[s0:s1, :dy, :dx]
-                elif n == "y":
-                    slab[z0: z0 + dz, y0: y0 + dy, x0: x0 + dx] = core[:dz, s0:s1, :dx]
-                else:
-                    slab[z0: z0 + dz, y0: y0 + dy, x0: x0 + dx] = core[:dz, :dy, s0:s1]
+        if io_tasks:
+            io_tasks.sort(key=lambda t: t[0])
 
-            list(_IO_POOL.map(load_one, coords))
-        finally:
-            os.close(fd)
+            def load_batch(batch):
+                for _, bx, by, bz, x0, dx, y0, dy, z0, dz in batch:
+                    if use_tiled66_sub:
+                        sub_core = self._read_tiled66_slab16(bx, by, bz, n, sub_blk)
+                        if sub_core is not None:
+                            slab[z0:z0+dz, y0:y0+dy, x0:x0+dx] = sub_core[:dz, :dy, :dx]
+                    elif n == "z" and self._zidx is not None and self._compressed and (s0 > 0 or s1 < bs):
+                        z_offs = self._zidx[bz, by, bx]
+                        r0, r1 = int(z_offs[s0 + 1]), int(z_offs[s1 + 1])
+                        if r1 > r0:
+                            base_off = int(self._idx[bz, by, bx]["offset"])
+                            comp = os.pread(self._fd, r1 - r0, base_off + r0)
+                            raw = _decompress_raw_deflate(comp)
+                            p = self.physical_size
+                            planes = np.frombuffer(raw, dtype=self._np_dtype).reshape((s1 - s0, p, p))
+                            slab[z0:z0+dz, y0:y0+dy, x0:x0+dx] = planes[:dz, 1:1+dy, 1:1+dx]
+                    else:
+                        core = self._read_brick_core(bx, by, bz)
+                        if core is None:
+                            continue
+                        if n == "z":
+                            slab[z0:z0+dz, y0:y0+dy, x0:x0+dx] = core[s0:s1, :dy, :dx]
+                        elif n == "y":
+                            slab[z0:z0+dz, y0:y0+dy, x0:x0+dx] = core[:dz, s0:s1, :dx]
+                        else:
+                            slab[z0:z0+dz, y0:y0+dy, x0:x0+dx] = core[:dz, :dy, s0:s1]
+
+            batch_size = max(1, (len(io_tasks) + _NUM_WORKERS - 1) // _NUM_WORKERS)
+            batches = [io_tasks[i : i + batch_size] for i in range(0, len(io_tasks), batch_size)]
+            list(_IO_POOL.map(load_batch, batches))
 
         if self.dtype != self.source_dtype:
             slab = slab.astype(self.dtype, copy=False)
@@ -728,61 +691,95 @@ class VolumeSlicesKiln:
         bs = self.brick_size
         k = index // bs
         local = index - k * bs
+        use_tiled66 = self._subidx is not None and self._compressed
 
-        fd = os.open(self.bin_file, os.O_RDONLY)
-        try:
-            if axis == "xy":  # (y, x) at fixed z = index
-                plane = np.zeros((self.dims["y"], self.dims["x"]), dtype=self._np_dtype)
-                coords = [(bx, by) for by in range(self.bricks["y"]) for bx in range(self.bricks["x"])]
-
-                def work_xy(c):
-                    bx, by = c
-                    tile, const_val = self._read_brick_xy_plane(fd, bx, by, k, local)
-                    if tile is None and const_val == 0.0:
-                        return
-                    y0 = by * bs
-                    dy = min(bs, self.dims["y"] - y0)
+        if axis == "xy":  # (y, x) at fixed z = index
+            plane = np.zeros((self.dims["y"], self.dims["x"]), dtype=self._np_dtype)
+            io_tasks = []
+            for by in range(self.bricks["y"]):
+                y0 = by * bs
+                dy = min(bs, self.dims["y"] - y0)
+                for bx in range(self.bricks["x"]):
                     x0 = bx * bs
                     dx = min(bs, self.dims["x"] - x0)
-                    plane[y0: y0 + dy, x0: x0 + dx] = const_val if tile is None else tile[:dy, :dx]
+                    entry = self._idx[k, by, bx]
+                    if int(entry["size"]) > 0:
+                        io_tasks.append((int(entry["offset"]), bx, by, x0, dx, y0, dy))
 
-                list(_IO_POOL.map(work_xy, coords))
+            if io_tasks:
+                io_tasks.sort(key=lambda t: t[0])
 
-            elif axis == "xz":  # (z, x) at fixed y = index
-                plane = np.zeros((self.dims["z"], self.dims["x"]), dtype=self._np_dtype)
-                coords = [(bx, bz) for bz in range(self.bricks["z"]) for bx in range(self.bricks["x"])]
+                def work_xy_batch(batch):
+                    for _, bx, by, x0, dx, y0, dy in batch:
+                        tile = self._read_brick_xy_plane(bx, by, k, local)
+                        if tile is not None:
+                            plane[y0:y0+dy, x0:x0+dx] = tile[:dy, :dx]
 
-                def work_xz(c):
-                    bx, bz = c
-                    core, const_val = self._read_brick_core(fd, bx, k, bz)
-                    if core is None and const_val == 0.0:
-                        return
-                    z0 = bz * bs
-                    dz = min(bs, self.dims["z"] - z0)
+                batch_size = max(1, (len(io_tasks) + _NUM_WORKERS - 1) // _NUM_WORKERS)
+                batches = [io_tasks[i : i + batch_size] for i in range(0, len(io_tasks), batch_size)]
+                list(_IO_POOL.map(work_xy_batch, batches))
+
+        elif axis == "xz":  # (z, x) at fixed y = index
+            plane = np.zeros((self.dims["z"], self.dims["x"]), dtype=self._np_dtype)
+            io_tasks = []
+            for bz in range(self.bricks["z"]):
+                z0 = bz * bs
+                dz = min(bs, self.dims["z"] - z0)
+                for bx in range(self.bricks["x"]):
                     x0 = bx * bs
                     dx = min(bs, self.dims["x"] - x0)
-                    plane[z0: z0 + dz, x0: x0 + dx] = const_val if core is None else core[:dz, local, :dx]
+                    entry = self._idx[bz, k, bx]
+                    if int(entry["size"]) > 0:
+                        io_tasks.append((int(entry["offset"]), bx, bz, x0, dx, z0, dz))
 
-                list(_IO_POOL.map(work_xz, coords))
+            if io_tasks:
+                io_tasks.sort(key=lambda t: t[0])
 
-            else:  # "yz" -> (z, y) at fixed x = index
-                plane = np.zeros((self.dims["z"], self.dims["y"]), dtype=self._np_dtype)
-                coords = [(by, bz) for bz in range(self.bricks["z"]) for by in range(self.bricks["y"])]
+                def work_xz_batch(batch):
+                    for _, bx, bz, x0, dx, z0, dz in batch:
+                        if use_tiled66:
+                            tile = self._read_tiled66_plane(bx, k, bz, "xz", local)
+                            if tile is not None:
+                                plane[z0:z0+dz, x0:x0+dx] = tile[:dz, :dx]
+                        else:
+                            core = self._read_brick_core(bx, k, bz)
+                            if core is not None:
+                                plane[z0:z0+dz, x0:x0+dx] = core[:dz, local, :dx]
 
-                def work_yz(c):
-                    by, bz = c
-                    core, const_val = self._read_brick_core(fd, k, by, bz)
-                    if core is None and const_val == 0.0:
-                        return
-                    z0 = bz * bs
-                    dz = min(bs, self.dims["z"] - z0)
+                batch_size = max(1, (len(io_tasks) + _NUM_WORKERS - 1) // _NUM_WORKERS)
+                batches = [io_tasks[i : i + batch_size] for i in range(0, len(io_tasks), batch_size)]
+                list(_IO_POOL.map(work_xz_batch, batches))
+
+        else:  # "yz" -> (z, y) at fixed x = index
+            plane = np.zeros((self.dims["z"], self.dims["y"]), dtype=self._np_dtype)
+            io_tasks = []
+            for bz in range(self.bricks["z"]):
+                z0 = bz * bs
+                dz = min(bs, self.dims["z"] - z0)
+                for by in range(self.bricks["y"]):
                     y0 = by * bs
                     dy = min(bs, self.dims["y"] - y0)
-                    plane[z0: z0 + dz, y0: y0 + dy] = const_val if core is None else core[:dz, :dy, local]
+                    entry = self._idx[bz, by, k]
+                    if int(entry["size"]) > 0:
+                        io_tasks.append((int(entry["offset"]), by, bz, y0, dy, z0, dz))
 
-                list(_IO_POOL.map(work_yz, coords))
-        finally:
-            os.close(fd)
+            if io_tasks:
+                io_tasks.sort(key=lambda t: t[0])
+
+                def work_yz_batch(batch):
+                    for _, by, bz, y0, dy, z0, dz in batch:
+                        if use_tiled66:
+                            tile = self._read_tiled66_plane(k, by, bz, "yz", local)
+                            if tile is not None:
+                                plane[z0:z0+dz, y0:y0+dy] = tile[:dz, :dy]
+                        else:
+                            core = self._read_brick_core(k, by, bz)
+                            if core is not None:
+                                plane[z0:z0+dz, y0:y0+dy] = core[:dz, :dy, local]
+
+                batch_size = max(1, (len(io_tasks) + _NUM_WORKERS - 1) // _NUM_WORKERS)
+                batches = [io_tasks[i : i + batch_size] for i in range(0, len(io_tasks), batch_size)]
+                list(_IO_POOL.map(work_yz_batch, batches))
 
         if self.dtype != self.source_dtype:
             plane = plane.astype(self.dtype, copy=False)
@@ -795,6 +792,29 @@ class VolumeSlicesKiln:
         if axis == "xz":
             return slab[:, local, :]
         return slab[:, :, local]
+
+    def __getitem__(self, key: Tuple[str, int]) -> np.ndarray:
+        """
+        BlockTiledVolume-compatible orthogonal 2D slice indexing:
+          - vol['z', idx] or vol['xy', idx] -> (y, x) plane at z = idx
+          - vol['y', idx] or vol['xz', idx] -> (z, x) plane at y = idx
+          - vol['x', idx] or vol['yz', idx] -> (z, y) plane at x = idx
+        """
+        axis, idx = key
+        axis = str(axis).lower()
+        axis_to_plane = {
+            "z": "xy", "0": "xy", "xy": "xy",
+            "y": "xz", "1": "xz", "xz": "xz",
+            "x": "yz", "2": "yz", "yz": "yz",
+        }
+        if axis not in axis_to_plane:
+            raise KeyError(f"Unsupported axis {axis!r}")
+        plane_axis = axis_to_plane[axis]
+        n = AXIS_NORMAL[plane_axis]
+        if idx < 0:
+            idx += self.dims[n]
+        plane, _ = self.get_plane(plane_axis, idx, channel=0)
+        return plane
 
     def get_plane(self, axis: str, index: int, channel: int = 0) -> Tuple[np.ndarray, str]:
         """The plane as a 2D array (rows = v, columns = u) and where it came from."""
@@ -811,19 +831,34 @@ class VolumeSlicesKiln:
         k = index // chunk_n
         local = index - k * chunk_n
         plane_bytes = (
-                (self.dims["x"] * self.dims["y"] * self.dims["z"] // self.dims[n])
-                * self._np_dtype.itemsize
+            (self.dims["x"] * self.dims["y"] * self.dims["z"] // self.dims[n])
+            * self._np_dtype.itemsize
         )
+        thickness = min(chunk_n, self.dims[n] - k * chunk_n)
+
+        # On LOD 0 (`tiled66`), a 16-slice sub-slab reads ONLY 16 sub-blocks per brick (25% of brick)
+        # with zero wasted voxels and 4x smaller cache footprint!
+        if self._subidx is not None:
+            sub_step = 16
+            sub_idx = local // sub_step
+            sub_start = sub_idx * sub_step
+            sub_thick = min(sub_step, thickness - sub_start)
+            sub_bytes = plane_bytes * sub_thick
+            if sub_thick > 1 and cache.fits(sub_bytes):
+                key = (str(self.root), self.stamp, self.level, channel, axis, k, sub_idx)
+                slab = cache.get_or_build(
+                    key, sub_bytes, lambda: self._read_slab(axis, k, channel, sub_start, sub_thick)
+                )
+                return self._plane_from_slab(slab, axis, local - sub_start), "slab"
 
         # 1. Try full 64-slice brick-layer slab
-        thickness = min(chunk_n, self.dims[n] - k * chunk_n)
         slab_bytes = plane_bytes * thickness
         if cache.fits(slab_bytes):
             key = (str(self.root), self.stamp, self.level, channel, axis, k)
             slab = cache.get_or_build(key, slab_bytes, lambda: self._read_slab(axis, k, channel))
             return self._plane_from_slab(slab, axis, local), "slab"
 
-        # 2. For XZ / YZ (or XY without zindex), try a 16-slice thin sub-slab before dropping to 1-slice direct
+        # 2. Try 16-slice thin sub-slab before dropping to 1-slice direct
         sub_step = 16
         if axis != "xy" or self._zidx is None:
             sub_idx = local // sub_step
@@ -838,6 +873,245 @@ class VolumeSlicesKiln:
                 return self._plane_from_slab(slab, axis, local - sub_start), "slab"
 
         return self._read_direct(axis, index, channel), "direct"
+
+    # --------------------------------------------------- arbitrary oblique slices
+
+    def read_arbitrary_slice_matrix(
+        self,
+        center_mm: Tuple[float, float, float],
+        rotation_matrix: np.ndarray,
+        output_shape: Tuple[int, int],
+        output_pixel_size_mm: float = 1.0,
+        order: int = 1,
+    ) -> np.ndarray:
+        """
+        Extract an arbitrary 2D oblique slice defined by `center_mm` (c_z, c_y, c_x)
+        and `rotation_matrix` (3x3, where column 0 is vertical axis u and column 1
+        is horizontal axis v in (z, y, x) physical coordinates).
+
+        On LOD 0 (`tiled66`), determines the exact sparse set of 16x16x16 sub-blocks
+        touched by the oblique plane (plus `order` interpolation halo) and only reads
+        and decompresses those specific sub-blocks in parallel across `_IO_POOL`.
+        """
+        rotation_matrix = np.asarray(rotation_matrix, dtype=np.float64)
+        if rotation_matrix.shape != (3, 3):
+            raise ValueError(f"Expected 3x3 rotation_matrix, got {rotation_matrix.shape}")
+
+        u = rotation_matrix[:, 0]
+        v = rotation_matrix[:, 1]
+
+        h, w = int(output_shape[0]), int(output_shape[1])
+        y_indices = (np.arange(h, dtype=np.float64) - h / 2.0) * output_pixel_size_mm
+        x_indices = (np.arange(w, dtype=np.float64) - w / 2.0) * output_pixel_size_mm
+        yy, xx = np.meshgrid(y_indices, x_indices, indexing="ij")
+
+        c_z, c_y, c_x = (float(center_mm[0]), float(center_mm[1]), float(center_mm[2]))
+        pts_z_mm = c_z + yy * u[0] + xx * v[0]
+        pts_y_mm = c_y + yy * u[1] + xx * v[1]
+        pts_x_mm = c_x + yy * u[2] + xx * v[2]
+
+        pts_z = pts_z_mm / self.voxel_spacing[0]
+        pts_y = pts_y_mm / self.voxel_spacing[1]
+        pts_x = pts_x_mm / self.voxel_spacing[2]
+
+        dz_dim, dy_dim, dx_dim = self.orig_shape
+        margin = max(1, int(order))
+
+        # Mask of sample points that actually land inside the volume
+        in_bounds = (
+            (pts_z >= 0) & (pts_z < dz_dim) &
+            (pts_y >= 0) & (pts_y < dy_dim) &
+            (pts_x >= 0) & (pts_x < dx_dim)
+        )
+        if not np.any(in_bounds):
+            return np.zeros(output_shape, dtype=np.dtype(self.dtype))
+
+        valid_z = pts_z[in_bounds]
+        valid_y = pts_y[in_bounds]
+        valid_x = pts_x[in_bounds]
+
+        z_min = max(0, int(np.floor(valid_z.min())) - margin)
+        z_max = min(dz_dim, int(np.ceil(valid_z.max())) + margin + 1)
+        y_min = max(0, int(np.floor(valid_y.min())) - margin)
+        y_max = min(dy_dim, int(np.ceil(valid_y.max())) + margin + 1)
+        x_min = max(0, int(np.floor(valid_x.min())) - margin)
+        x_max = min(dx_dim, int(np.ceil(valid_x.max())) + margin + 1)
+
+        if z_min >= z_max or y_min >= y_max or x_min >= x_max:
+            return np.zeros(output_shape, dtype=np.dtype(self.dtype))
+
+        # Fast path for LOD 0 (`tiled66` with 16x16x16 logical sub-blocks)
+        if self._subidx is not None and self._compressed:
+            b_z1, b_z2 = z_min >> 4, (z_max + 15) >> 4
+            b_y1, b_y2 = y_min >> 4, (y_max + 15) >> 4
+            b_x1, b_x2 = x_min >> 4, (x_max + 15) >> 4
+
+            nz_b = b_z2 - b_z1
+            ny_b = b_y2 - b_y1
+            nx_b = b_x2 - b_x1
+
+            # Allocate bounding sub-volume (at 16-voxel granularity)
+            sub_volume = np.zeros((nz_b * 16, ny_b * 16, nx_b * 16), dtype=self._np_dtype)
+
+            # Find ONLY the 16x16x16 sub-blocks actually touched by the oblique plane (+/- margin)
+            # instead of decoding the entire 3D bounding box!
+            qz0 = np.clip((np.floor(valid_z).astype(np.int32) - margin) >> 4, b_z1, b_z2 - 1) - b_z1
+            qz1 = np.clip((np.ceil(valid_z).astype(np.int32) + margin) >> 4, b_z1, b_z2 - 1) - b_z1
+            qy0 = np.clip((np.floor(valid_y).astype(np.int32) - margin) >> 4, b_y1, b_y2 - 1) - b_y1
+            qy1 = np.clip((np.ceil(valid_y).astype(np.int32) + margin) >> 4, b_y1, b_y2 - 1) - b_y1
+            qx0 = np.clip((np.floor(valid_x).astype(np.int32) - margin) >> 4, b_x1, b_x2 - 1) - b_x1
+            qx1 = np.clip((np.ceil(valid_x).astype(np.int32) + margin) >> 4, b_x1, b_x2 - 1) - b_x1
+
+            touched = np.zeros((nz_b, ny_b, nx_b), dtype=np.bool_)
+            for dz_s in (qz0, qz1):
+                for dy_s in (qy0, qy1):
+                    for dx_s in (qx0, qx1):
+                        touched[dz_s, dy_s, dx_s] = True
+
+            # Group touched 16^3 sub-blocks by parent 64^3 brick (bx, by, bz)
+            brick_requests: Dict[Tuple[int, int, int], List[Tuple[int, int, int, int]]] = {}
+            tz, ty, tx = np.nonzero(touched)
+            for l_bz, l_by, l_bx in zip(tz.tolist(), ty.tolist(), tx.tolist()):
+                g_bz = b_z1 + l_bz
+                g_by = b_y1 + l_by
+                g_bx = b_x1 + l_bx
+
+                brick_z, sz = g_bz >> 2, g_bz & 3
+                brick_y, sy = g_by >> 2, g_by & 3
+                brick_x, sx = g_bx >> 2, g_bx & 3
+
+                if (
+                    brick_z < self.bricks["z"]
+                    and brick_y < self.bricks["y"]
+                    and brick_x < self.bricks["x"]
+                ):
+                    sub_idx = (sz << 4) | (sy << 2) | sx
+                    bkey = (brick_x, brick_y, brick_z)
+                    if bkey not in brick_requests:
+                        brick_requests[bkey] = []
+                    brick_requests[bkey].append((sub_idx, l_bz, l_by, l_bx))
+
+            io_tasks = []
+            for (brick_x, brick_y, brick_z), reqs in brick_requests.items():
+                entry = self._idx[brick_z, brick_y, brick_x]
+                if int(entry["size"]) > 0:
+                    io_tasks.append((int(entry["offset"]), brick_x, brick_y, brick_z, reqs))
+
+            if io_tasks:
+                io_tasks.sort(key=lambda t: t[0])
+
+                def load_oblique_batch(batch):
+                    for _, brick_x, brick_y, brick_z, reqs in batch:
+                        sub_indices = [r[0] for r in reqs]
+                        decoded = self._read_tiled66_subblocks(brick_x, brick_y, brick_z, sub_indices)
+                        for sub_idx, l_bz, l_by, l_bx in reqs:
+                            blk = decoded.get(sub_idx)
+                            if blk is not None:
+                                sub_volume[
+                                    l_bz*16 : (l_bz+1)*16,
+                                    l_by*16 : (l_by+1)*16,
+                                    l_bx*16 : (l_bx+1)*16,
+                                ] = blk
+
+                batch_size = max(1, (len(io_tasks) + _NUM_WORKERS - 1) // _NUM_WORKERS)
+                batches = [io_tasks[i : i + batch_size] for i in range(0, len(io_tasks), batch_size)]
+                list(_IO_POOL.map(load_oblique_batch, batches))
+
+            local_z = pts_z - (b_z1 * 16)
+            local_y = pts_y - (b_y1 * 16)
+            local_x = pts_x - (b_x1 * 16)
+
+        else:
+            # Fallback for coarser LODs (64^3 bricks or zindex)
+            bs = self.brick_size
+            b_z1, b_z2 = z_min // bs, (z_max + bs - 1) // bs
+            b_y1, b_y2 = y_min // bs, (y_max + bs - 1) // bs
+            b_x1, b_x2 = x_min // bs, (x_max + bs - 1) // bs
+
+            nz_b = b_z2 - b_z1
+            ny_b = b_y2 - b_y1
+            nx_b = b_x2 - b_x1
+            sub_volume = np.zeros((nz_b * bs, ny_b * bs, nx_b * bs), dtype=self._np_dtype)
+
+            qz0 = np.clip((np.floor(valid_z).astype(np.int32) - margin) // bs, b_z1, b_z2 - 1) - b_z1
+            qz1 = np.clip((np.ceil(valid_z).astype(np.int32) + margin) // bs, b_z1, b_z2 - 1) - b_z1
+            qy0 = np.clip((np.floor(valid_y).astype(np.int32) - margin) // bs, b_y1, b_y2 - 1) - b_y1
+            qy1 = np.clip((np.ceil(valid_y).astype(np.int32) + margin) // bs, b_y1, b_y2 - 1) - b_y1
+            qx0 = np.clip((np.floor(valid_x).astype(np.int32) - margin) // bs, b_x1, b_x2 - 1) - b_x1
+            qx1 = np.clip((np.ceil(valid_x).astype(np.int32) + margin) // bs, b_x1, b_x2 - 1) - b_x1
+
+            touched = np.zeros((nz_b, ny_b, nx_b), dtype=np.bool_)
+            for dz_s in (qz0, qz1):
+                for dy_s in (qy0, qy1):
+                    for dx_s in (qx0, qx1):
+                        touched[dz_s, dy_s, dx_s] = True
+
+            io_tasks = []
+            tz, ty, tx = np.nonzero(touched)
+            for l_bz, l_by, l_bx in zip(tz.tolist(), ty.tolist(), tx.tolist()):
+                brick_z = b_z1 + l_bz
+                brick_y = b_y1 + l_by
+                brick_x = b_x1 + l_bx
+                if (
+                    brick_z < self.bricks["z"]
+                    and brick_y < self.bricks["y"]
+                    and brick_x < self.bricks["x"]
+                ):
+                    entry = self._idx[brick_z, brick_y, brick_x]
+                    if int(entry["size"]) > 0:
+                        io_tasks.append((int(entry["offset"]), brick_x, brick_y, brick_z, l_bx, l_by, l_bz))
+
+            if io_tasks:
+                io_tasks.sort(key=lambda t: t[0])
+
+                def load_coarse_batch(batch):
+                    for _, brick_x, brick_y, brick_z, l_bx, l_by, l_bz in batch:
+                        core = self._read_brick_core(brick_x, brick_y, brick_z)
+                        if core is not None:
+                            sub_volume[
+                                l_bz*bs : (l_bz+1)*bs,
+                                l_by*bs : (l_by+1)*bs,
+                                l_bx*bs : (l_bx+1)*bs,
+                            ] = core
+
+                batch_size = max(1, (len(io_tasks) + _NUM_WORKERS - 1) // _NUM_WORKERS)
+                batches = [io_tasks[i : i + batch_size] for i in range(0, len(io_tasks), batch_size)]
+                list(_IO_POOL.map(load_coarse_batch, batches))
+
+            local_z = pts_z - (b_z1 * bs)
+            local_y = pts_y - (b_y1 * bs)
+            local_x = pts_x - (b_x1 * bs)
+
+        coords = np.array([local_z, local_y, local_x])
+        sampled = map_coordinates(sub_volume, coords, order=order, mode="constant", cval=0.0)
+        if self.dtype != self.source_dtype:
+            sampled = sampled.astype(self.dtype, copy=False)
+        return sampled
+
+    def read_arbitrary_slice_euler(
+        self,
+        center_mm: Tuple[float, float, float],
+        angles: Tuple[float, float, float],
+        output_shape: Tuple[int, int],
+        seq: str = "xyz",
+        degrees: bool = True,
+        output_pixel_size_mm: float = 1.0,
+        order: int = 1,
+    ) -> np.ndarray:
+        """
+        Extract an arbitrary 2D oblique slice specified by Euler angles `angles`.
+        Matches BlockTiledVolume.read_arbitrary_slice_euler signature and behavior.
+        """
+        r = Rotation.from_euler(seq, angles, degrees=degrees)
+        rotation_matrix = r.as_matrix()
+
+        return self.read_arbitrary_slice_matrix(
+            center_mm=center_mm,
+            rotation_matrix=rotation_matrix,
+            output_shape=output_shape,
+            output_pixel_size_mm=output_pixel_size_mm,
+            order=order,
+        )
 
 
 def percentile_window(plane: np.ndarray, lo: float = 1.0, hi: float = 99.0) -> dict:
@@ -891,13 +1165,6 @@ ENCODINGS = ("identity", "zstd")
 
 
 def encode_plane(plane: np.ndarray, encoding: str = "identity", zstd_level: int = 1) -> Tuple[bytes, Optional[str]]:
-    """Plane bytes for the wire.
-
-    The client chooses (``?enc=``) instead of the Accept-Encoding header deciding: a body that
-    is sent as ``Content-Encoding: zstd`` but arrives undecoded (older embedded Chromium, a
-    proxy that strips the header, ...) is unusable, so the page first proves with a tiny probe
-    that its fetch() really decodes zstd and only then asks for it. Raw is always safe.
-    """
     if encoding == "zstd":
         import zstandard
 
@@ -906,12 +1173,12 @@ def encode_plane(plane: np.ndarray, encoding: str = "identity", zstd_level: int 
 
 
 def plane_response_parts(
-        vs: VolumeSlicesKiln,
-        axis: str,
-        index: int,
-        channel: int = 0,
-        stride: int = 1,
-        encoding: str = "identity",
+    vs: VolumeSlicesKiln,
+    axis: str,
+    index: int,
+    channel: int = 0,
+    stride: int = 1,
+    encoding: str = "identity",
 ) -> Tuple[bytes, dict]:
     """Everything the HTTP layer needs: (body, headers). Kept free of FastAPI for testing."""
     if stride not in (1, 2, 4, 8):

@@ -1,6 +1,5 @@
 import json
 import hashlib
-import re
 import shutil
 import time
 from pathlib import Path
@@ -18,12 +17,16 @@ from ..security import create_file_token, decode_token
 from ..config import settings
 from .. import workdir
 from ..organize import apply_asset_update, split_tags
-from ..helpers.slices import SliceError, open_volume_slices, plane_response_parts
-from ..helpers import volume_meta_path, process_zip, decompose_tiff_stack
+from ..helpers import SliceError, open_volume_slices, plane_response_parts
+from ..helpers import volume_meta_path, process_zip, decompose_tiff_stack, RANGE_RE, SHARDED_FILE_RE, decompress_gzip, detect_level_is_tiled66, unshuffle_tiled66_to_66_bytes, compress_gzip_66, ensure_legacy66_level_files, compress_gzip_66_exact_size
 from ..helpers import read_thumbnail, write_thumbnail, store_thumbnail, remove_thumbnail, thumbnail_response
 from ..helpers import histogram_path
 from ..utils import SLUG_RE, _now  # noqa: F401 - re-exported for the other asset routers
 from .meshes import attach_mesh_to_volume, delete_volume_mesh, get_volume_mesh, volume_mesh_source, volume_mesh_file
+
+import numpy as np
+import os
+import asyncio
 
 router = APIRouter(prefix="/api/volumes", tags=["volumes"])
 
@@ -793,40 +796,98 @@ def _check_file_token(token: str, volume_id: int, kind: str) -> dict:
         raise HTTPException(status_code=403, detail="Invalid or expired link")
     return payload
 
-_SHARDED_FILE_RE = re.compile(r"^(?:volume\.json|lod(\d+)\.bin|lod(\d+)_index\.json)$")
-
 
 @router.get("/{volume_id}/dataset/{token}/{path:path}")
-async def serve_sharded_file(volume_id: int, token: str, path: str):
+async def serve_sharded_file(
+    volume_id: int,
+    token: str,
+    path: str,
+    request: Request,
+):
     """Serves volume.json, lodN_index.json and ranged reads of lodN.bin for a volume stored in
     kiln-render's sharded-binary format. kiln-render fetches every brick with a Range request
     into lodN.bin — nginx (X-Accel-Redirect) or FileResponse answers those with 206.
+
+    If a level is stored in the 16/17-tiled format (`tiled66`), either:
+      - converts the requested brick range on the fly into a 66^3 Gzip brick (when serving
+        Range requests directly without creating a second full .bin file), OR
+      - builds/serves the cached old-style 66-tiled file if a full-file/index read or
+        X-Accel-Redirect is used.
     """
     clean_path = _validate_rel_path(path)
     payload = _check_file_token_cached(token, volume_id, "sharded")
-    match = _SHARDED_FILE_RE.fullmatch(clean_path)
+    match = SHARDED_FILE_RE.fullmatch(clean_path)
     if not match:
         raise HTTPException(status_code=404, detail="Not found")
     slug, data_rel, data_root = _get_volume_shard_loc(volume_id)
 
     min_lod = payload.get("min_lod")
-    lod = match.group(1) or match.group(2)
-    # Unlike metadata-only level capping, a level's
-    # files are named after it, so the cap can be enforced outright: kiln never asks for the
-    # finer levels once volume.json no longer lists them.
-    if min_lod and lod is not None and int(lod) < min_lod:
+    lod_str = match.group(1) or match.group(2)
+    lod = int(lod_str) if lod_str is not None else None
+
+    if min_lod and lod is not None and lod < min_lod:
         raise HTTPException(status_code=403, detail="This link does not include that level of detail")
 
-    # volume.json is the only file that lists the levels, so it is the only one rewritten.
     rewrite_meta = bool(min_lod) and clean_path == "volume.json"
-
-    # The bytes are fixed by the token's claims.
     cache_headers = {"Cache-Control": f"public, max-age={settings.FILE_TOKEN_EXPIRE_MINUTES * 60}, immutable"}
     is_json = clean_path.endswith(".json")
 
-    if settings.SHARD_ACCEL_REDIRECT and not rewrite_meta:
+    # Check if this request targets a 16/17-tiled (`tiled66`) level
+    is_tiled66 = False
+    dtype = np.dtype("uint8")
+    if lod is not None:
+        is_tiled66, dtype = detect_level_is_tiled66(data_root, lod)
+
+    # Fast-path 1: On-the-fly per-brick conversion for Range requests to a tiled66 lodN.bin
+    # (Converts ONLY the single requested 66^3 brick in <0.5ms without duplicating lod0.bin on disk!)
+    range_header = request.headers.get("range")
+    if is_tiled66 and clean_path.endswith(".bin") and range_header and not getattr(settings, " materialize_legacy66_on_disk", False):
+        r_match = RANGE_RE.match(range_header.strip())
+        if r_match:
+            target = (data_root / clean_path).resolve()
+            if not target.is_relative_to(data_root) or not target.is_file():
+                raise HTTPException(status_code=404, detail="Not found")
+
+            start_byte = int(r_match.group(1))
+            end_byte = int(r_match.group(2)) if r_match.group(2) else target.stat().st_size - 1
+            read_len = end_byte - start_byte + 1
+
+            def _convert_single_brick() -> bytes:
+                fd = os.open(target, os.O_RDONLY)
+                try:
+                    comp_tiled = os.pread(fd, read_len, start_byte)
+                finally:
+                    os.close(fd)
+                raw_tiled = decompress_gzip(comp_tiled)
+                raw_66 = unshuffle_tiled66_to_66_bytes(raw_tiled, dtype)
+                return compress_gzip_66_exact_size(raw_66, read_len)
+
+            legacy_brick_bytes = await asyncio.to_thread(_convert_single_brick)
+            file_size = target.stat().st_size
+            headers = {
+                **cache_headers,
+                "Content-Range": f"bytes {start_byte}-{end_byte}/{file_size}",
+                "Content-Length": str(len(legacy_brick_bytes)),
+                "Accept-Ranges": "bytes",
+            }
+            return Response(
+                content=legacy_brick_bytes,
+                status_code=206,
+                media_type="application/octet-stream",
+                headers=headers,
+            )
+
+    # If full-file conversion on disk is needed (e.g. for X-Accel-Redirect or full downloads on tiled66):
+    effective_clean_path = clean_path
+    if is_tiled66 and getattr(settings, "MATERIALIZE_LEGACY66_ON_DISK", False):
+        legacy_bin, legacy_idx = await asyncio.to_thread(
+            ensure_legacy66_level_files, data_root, lod, dtype
+        )
+        effective_clean_path = legacy_idx.name if is_json else legacy_bin.name
+
+    if settings.SHARD_ACCEL_REDIRECT and not rewrite_meta and (not is_tiled66 or effective_clean_path != clean_path):
         prefix = settings.SHARD_ACCEL_PREFIX.rstrip("/")
-        rel_parts = [p for p in (slug, data_rel, clean_path) if p]
+        rel_parts = [p for p in (slug, data_rel, effective_clean_path) if p]
         headers = {
             **cache_headers,
             "X-Accel-Redirect": f"{prefix}/{'/'.join(rel_parts)}",
@@ -834,43 +895,31 @@ async def serve_sharded_file(volume_id: int, token: str, path: str):
         }
         return Response(status_code=200, headers=headers)
 
-    target = (data_root / clean_path).resolve()
+    target = (data_root / effective_clean_path).resolve()
     if not target.is_relative_to(data_root):
         raise HTTPException(status_code=400, detail="Invalid path")
     if not target.is_file():
         raise HTTPException(status_code=404, detail="Not found")
 
-    if rewrite_meta:
-        rewritten = truncate_sharded_volume_json(target.read_bytes(), min_lod)
+    if clean_path == "volume.json":
+        raw_vol = target.read_bytes()
+        rewritten = truncate_sharded_volume_json(raw_vol, min_lod or 0)
         if rewritten is not None:
             return Response(content=rewritten, media_type="application/json", headers=cache_headers)
+
     return FileResponse(
         target,
         media_type="application/json" if is_json else "application/octet-stream",
         headers=cache_headers,
     )
 
+
 def truncate_sharded_volume_json(raw: bytes, min_lod: int) -> Optional[bytes]:
-    """Sharded-binary counterpart of truncate_multiscales_json: drops the levels
-    finer than min_lod (keeps levels[min_lod:]) from a volume.json, so kiln-render
-    never sees, and never requests, the finer bricks. Nothing on disk is touched.
-
-    kiln-render derives everything from volume.json, looks levels up by their
-    `lod` field and fetches each level's `binFile` / `indexFile` by the names
-    listed there, so the kept levels are renumbered to start at 0 while still
-    pointing at their real files (lod2.bin etc.). The per-level lodN_index.json
-    files can be served as-is: kiln does not check the `lod` stored inside them.
-
-    Because the new level 0 is coarser, the geometry that kiln reads from the
-    top level has to follow, or the volume would render too small:
-      - originalDimensions -> the dimensions of the new level 0
-      - voxelSpacing       -> scaled by the downsampling between the old and
-                              new level 0 (per axis, factor 2 per step in which
-                              that axis shrank), so the physical size is unchanged
-      - maxLod             -> number of kept levels - 1
-    Returns None (meaning: serve the original file unchanged) if the content
-    isn't parseable, isn't in the expected shape, or min_lod doesn't leave
-    at least one level."""
+    """
+    Drops levels finer than `min_lod` (when `min_lod > 0`) AND normalizes any
+    `brickLayout: "tiled66"` metadata to `"standard"` so legacy kiln-render clients
+    treat the served bricks as standard 66^3 bricks.
+    """
     try:
         data = json.loads(raw)
     except json.JSONDecodeError:
@@ -879,40 +928,65 @@ def truncate_sharded_volume_json(raw: bytes, min_lod: int) -> Optional[bytes]:
         return None
 
     levels = data.get("levels")
-    if not isinstance(levels, list) or not 0 < min_lod < len(levels):
+    if not isinstance(levels, list) or len(levels) == 0:
         return None
     if not all(isinstance(l, dict) and isinstance(l.get("lod"), int) for l in levels):
         return None
     levels = sorted(levels, key=lambda l: l["lod"])
 
-    def _vec3(v) -> Optional[list]:
-        ok = isinstance(v, (list, tuple)) and len(v) == 3 and all(
-            isinstance(x, (int, float)) and not isinstance(x, bool) for x in v
-        )
-        return list(v) if ok else None
+    has_tiled66 = data.get("brickLayout") == "tiled66" or any(
+        l.get("brickLayout") == "tiled66" for l in levels
+    )
 
-    spacing = _vec3(data.get("voxelSpacing"))
-    dims = [_vec3(l.get("dimensions")) for l in levels]
-    if spacing is None or any(d is None for d in dims):
+    # If no level truncation is requested and no tiled66 metadata needs normalizing, serve as-is
+    if min_lod <= 0 and not has_tiled66:
         return None
 
-    # Per axis: one factor-2 step for every level transition up to the new level 0
-    # in which that axis got smaller (the same rule kiln's pyramid builder applies).
-    for axis in range(3):
-        steps = sum(1 for i in range(1, min_lod + 1) if dims[i][axis] != dims[i - 1][axis])
-        spacing[axis] = spacing[axis] * (2 ** steps)
+    if min_lod > 0:
+        if min_lod >= len(levels):
+            return None
 
-    kept = []
-    for new_lod, level in enumerate(levels[min_lod:]):
-        level = dict(level)
-        level["lod"] = new_lod
-        kept.append(level)
+        def _vec3(v) -> Optional[list]:
+            ok = isinstance(v, (list, tuple)) and len(v) == 3 and all(
+                isinstance(x, (int, float)) and not isinstance(x, bool) for x in v
+            )
+            return list(v) if ok else None
 
-    data["levels"] = kept
-    data["originalDimensions"] = list(dims[min_lod])
-    data["voxelSpacing"] = spacing
-    data["maxLod"] = len(kept) - 1
+        spacing = _vec3(data.get("voxelSpacing"))
+        dims = [_vec3(l.get("dimensions")) for l in levels]
+        if spacing is None or any(d is None for d in dims):
+            return None
+
+        for axis in range(3):
+            steps = sum(1 for i in range(1, min_lod + 1) if dims[i][axis] != dims[i - 1][axis])
+            spacing[axis] = spacing[axis] * (2 ** steps)
+
+        kept = []
+        for new_lod, level in enumerate(levels[min_lod:]):
+            level = dict(level)
+            level["lod"] = new_lod
+            if level.get("brickLayout") == "tiled66":
+                level["brickLayout"] = "standard"
+            kept.append(level)
+
+        data["levels"] = kept
+        data["originalDimensions"] = list(dims[min_lod])
+        data["voxelSpacing"] = spacing
+        data["maxLod"] = len(kept) - 1
+    else:
+        kept = []
+        for level in levels:
+            level = dict(level)
+            if level.get("brickLayout") == "tiled66":
+                level["brickLayout"] = "standard"
+            kept.append(level)
+        data["levels"] = kept
+
+    if data.get("brickLayout") == "tiled66":
+        data["brickLayout"] = "standard"
+
     return json.dumps(data).encode("utf-8")
+
 
 @router.get("/{volume_id}/mesh-file/{token}")
 def serve_mesh_file(

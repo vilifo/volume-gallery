@@ -100,6 +100,15 @@
   .slice-title { font-weight: 600; letter-spacing: 0.02em; }
   .slice-sub { opacity: 0.85; font-variant-numeric: tabular-nums; }
   .slice-btns { margin-left: auto; display: flex; gap: 2px; pointer-events: auto; opacity: 0; transition: opacity 0.15s; }
+  /* what one finger does on a touch screen: a strip at the right edge of each slice pane */
+  .slice-tools { position: absolute; right: 6px; top: 50%; transform: translateY(-50%); display: none; flex-direction: column; gap: 4px; z-index: 3; }
+  .slice-tools button { width: 36px; height: 36px; padding: 0; font-size: 18px; line-height: 1; color: #ddd; background: rgba(0,0,0,0.5); border: 1px solid rgba(255,255,255,0.2); border-radius: 8px; cursor: pointer; }
+  .slice-tools button[aria-pressed="true"] { background: rgba(70,110,200,0.85); border-color: rgba(160,190,255,0.8); color: #fff; }
+  .slice-tools button, .slice-btns button { touch-action: manipulation; } /* no double-tap-zoom delay on taps */
+  @media (any-pointer: coarse) { .slice-tools { display: flex; } }
+  /* no hover on touch screens: the buttons must always be there, and big enough for a finger */
+  @media (hover: none) { .slice-btns { opacity: 1; } }
+  @media (pointer: coarse) { .slice-btns button { width: 32px; height: 32px; font-size: 16px; } .slice-btns { gap: 4px; } }
   .slice-pane:hover .slice-btns, .slice-pane:focus-within .slice-btns { opacity: 1; }
   .slice-btns button { background: rgba(0,0,0,0.55); color: #ddd; border: 1px solid rgba(255,255,255,0.15); border-radius: 4px; width: 22px; height: 22px; padding: 0; cursor: pointer; font-size: 12px; line-height: 1; }
   .slice-btns button:hover { background: rgba(60,80,120,0.8); }
@@ -449,9 +458,9 @@
       planAtlas,
       saveAtlasMB,
     } from "/js/atlas-budget.js?v=atlas3";
-    import { setupSliceIntegration } from "/js/slice/slice-integration.js?v=slice4";
+    import { setupSliceIntegration } from "/js/slice/slice-integration.js?v=slice6";
     import { niceScaleLength } from "/js/scalebar.js?v=sb1";
-    import { toggleHelpPanel } from "/js/help.js?v=help5";
+    import { toggleHelpPanel } from "/js/help.js?v=help6";
     import { makeDescriptionExpandable } from "/js/description.js?v=org2";
     import { openExportPanel } from "/js/export-image.js?v=org2";
     import { openAnimatePanel } from "/js/animate.js?v=org5";
