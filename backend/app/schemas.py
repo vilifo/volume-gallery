@@ -1,5 +1,5 @@
 from typing import Literal, Optional, List
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from .models import Role, AssetStatus
 
 
@@ -157,6 +157,10 @@ class PoseSpec(BaseModel):
     distance: float = Field(gt=0, lt=1e9)
     target: List[float] = Field(min_length=3, max_length=3)
     name: Optional[str] = Field(default=None, max_length=80)     # where it came from, e.g. a bookmark's name
+    # The clipping box of the 3D view at this pose, as fractions (0..1) of the volume along x, y, z. Both or
+    # neither: a pose without a box leaves the clipping as it is.
+    clipMin: Optional[List[float]] = Field(default=None, min_length=3, max_length=3)
+    clipMax: Optional[List[float]] = Field(default=None, min_length=3, max_length=3)
 
     @field_validator("back", "up", "target")
     @classmethod
@@ -164,6 +168,21 @@ class PoseSpec(BaseModel):
         if any(x != x or abs(x) > 1e9 for x in v):  # NaN or absurdly large
             raise ValueError("coordinates must be finite numbers")
         return v
+
+    @field_validator("clipMin", "clipMax")
+    @classmethod
+    def _fractions(cls, v):
+        if v is not None and any(not (0.0 <= x <= 1.0) for x in v):  # NaN fails this too
+            raise ValueError("clipping bounds are fractions between 0 and 1")
+        return v
+
+    @model_validator(mode="after")
+    def _clip_pair(self):
+        if (self.clipMin is None) != (self.clipMax is None):
+            raise ValueError("clipMin and clipMax go together")
+        if self.clipMin is not None and any(lo > hi for lo, hi in zip(self.clipMin, self.clipMax)):
+            raise ValueError("clipMin must not be above clipMax")
+        return self
 
 
 class PlaybackSpec(BaseModel):
@@ -206,6 +225,12 @@ class TfPoint(BaseModel):
     y: float
 
 
+class TfColorStop(BaseModel):
+    """One colour stop of a custom colour map (kiln-render patch 0007): position 0..1 and #rrggbb."""
+    pos: float = Field(ge=0, le=1)
+    color: str = Field(pattern=r"^#[0-9a-fA-F]{6}$")
+
+
 class BookmarkOptions(BaseModel):
     """The 3D render settings of a view, named as the viewer names them."""
     mode: Optional[Literal["dvr", "mip", "iso", "lod"]] = None
@@ -215,6 +240,7 @@ class BookmarkOptions(BaseModel):
     isoValue: Optional[float] = None
     tfPreset: Optional[str] = Field(default=None, max_length=40)
     tfPoints: Optional[List[TfPoint]] = Field(default=None, max_length=64)
+    tfColorStops: Optional[List[TfColorStop]] = Field(default=None, max_length=64)   # the colours when tfPreset is "custom"
     upAxis: Optional[Literal["x", "y", "z", "-x", "-y", "-z"]] = None
     cam: Optional[List[float]] = Field(default=None, max_length=12)   # 3, 6 or 12 numbers (a rolled view has 12)
     clipMin: Optional[List[float]] = Field(default=None, min_length=3, max_length=3)

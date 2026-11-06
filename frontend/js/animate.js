@@ -52,16 +52,36 @@ function slerp(a, b, t) {
 }
 const normalizeQ = (q) => { const l = Math.hypot(...q); return q.map((x) => x / l); };
 
-/** A camera pose: where the eye is (target + back * distance) and how it is turned. */
+/**
+ * A camera pose: where the eye is (target + back * distance) and how it is turned. It can also carry the
+ * clipping box of the 3D view as `clipMin` / `clipMax` (each [x, y, z] as a fraction 0..1 of the volume);
+ * a pose without them leaves the clipping alone.
+ */
 export function interpolatePose(a, b, t) {
   const q = slerp(quatFromAxes(a.up, a.back), quatFromAxes(b.up, b.back), t);
   const { up, back } = axesFromQuat(q);
-  return {
+  const pose = {
     back: normalize(back),
     up: normalize(up),
     distance: Math.exp(lerp(Math.log(a.distance), Math.log(b.distance), t)), // zoom feels even in log space
     target: lerp3(a.target, b.target, t),
   };
+  // The clipping box slides linearly (with the same easing as the camera). If only one of the two views
+  // has a clipping box, that one is held rather than guessing what the other should have been.
+  const ca = hasClip(a), cb = hasClip(b);
+  const from = ca ? a : cb ? b : null, to = cb ? b : from;
+  if (from) {
+    pose.clipMin = lerp3(from.clipMin, to.clipMin, t);
+    pose.clipMax = lerp3(from.clipMax, to.clipMax, t);
+  }
+  return pose;
+}
+
+const hasClip = (p) => Array.isArray(p?.clipMin) && Array.isArray(p?.clipMax) && p.clipMin.length === 3 && p.clipMax.length === 3;
+
+/** True when the pose's clipping box cuts something off (a pose without a box, or the whole volume, is not clipped). */
+export function isClipped(p) {
+  return hasClip(p) && (p.clipMin.some((v) => v > 0) || p.clipMax.some((v) => v < 1));
 }
 
 /** The pose turned by `angle` radians about the world up axis (the camera circles the volume). */
@@ -101,18 +121,58 @@ export function playPose(spec, base, worldUp, t) {
   return pathPoseAt(spec.keys, u, { loop: closed, ease: spec.ease });
 }
 
-export function readPose(camera) {
+/**
+ * The camera as a pose. With the renderer (viewer.renderer) the pose also records the clipping box, so that
+ * writePose gives it back; without it the pose is the camera alone.
+ */
+export function readPose(camera, renderer = null) {
   if (!camera.back || !camera.up) throw new Error("3D animations need the free-rotation camera, which this build of the viewer does not have");
-  return { back: [...camera.back], up: [...camera.up], distance: camera.distance, target: [...camera.target] };
+  const pose = { back: [...camera.back], up: [...camera.up], distance: camera.distance, target: [...camera.target] };
+  if (renderer?.clipMin && renderer?.clipMax) {
+    const round = (v) => Math.round(v * 1e4) / 1e4; // the box is stored as float32: keep the saved numbers short
+    pose.clipMin = Array.from(renderer.clipMin, round);
+    pose.clipMax = Array.from(renderer.clipMax, round);
+  }
+  return pose;
 }
 
-export function writePose(camera, p) {
+/**
+ * Turns the camera to a pose. With the renderer, a pose that has a clipping box also sets it (the controls
+ * panel is told through a "vg-clip-changed" event so that its sliders follow); a pose without one leaves it.
+ */
+export function writePose(camera, p, renderer = null) {
   camera.back = [...p.back];
   camera.up = [...p.up];
   camera.distance = p.distance;
   camera.target = [...p.target];
   camera.updatePosition();
   camera.anglesFromOrientation?.();
+  if (renderer?.clipMin && renderer?.clipMax && hasClip(p)) {
+    let changed = false;
+    for (let i = 0; i < 3; i++) {
+      const lo = Math.min(1, Math.max(0, Math.min(p.clipMin[i], p.clipMax[i])));
+      const hi = Math.min(1, Math.max(0, Math.max(p.clipMin[i], p.clipMax[i])));
+      if (renderer.clipMin[i] !== Math.fround(lo) || renderer.clipMax[i] !== Math.fround(hi)) changed = true;
+      renderer.clipMin[i] = lo;
+      renderer.clipMax[i] = hi;
+    }
+    if (changed) {
+      renderer.markDirty?.();
+      renderer.resetAccumulation?.();
+      window.dispatchEvent(new CustomEvent("vg-clip-changed"));
+    }
+  }
+}
+
+/** The keyframe a bookmark stands for: its camera pose plus its clipping box (older bookmarks keep the box in their options). */
+export function poseOfBookmark(entry) {
+  const pose = structuredClone(entry.spec.pose);
+  const o = entry.spec.options ?? {};
+  if (!hasClip(pose) && hasClip({ clipMin: o.clipMin, clipMax: o.clipMax })) {
+    pose.clipMin = [...o.clipMin];
+    pose.clipMax = [...o.clipMax];
+  }
+  return { ...pose, name: entry.name };
 }
 
 /** Slice indices of a sweep from `from` to `to` (either way) every `step`; `pingPong` goes back too. */
@@ -220,12 +280,13 @@ export function openAnimatePanel({ anchor, baseName, description, getViewer, get
       </div>
       <div class="field" id="an-start-wrap"><label for="an-start">Start from</label><select id="an-start"><option value="">The current view</option></select></div>
       <div class="field"><label for="an-tend">Each pass</label><select id="an-tend"><option value="return">Full turn, then again</option><option value="pingpong">Back and forth</option></select></div>
-      <p class="hint">The camera circles the volume about the up axis, from the view you have now. A full turn ends where it began, so it loops. The duration is that of one pass.</p>
+      <p class="hint">The camera circles the volume about the up axis, from the view you have now, with the clipping it has now. A full turn ends where it began, so it loops. The duration is that of one pass.</p>
     </div>
 
     <div data-for="path">
       <div class="field"><label>Views on the path</label><div id="an-keys" class="hint" style="margin:0"></div>
-        <div class="actions" style="margin-top:0.4em"><button type="button" id="an-addkey">Add current view</button><span id="an-bm-wrap" style="display:contents"><select id="an-bm" style="width:auto;max-width:11em"></select><button type="button" id="an-addbm">Add bookmark</button></span><button type="button" id="an-clearkeys">Clear</button></div></div>
+        <div class="actions" style="margin-top:0.4em"><button type="button" id="an-addkey">Add current view</button><span id="an-bm-wrap" style="display:contents"><select id="an-bm" style="width:auto;max-width:11em"></select><button type="button" id="an-addbm">Add bookmark</button></span><button type="button" id="an-clearkeys">Clear</button></div>
+        <label style="display:flex;gap:0.5em;align-items:center;font-size:0.85em;margin:0.5em 0 0"><input type="checkbox" id="an-clip" checked style="width:auto" /> Include the clipping planes in the views I add</label></div>
       <div class="row">
         <div class="field"><label for="an-ease">Movement</label><select id="an-ease"><option value="smooth">Ease in and out</option><option value="linear">Constant speed</option></select></div>
         <div class="field"><label for="an-loop">At the end</label><select id="an-loop"><option value="stop">Stop at the last view</option><option value="return">Return to the first view</option><option value="pingpong">Back and forth</option></select></div>
@@ -284,11 +345,23 @@ export function openAnimatePanel({ anchor, baseName, description, getViewer, get
   function renderKeys() {
     const esc = (t) => String(t).replace(/&/g, "&amp;").replace(/</g, "&lt;");
     const btn = (act, i, label, title, off) => `<button type="button" data-${act}="${i}" title="${title}" style="padding:0 0.45em"${off ? " disabled" : ""}>${label}</button>`;
+    const clipNote = (k) => (isClipped(k) ? " \u2702" : "");
+    const clipTitle = (k) => (hasClip(k) ? "Clipping is part of this view (shown with a scissors mark when it cuts something off). Click to take the clipping from the current view instead." : "This view leaves the clipping alone. Click to add the clipping of the current view.");
     $("an-keys").innerHTML = savedKeyframes.length
-      ? savedKeyframes.map((k, i) => `<div style="display:flex;align-items:center;gap:0.35em"><span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${i + 1}. ${k.name ? esc(k.name) : "View"}</span>${btn("up", i, "\u2191", "Move up", i === 0)}${btn("down", i, "\u2193", "Move down", i === savedKeyframes.length - 1)}${btn("rm", i, "Remove", "Remove", false)}</div>`).join("")
+      ? savedKeyframes.map((k, i) => `<div style="display:flex;align-items:center;gap:0.35em"><span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${i + 1}. ${k.name ? esc(k.name) : "View"}${clipNote(k)}</span>${btn("clip", i, hasClip(k) ? "Clip \u2713" : "Clip", clipTitle(k), false)}${btn("up", i, "\u2191", "Move up", i === 0)}${btn("down", i, "\u2193", "Move down", i === savedKeyframes.length - 1)}${btn("rm", i, "Remove", "Remove", false)}</div>`).join("")
       : "Turn the 3D view to where the path should start, then add it; repeat for each view the camera should pass through. Bookmarks can be added too. Two or more are needed.";
     const move = (i, d) => { const [k] = savedKeyframes.splice(i, 1); savedKeyframes.splice(i + d, 0, k); renderKeys(); refresh(); };
     $("an-keys").querySelectorAll("[data-rm]").forEach((b) => b.addEventListener("click", () => { savedKeyframes.splice(Number(b.dataset.rm), 1); renderKeys(); refresh(); }));
+    $("an-keys").querySelectorAll("[data-clip]").forEach((b) => b.addEventListener("click", () => {
+      try {
+        const now = readPose(getViewer().camera, getViewer().renderer);
+        const k = savedKeyframes[Number(b.dataset.clip)];
+        k.clipMin = now.clipMin;
+        k.clipMax = now.clipMax;
+      } catch (err) { setStatus(err.message, true); return; }
+      renderKeys();
+      refresh();
+    }));
     $("an-keys").querySelectorAll("[data-up]").forEach((b) => b.addEventListener("click", () => move(Number(b.dataset.up), -1)));
     $("an-keys").querySelectorAll("[data-down]").forEach((b) => b.addEventListener("click", () => move(Number(b.dataset.down), 1)));
   }
@@ -362,7 +435,7 @@ export function openAnimatePanel({ anchor, baseName, description, getViewer, get
       if (start === "saved" && savedStart) spec.start = structuredClone(savedStart);
       else if (start) {
         const e = bookmarkList.find((b) => bmKey(b) === start);
-        if (e) spec.start = { ...structuredClone(e.spec.pose), name: e.name };
+        if (e) spec.start = poseOfBookmark(e);
       }
     }
     if (kind === "path") spec.end = $("an-loop").value;
@@ -472,7 +545,7 @@ export function openAnimatePanel({ anchor, baseName, description, getViewer, get
         // The 3D view. Its data access token is short-lived. The page renews it in the background (data-access.js);
         // only if that has failed does the animation fall back to reloading the volume (the view carries over).
         let viewer = getViewer();
-        const base = readPose(viewer.camera);
+        const base = readPose(viewer.camera, viewer.renderer); // includes the clipping box: restored afterwards
         const wasFree = viewer.camera.isFreeRotation?.();
         const orbit = viewer.camera.getOrbitState?.();
         const scale = viewer.renderScale;
@@ -484,7 +557,7 @@ export function openAnimatePanel({ anchor, baseName, description, getViewer, get
           const v = getViewer();
           if (!v) return;
           v.renderScale = scale;
-          writePose(v.camera, base);
+          writePose(v.camera, base, v.renderer);
           v.camera.setFreeRotation?.(wasFree);
           if (!wasFree && orbit) v.camera.setOrbitState(orbit);
         });
@@ -523,7 +596,7 @@ export function openAnimatePanel({ anchor, baseName, description, getViewer, get
               const v = viewer;
               const t = spec.end === "stop" ? (i / Math.max(1, p.count - 1)) * spec.duration : (i / p.count) * cycle;
               const pose = playPose(spec, origin, worldUp, t);
-              writePose(v.camera, pose);
+              writePose(v.camera, pose, v.renderer);
               await afterFrames();
               await waitForRefined(v, { isCurrent: () => getViewer() === v, onProgress, minMs: 300, expired: () => expired });
               const frame = await captureRgba(v);
@@ -578,14 +651,20 @@ export function openAnimatePanel({ anchor, baseName, description, getViewer, get
   $("an-slice").addEventListener("pointerdown", fillSlices);
   $("an-kind").addEventListener("change", () => { fillSlices(); refresh(); });
   $("an-addkey").addEventListener("click", () => {
-    try { savedKeyframes.push(readPose(getViewer().camera)); } catch (err) { setStatus(err.message, true); return; }
+    try {
+      const pose = readPose(getViewer().camera, getViewer().renderer);
+      if (!$("an-clip").checked) { delete pose.clipMin; delete pose.clipMax; }
+      savedKeyframes.push(pose);
+    } catch (err) { setStatus(err.message, true); return; }
     renderKeys();
     refresh();
   });
   $("an-addbm").addEventListener("click", () => {
     const e = bookmarkList.find((b) => bmKey(b) === $("an-bm").value);
     if (!e) return;
-    savedKeyframes.push({ ...structuredClone(e.spec.pose), name: e.name });
+    const key = poseOfBookmark(e);
+    if (!$("an-clip").checked) { delete key.clipMin; delete key.clipMax; }
+    savedKeyframes.push(key);
     renderKeys();
     refresh();
   });

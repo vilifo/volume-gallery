@@ -2,7 +2,7 @@
 // looping for as long as the page is open. The same descriptions (specs) as the animation renderer; here
 // they run on the clock instead of being rendered frame by frame.
 
-import { playPose, readPose, writePose, sweepIndices } from "/js/animate.js?v=org5";
+import { playPose, readPose, writePose, sweepIndices } from "/js/animate.js?v=clip1";
 import { afterFrames, waitForLoaded } from "/js/render-capture.js?v=org4";
 
 const PRELOAD_MAX_POSES = 160;
@@ -59,7 +59,7 @@ export function createPlayer({ host, getViewer, getSlices, is3dVisible, onChange
     const v = getViewer();
     if (!v || !run?.saved) return;
     if (v.engine) v.engine.interactionRenderScale = run.saved.interactionScale;
-    writePose(v.camera, run.saved.base);
+    writePose(v.camera, run.saved.base, v.renderer);
     v.camera.setFreeRotation?.(run.saved.wasFree);
     if (!run.saved.wasFree && run.saved.orbit) v.camera.setOrbitState(run.saved.orbit);
   }
@@ -76,7 +76,9 @@ export function createPlayer({ host, getViewer, getSlices, is3dVisible, onChange
       const v = getViewer();
       if (!v) throw new Error("The volume is not loaded");
       if (v !== session.viewer) adopt(v);
-      writePose(v.camera, playPose({ ...spec, end: spec.end === "pingpong" ? "stop" : spec.end }, session.base, session.worldUp, (i / steps) * spec.duration));
+      // a path that stops must be sampled up to its last view, or the data of that view (and its clipping) is never loaded
+      const frac = spec.end === "return" ? i / steps : i / (steps - 1);
+      writePose(v.camera, playPose({ ...spec, end: spec.end === "pingpong" ? "stop" : spec.end }, session.base, session.worldUp, frac * spec.duration), v.renderer);
       await afterFrames();
       await waitForLoaded(v, { isCurrent: () => getViewer() === v, timeoutMs: 30000, minMs: 120 });
       if (session.cancelled) return;
@@ -93,7 +95,7 @@ export function createPlayer({ host, getViewer, getSlices, is3dVisible, onChange
     const v = getViewer();
     if (!v) return;
     if (v !== run.viewer) adopt(v);
-    writePose(v.camera, playPose(run.spec, run.base, run.worldUp, run.elapsed));
+    writePose(v.camera, playPose(run.spec, run.base, run.worldUp, run.elapsed), v.renderer);
     const D = run.spec.duration;
     const cycle = run.spec.end === "pingpong" ? 2 * D : D;
     run.bar.progress((run.elapsed % cycle) / cycle);
@@ -179,7 +181,7 @@ export function createPlayer({ host, getViewer, getSlices, is3dVisible, onChange
         const viewer = getViewer();
         if (!viewer || !is3dVisible()) throw new Error("Switch to the 3D or quad layout first");
         if (kind === "path" && (spec.keys?.length ?? 0) < 2) throw new Error("A camera path needs at least two views");
-        const current = readPose(viewer.camera);
+        const current = readPose(viewer.camera, viewer.renderer); // with the clipping box: stopping gives it back
         session.base = spec.kind === "turntable" && spec.start ? structuredClone(spec.start) : current; // a bookmark can be the start
         session.worldUp = viewer.camera.upVector ?? [0, 1, 0];
         session.saved = {
@@ -225,7 +227,7 @@ export function createPlayer({ host, getViewer, getSlices, is3dVisible, onChange
       if (run.pausedBy === "touch" && run.spec.kind === "turntable") {
         // the user turned the view by hand: carry on from where they left it
         const v = getViewer();
-        if (v) { run.base = readPose(v.camera); run.elapsed = 0; }
+        if (v) { run.base = readPose(v.camera, v.renderer); run.elapsed = 0; }
       }
       run.last = performance.now();
       setState("playing");
