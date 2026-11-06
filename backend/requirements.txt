@@ -4,7 +4,7 @@ sqlmodel==0.0.48
 python-jose[cryptography]==3.5.0
 argon2-cffi==25.1.0
 bcrypt==5.0.0
-python-multipart==0.0.32
+python-multipart==0.0.33
 
 # --- TIFF-stack -> kiln sharded binary conversion ---
 tifffile==2026.10.15
