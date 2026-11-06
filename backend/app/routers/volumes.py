@@ -832,11 +832,10 @@ async def serve_sharded_file(
     cache_headers = {"Cache-Control": f"public, max-age={settings.FILE_TOKEN_EXPIRE_MINUTES * 60}, immutable"}
     is_json = clean_path.endswith(".json")
 
-    # Check if this request targets a 16/17-tiled (`tiled66`) level
+    # `tiled66` levels (LOD 0) are served untouched: the patched kiln-render (0005) untiles the
+    # bricks in its decompression worker, so no server-side conversion or legacy copy is needed.
     is_tiled66 = False
     dtype = np.dtype("uint8")
-    if lod is not None:
-        is_tiled66, dtype = detect_level_is_tiled66(data_root, lod)
 
     # Fast-path 1: On-the-fly per-brick conversion for Range requests to a tiled66 lodN.bin
     # (Converts ONLY the single requested 66^3 brick in <0.5ms without duplicating lod0.bin on disk!)
@@ -916,9 +915,7 @@ async def serve_sharded_file(
 
 def truncate_sharded_volume_json(raw: bytes, min_lod: int) -> Optional[bytes]:
     """
-    Drops levels finer than `min_lod` (when `min_lod > 0`) AND normalizes any
-    `brickLayout: "tiled66"` metadata to `"standard"` so legacy kiln-render clients
-    treat the served bricks as standard 66^3 bricks.
+    Drops levels finer than `min_lod` (when `min_lod > 0`). `brickLayout` is left untouched.
     """
     try:
         data = json.loads(raw)
@@ -934,12 +931,8 @@ def truncate_sharded_volume_json(raw: bytes, min_lod: int) -> Optional[bytes]:
         return None
     levels = sorted(levels, key=lambda l: l["lod"])
 
-    has_tiled66 = data.get("brickLayout") == "tiled66" or any(
-        l.get("brickLayout") == "tiled66" for l in levels
-    )
-
-    # If no level truncation is requested and no tiled66 metadata needs normalizing, serve as-is
-    if min_lod <= 0 and not has_tiled66:
+    # No level truncation requested: serve as-is (brickLayout "tiled66" is kept for kiln-render)
+    if min_lod <= 0:
         return None
 
     if min_lod > 0:
@@ -965,25 +958,12 @@ def truncate_sharded_volume_json(raw: bytes, min_lod: int) -> Optional[bytes]:
         for new_lod, level in enumerate(levels[min_lod:]):
             level = dict(level)
             level["lod"] = new_lod
-            if level.get("brickLayout") == "tiled66":
-                level["brickLayout"] = "standard"
             kept.append(level)
 
         data["levels"] = kept
         data["originalDimensions"] = list(dims[min_lod])
         data["voxelSpacing"] = spacing
         data["maxLod"] = len(kept) - 1
-    else:
-        kept = []
-        for level in levels:
-            level = dict(level)
-            if level.get("brickLayout") == "tiled66":
-                level["brickLayout"] = "standard"
-            kept.append(level)
-        data["levels"] = kept
-
-    if data.get("brickLayout") == "tiled66":
-        data["brickLayout"] = "standard"
 
     return json.dumps(data).encode("utf-8")
 
