@@ -13,7 +13,7 @@ from .security import hash_password
 from .config import settings, check_secret_key
 from . import workdir
 from .utils import _now
-from .routers import auth, users, volumes, meshes, pointclouds, branding, shares, uploads, folders, paths, bookmarks
+from .routers import auth, users, volumes, meshes, pointclouds, branding, shares, uploads, folders, paths, bookmarks, admin
 
 
 def _bootstrap_admin():
@@ -90,6 +90,7 @@ app.include_router(uploads.router)
 app.include_router(folders.router)
 app.include_router(paths.router)
 app.include_router(bookmarks.router)
+app.include_router(admin.router)
 
 # Serve the frontend (single-page-ish static site) at the root.
 @app.get("/js/sw.js", include_in_schema=False)

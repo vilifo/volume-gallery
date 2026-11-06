@@ -313,8 +313,8 @@
   .ctl-cs-stop { position: absolute; top: -5px; width: 10px; height: 26px; margin-left: -5px; box-sizing: border-box; border: 2px solid #fff; border-radius: 3px; background: var(--c); box-shadow: 0 0 0 1px rgba(0,0,0,0.75); cursor: ew-resize; }
   .ctl-cs-stop.sel { border-color: var(--accent); z-index: 1; }
   .ctl-cs-row { display: flex; align-items: center; gap: 0.5em; padding-top: 4px; }
-  .ctl-cs-row input[type="color"] { width: 34px; height: 24px; padding: 0; border: 1px solid var(--viewer-border); border-radius: 4px; background: none; cursor: pointer; }
-  .ctl-cs-row input[type="number"] { width: 4.6em; padding: 2px 4px; font: inherit; color: inherit; background: transparent; border: 1px solid var(--viewer-border); border-radius: 4px; }
+  /*.ctl-cs-row input[type="color"] { width: 34px; height: 24px; padding: 0; border: 1px solid var(--viewer-border); border-radius: 4px; background: none; cursor: pointer; }*/
+  /*.ctl-cs-row input[type="number"] { width: 4.6em; padding: 2px 4px; font: inherit; color: inherit; background: transparent; border: 1px solid var(--viewer-border); border-radius: 4px; }*/
   .ctl-cs-row .ctl-chip:disabled { opacity: 0.4; cursor: default; }
   .ctl-tf-help { font-size: 10px; color: var(--text-dim); text-align: center; padding: 0.35em 0; background: color-mix(in srgb, var(--panel) 86%, transparent); }
 
@@ -459,7 +459,7 @@
   <div class="app-shell" id="shell"></div>
 
   <script type="module">
-    import { api, requireLogin, getRole, getUsername, renderShell, wireLogout } from "/js/api.js?v=org5";
+    import { api, requireLogin, getRole, getUsername, renderShell, wireLogout } from "/js/api.js?v=share1";
     import { syncHistogram } from "/js/histogram.js?v=hist1";
 import { insertStop, sampleStops, rgbToHex, decodeTf, encodeTf } from "/js/slice/transfer-function.js";
     import { KilnViewer } from "/vendor/kiln-render/lib/kiln-render.js?v=atlas3";
