@@ -1,4 +1,5 @@
 import hashlib
+import random
 import re
 import secrets
 from datetime import datetime, timedelta, timezone
@@ -6,12 +7,13 @@ from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
+from sqlalchemy import delete
 from sqlmodel import Session, select
 
 from ..config import settings
 from ..database import get_session
 from ..deps import require_editor
-from ..models import Mesh, PointCloud, ShareLink, User, Volume
+from ..models import Mesh, PointCloud, ShareLink, ShareView, User, Volume
 from ..schemas import ShareConfigRead, ShareLinkCreate, ShareLinkRead
 from ..security import create_share_session_token
 from ..utils import NEVER_EXPIRES, NEVER_EXPIRES_THRESHOLD, get_utc_now
@@ -24,6 +26,8 @@ _MAX_EXPIRY_MINUTES = 525600  # 1 year
 # Whoever opens a never-expiring link gets a session token for this long (opening the link again
 # issues a fresh one); the link itself stays valid until it is revoked.
 _NEVER_LINK_SESSION = timedelta(days=30)
+# The view log (ShareView) is kept this long; older rows are pruned now and then as links are opened.
+_VIEW_LOG_DAYS = 400
 _VIEWER_PATHS = {
     "volume": "/viewers/volume.html",
     "mesh": "/viewers/mesh.html",
@@ -182,6 +186,7 @@ def delete_or_revoke_share_link(
     share = session.get(ShareLink, share_id)
     if not share:
         raise HTTPException(status_code=404, detail="Share link not found")
+    session.exec(delete(ShareView).where(ShareView.share_id == share.id))
     session.delete(share)
     session.commit()
     return {"ok": True}
@@ -209,6 +214,9 @@ def resolve_short_share_link(code: str, session: Session = Depends(get_session))
 
     share.views_count = (share.views_count or 0) + 1
     session.add(share)
+    session.add(ShareView(share_id=share.id, viewed_at=now))
+    if random.random() < 0.01:  # housekeeping: about once per hundred openings
+        session.exec(delete(ShareView).where(ShareView.viewed_at < now - timedelta(days=_VIEW_LOG_DAYS)))
     session.commit()
 
     exp = _as_utc(share.expires_at)

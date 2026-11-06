@@ -1,0 +1,1347 @@
+diff --git a/backend/app/helpers/storage.py b/backend/app/helpers/storage.py
+new file mode 100644
+index 0000000..6c45569
+--- /dev/null
++++ b/backend/app/helpers/storage.py
+@@ -0,0 +1,196 @@
++"""Disk usage of the folders that hold the assets (volumes, meshes, point clouds).
++
++Sizes are what the files occupy on disk (allocated blocks where the file system reports them, else the
++file size), next to their plain size. Symbolic links are not followed below the asset's own folder, and a
++file with several hard links is counted once. A scan walks the folder, so results are cached for
++FILE_META_CACHE_TTL_SECONDS (callers can ask for a fresh one).
++"""
++import os
++import re
++import shutil
++import threading
++import time
++from dataclasses import dataclass, field
++from pathlib import Path
++from typing import Callable, Dict, Optional, Tuple
++
++from ..config import settings
++
++_LOD_BIN_RE = re.compile(r"^lod(\d+)\.bin$")
++_LOD_INDEX_RE = re.compile(r"^lod\d+_(index|subindex|zindex)\.(npy|json)$")
++_VOLUME_META = {"volume.json", "histogram.json", "suggested_window.json", "metadata.json"}
++
++_DTYPE_BYTES = {
++    "uint8": 1, "int8": 1, "uint16": 2, "int16": 2, "uint32": 4, "int32": 4, "float32": 4, "float64": 8,
++}
++
++
++@dataclass
++class Bucket:
++    label: str
++    bytes: int = 0            # on disk (allocated)
++    apparent: int = 0         # sum of file sizes
++    files: int = 0
++
++
++@dataclass
++class Scan:
++    buckets: Dict[str, Bucket] = field(default_factory=dict)
++
++    @property
++    def bytes(self) -> int:
++        return sum(b.bytes for b in self.buckets.values())
++
++    @property
++    def apparent(self) -> int:
++        return sum(b.apparent for b in self.buckets.values())
++
++    @property
++    def files(self) -> int:
++        return sum(b.files for b in self.buckets.values())
++
++
++Classifier = Callable[[str], Tuple[str, str]]  # relative path -> (key, label)
++
++
++def _one_bucket(_rel: str) -> Tuple[str, str]:
++    return "all", "All files"
++
++
++def scan_dir(root: Path, classify: Classifier = _one_bucket) -> Scan:
++    """Walks `root` (a missing folder is empty) and adds up the files per class."""
++    scan = Scan()
++    seen = set()  # (device, inode) of files with more than one link
++    try:
++        root = root.resolve()
++    except OSError:
++        return scan
++    stack = [(root, "")]
++    while stack:
++        folder, prefix = stack.pop()
++        try:
++            it = os.scandir(folder)
++        except OSError:
++            continue
++        with it:
++            for entry in it:
++                try:
++                    if entry.is_symlink():
++                        continue
++                    rel = f"{prefix}{entry.name}"
++                    if entry.is_dir(follow_symlinks=False):
++                        stack.append((Path(entry.path), rel + "/"))
++                        continue
++                    st = entry.stat(follow_symlinks=False)
++                except OSError:
++                    continue
++                if st.st_nlink > 1:
++                    ident = (st.st_dev, st.st_ino)
++                    if ident in seen:
++                        continue
++                    seen.add(ident)
++                allocated = getattr(st, "st_blocks", None)
++                allocated = allocated * 512 if allocated is not None else st.st_size
++                key, label = classify(rel)
++                b = scan.buckets.setdefault(key, Bucket(label))
++                b.bytes += allocated
++                b.apparent += st.st_size
++                b.files += 1
++    return scan
++
++
++# ------------------------------------------------------------------------------ per asset kind
++
++def kind_dir(asset_type: str) -> Path:
++    return {"volume": settings.VOLUMES_DIR, "mesh": settings.MESHES_DIR, "pointcloud": settings.POINTCLOUDS_DIR}[asset_type]
++
++
++def asset_root(asset_type: str, slug: str) -> Path:
++    return kind_dir(asset_type) / slug
++
++
++def classifier_for(asset_type: str, thumbnail_name: Optional[str] = None) -> Classifier:
++    def common(rel: str) -> Optional[Tuple[str, str]]:
++        if thumbnail_name and rel == thumbnail_name:
++            return "thumbnail", "Thumbnail"
++        return None
++
++    if asset_type == "volume":
++        def classify(rel: str):
++            hit = common(rel)
++            if hit:
++                return hit
++            m = _LOD_BIN_RE.match(rel)
++            if m:
++                return f"lod{int(m.group(1)):04d}", f"LOD {int(m.group(1))} bricks"
++            if _LOD_INDEX_RE.match(rel):
++                return "indexes", "Brick indexes"
++            if rel in _VOLUME_META:
++                return "metadata", "Metadata and histogram"
++            return "other", "Other files"
++        return classify
++    if asset_type == "mesh":
++        def classify(rel: str):
++            hit = common(rel)
++            if hit:
++                return hit
++            if rel == "mesh.nxz":
++                return "nxz", "Compressed mesh (for viewing)"
++            if rel.startswith("_upload."):
++                return "original", "Original file (for download)"
++            return "other", "Other files"
++        return classify
++
++    def classify(rel: str):
++        hit = common(rel)
++        if hit:
++            return hit
++        if rel in ("octree.bin", "hierarchy.bin"):
++            return rel, "Octree data" if rel == "octree.bin" else "Octree hierarchy"
++        if rel == "metadata.json":
++            return "metadata", "Metadata"
++        return "other", "Other files"
++    return classify
++
++
++# ----------------------------------------------------------------------------------------- cache
++_CACHE: Dict[Tuple, Tuple[float, Scan]] = {}
++_LOCK = threading.Lock()
++_MAX_ENTRIES = 4096
++
++
++def cached_scan(asset_type: str, slug: str, thumbnail_name: Optional[str] = None, refresh: bool = False) -> Scan:
++    key = (asset_type, slug, thumbnail_name)
++    now = time.monotonic()
++    if not refresh:
++        with _LOCK:
++            hit = _CACHE.get(key)
++        if hit and now < hit[0]:
++            return hit[1]
++    scan = scan_dir(asset_root(asset_type, slug), classifier_for(asset_type, thumbnail_name))
++    with _LOCK:
++        if len(_CACHE) >= _MAX_ENTRIES:
++            _CACHE.clear()
++        _CACHE[key] = (now + max(1.0, float(settings.FILE_META_CACHE_TTL_SECONDS)), scan)
++    return scan
++
++
++# ------------------------------------------------------------------------------------ the disk
++def disk_usage(path: Path) -> Optional[dict]:
++    try:
++        u = shutil.disk_usage(path)
++    except OSError:
++        return None
++    return {"total": u.total, "used": u.used, "free": u.free}
++
++
++def raw_voxel_bytes(volume_json: dict) -> Optional[int]:
++    """Size of the full-resolution voxel data without compression, from volume.json (None if unknown)."""
++    dims = volume_json.get("originalDimensions")
++    per = _DTYPE_BYTES.get(str(volume_json.get("format", "")).lower())
++    if not dims or len(dims) != 3 or not per:
++        return None
++    try:
++        return int(dims[0]) * int(dims[1]) * int(dims[2]) * per
++    except (TypeError, ValueError):
++        return None
+diff --git a/backend/app/main.py b/backend/app/main.py
+index 7d3d5b3..02e7335 100644
+--- a/backend/app/main.py
++++ b/backend/app/main.py
+@@ -13,7 +13,7 @@ from .security import hash_password
+ from .config import settings, check_secret_key
+ from . import workdir
+ from .utils import _now
+-from .routers import auth, users, volumes, meshes, pointclouds, branding, shares, uploads, folders, paths, bookmarks
++from .routers import auth, users, volumes, meshes, pointclouds, branding, shares, uploads, folders, paths, bookmarks, admin
+ 
+ 
+ def _bootstrap_admin():
+@@ -90,6 +90,7 @@ app.include_router(uploads.router)
+ app.include_router(folders.router)
+ app.include_router(paths.router)
+ app.include_router(bookmarks.router)
++app.include_router(admin.router)
+ 
+ # Serve the frontend (single-page-ish static site) at the root.
+ @app.get("/js/sw.js", include_in_schema=False)
+diff --git a/backend/app/models.py b/backend/app/models.py
+index 86eefca..ec66cab 100644
+--- a/backend/app/models.py
++++ b/backend/app/models.py
+@@ -153,3 +153,15 @@ class ShareLink(SQLModel, table=True):
+     )
+     revoked: bool = Field(default=False)
+     views_count: int = Field(default=0)
++
++
++class ShareView(SQLModel, table=True):
++    """One opening of a share link (/s/<code>): the log behind the statistics on the admin's Shares page.
++    Deleted with its link; old rows are pruned (see routers/shares.py)."""
++    id: Optional[int] = Field(default=None, primary_key=True)
++    share_id: int = Field(index=True)
++    viewed_at: datetime = Field(
++        default_factory=get_utc_now,
++        sa_type=DateTime(timezone=True),
++        index=True,
++    )
+diff --git a/backend/app/routers/admin.py b/backend/app/routers/admin.py
+new file mode 100644
+index 0000000..2bea166
+--- /dev/null
++++ b/backend/app/routers/admin.py
+@@ -0,0 +1,321 @@
++"""Administration: every share link with its statistics and assets, and the disk usage of the assets.
++
++/api/admin/*  administrators only
++/api/storage/{type}/{id}  editors and administrators (the management page of an asset)
++"""
++import json
++import os
++from collections import defaultdict
++from datetime import datetime, timedelta, timezone
++from typing import Dict, List, Optional, Tuple
++
++from fastapi import APIRouter, Depends, HTTPException, Query, Request
++from sqlalchemy import case, func
++from sqlmodel import Session, select
++
++from ..config import settings
++from ..database import get_session
++from ..deps import require_admin, require_editor
++from ..helpers.storage import (
++    asset_root, cached_scan, disk_usage, kind_dir, raw_voxel_bytes, scan_dir, Scan,
++)
++from ..models import (
++    AnimationPath, Mesh, PointCloud, ShareLink, ShareView, User, ViewBookmark, Volume,
++)
++from ..schemas import (
++    AssetStorageRead, DiskRead, RelatedAssetRead, ShareAdminOverview, ShareAdminRead,
++    ShareAdminSummary, ShareAssetRead, ShareStatsRead, StorageAssetRow, StorageEntryRead,
++    StorageLeftover, StorageOverviewRead,
++)
++from ..utils import NEVER_EXPIRES_THRESHOLD, get_utc_now
++
++router = APIRouter(tags=["admin"])
++
++_MODELS = {"volume": Volume, "mesh": Mesh, "pointcloud": PointCloud}
++SPARK_DAYS = 14
++
++
++def _utc(dt: datetime) -> datetime:
++    return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt.astimezone(timezone.utc)
++
++
++def _iso(value) -> Optional[str]:
++    """ISO text of a timestamp; SQLite aggregates (min, max) come back as text, not datetimes."""
++    if value is None:
++        return None
++    if isinstance(value, str):
++        try:
++            value = datetime.fromisoformat(value)
++        except ValueError:
++            return None
++    return _utc(value).isoformat()
++
++
++def _base_url(request: Request) -> str:
++    proto = request.headers.get("x-forwarded-proto") or request.url.scheme
++    host = request.headers.get("x-forwarded-host") or request.headers.get("host") or request.url.netloc
++    return f"{proto}://{host}".rstrip("/")
++
++
++# ------------------------------------------------------------------------------- share statistics
++
++def _view_stats(session: Session, now: datetime) -> Dict[int, ShareStatsRead]:
++    """Per share link: the totals from the view log, and views per day for the last SPARK_DAYS days."""
++    t24, t7, t30 = now - timedelta(hours=24), now - timedelta(days=7), now - timedelta(days=30)
++    rows = session.exec(
++        select(
++            ShareView.share_id,
++            func.count(),
++            func.min(ShareView.viewed_at),
++            func.max(ShareView.viewed_at),
++            func.sum(case((ShareView.viewed_at >= t24, 1), else_=0)),
++            func.sum(case((ShareView.viewed_at >= t7, 1), else_=0)),
++            func.sum(case((ShareView.viewed_at >= t30, 1), else_=0)),
++        ).group_by(ShareView.share_id)
++    ).all()
++    today = now.date()
++    first_day = today - timedelta(days=SPARK_DAYS - 1)
++    daily: Dict[int, List[int]] = defaultdict(lambda: [0] * SPARK_DAYS)
++    day_rows = session.exec(
++        select(ShareView.share_id, func.strftime("%Y-%m-%d", ShareView.viewed_at), func.count())
++        .where(ShareView.viewed_at >= datetime.combine(first_day, datetime.min.time(), tzinfo=timezone.utc))
++        .group_by(ShareView.share_id, func.strftime("%Y-%m-%d", ShareView.viewed_at))
++    ).all()
++    for share_id, day, n in day_rows:
++        try:
++            idx = (datetime.strptime(day, "%Y-%m-%d").date() - first_day).days
++        except (TypeError, ValueError):
++            continue
++        if 0 <= idx < SPARK_DAYS:
++            daily[share_id][idx] += int(n)
++    out = {}
++    for share_id, total, first, last, n24, n7, n30 in rows:
++        out[share_id] = ShareStatsRead(
++            views_total=int(total), views_24h=int(n24 or 0), views_7d=int(n7 or 0), views_30d=int(n30 or 0),
++            first_viewed_at=_iso(first), last_viewed_at=_iso(last), daily=daily[share_id],
++        )
++    return out
++
++
++def _empty_stats() -> ShareStatsRead:
++    return ShareStatsRead(views_total=0, views_24h=0, views_7d=0, views_30d=0, daily=[0] * SPARK_DAYS)
++
++
++def _asset_bytes(asset_type: str, row) -> int:
++    return cached_scan(asset_type, row.slug, row.thumbnail_path).bytes
++
++
++@router.get("/api/admin/shares", response_model=ShareAdminOverview)
++def admin_shares(
++    request: Request,
++    session: Session = Depends(get_session),
++    _admin: User = Depends(require_admin),
++):
++    """All share links, newest first, with views, state, who made them and the assets they open."""
++    now = get_utc_now()
++    links = session.exec(select(ShareLink).order_by(ShareLink.created_at.desc())).all()
++    stats = _view_stats(session, now)
++    base = _base_url(request)
++
++    # assets the links point at, per type
++    wanted: Dict[str, set] = defaultdict(set)
++    for s in links:
++        wanted[s.asset_type].add(s.asset_id)
++    assets: Dict[Tuple[str, int], object] = {}
++    for kind, ids in wanted.items():
++        model = _MODELS.get(kind)
++        if model and ids:
++            for row in session.exec(select(model).where(model.id.in_(ids))).all():
++                assets[(kind, row.id)] = row
++
++    # related: a volume's meshes, a mesh's volume; and the saved paths / bookmarks of a volume
++    volume_ids = {i for (k, i) in assets if k == "volume"}
++    meshes_of: Dict[int, List[Mesh]] = defaultdict(list)
++    if volume_ids:
++        for m in session.exec(select(Mesh).where(Mesh.volume_id.in_(volume_ids))).all():
++            meshes_of[m.volume_id].append(m)
++    mesh_volume_ids = {a.volume_id for (k, _), a in assets.items() if k == "mesh" and a.volume_id}
++    linked_volumes: Dict[int, Volume] = {}
++    if mesh_volume_ids:
++        for v in session.exec(select(Volume).where(Volume.id.in_(mesh_volume_ids))).all():
++            linked_volumes[v.id] = v
++    paths_n: Dict[int, int] = {}
++    bookmarks_n: Dict[int, int] = {}
++    if volume_ids:
++        paths_n = dict(session.exec(select(AnimationPath.volume_id, func.count()).where(AnimationPath.volume_id.in_(volume_ids)).group_by(AnimationPath.volume_id)).all())
++        bookmarks_n = dict(session.exec(select(ViewBookmark.volume_id, func.count()).where(ViewBookmark.volume_id.in_(volume_ids)).group_by(ViewBookmark.volume_id)).all())
++
++    user_ids = {s.created_by for s in links if s.created_by} | {a.created_by for a in assets.values() if a.created_by}
++    names = {u.id: u.username for u in session.exec(select(User).where(User.id.in_(user_ids))).all()} if user_ids else {}
++    per_asset_links: Dict[Tuple[str, int], int] = defaultdict(int)
++    for s in links:
++        per_asset_links[(s.asset_type, s.asset_id)] += 1
++
++    shares: List[ShareAdminRead] = []
++    counts = dict(active=0, expired=0, revoked=0, never_expire=0, orphaned=0)
++    size_cache: Dict[Tuple[str, int], int] = {}
++    for s in links:
++        exp = _utc(s.expires_at)
++        never = exp >= NEVER_EXPIRES_THRESHOLD
++        revoked = bool(s.revoked)
++        state = "revoked" if revoked else "expired" if exp <= now else "active"
++        counts[state] += 1
++        counts["never_expire"] += int(never)
++        key = (s.asset_type, s.asset_id)
++        row = assets.get(key)
++        if row is None:
++            counts["orphaned"] += 1
++            asset = ShareAssetRead(type=s.asset_type, id=s.asset_id, exists=False)
++            related: List[RelatedAssetRead] = []
++        else:
++            if key not in size_cache:
++                size_cache[key] = _asset_bytes(s.asset_type, row)
++            asset = ShareAssetRead(
++                type=s.asset_type, id=row.id, exists=True, title=row.title, slug=row.slug,
++                status=row.status.value if hasattr(row.status, "value") else str(row.status),
++                bytes=size_cache[key], created_by_name=names.get(row.created_by),
++                has_thumbnail=bool(row.thumbnail_path),
++            )
++            related = []
++            if s.asset_type == "volume":
++                for m in meshes_of.get(row.id, []):
++                    related.append(RelatedAssetRead(type="mesh", id=m.id, title=m.title, slug=m.slug, bytes=_asset_bytes("mesh", m)))
++            elif s.asset_type == "mesh" and row.volume_id in linked_volumes:
++                v = linked_volumes[row.volume_id]
++                related.append(RelatedAssetRead(type="volume", id=v.id, title=v.title, slug=v.slug, bytes=_asset_bytes("volume", v)))
++        st = stats.get(s.id) or _empty_stats()
++        # the counter predates the view log: never show less than it counted
++        st = st.model_copy(update={"views_total": max(st.views_total, int(s.views_count or 0))})
++        shares.append(ShareAdminRead(
++            id=s.id, code=s.code, url=f"{base}/s/{s.code}", state=state,
++            created_at=_utc(s.created_at).isoformat(), expires_at=exp.isoformat(), never_expires=never,
++            seconds_left=None if never or state != "active" else max(0, int((exp - now).total_seconds())),
++            created_by_name=names.get(s.created_by), can_download=bool(s.can_download), min_lod=s.min_lod,
++            view_query=s.view_query or "", asset=asset, stats=st, related=related,
++            paths_count=int(paths_n.get(s.asset_id, 0)) if s.asset_type == "volume" else 0,
++            bookmarks_count=int(bookmarks_n.get(s.asset_id, 0)) if s.asset_type == "volume" else 0,
++            sibling_links=per_asset_links[key] - 1,
++        ))
++
++    summary = ShareAdminSummary(
++        total=len(links), **counts,
++        views_total=sum(x.stats.views_total for x in shares),
++        views_24h=sum(x.stats.views_24h for x in shares),
++        views_7d=sum(x.stats.views_7d for x in shares),
++        views_30d=sum(x.stats.views_30d for x in shares),
++        assets_shared=len(size_cache), bytes_shared=sum(size_cache.values()),
++    )
++    return ShareAdminOverview(summary=summary, shares=shares)
++
++
++# ------------------------------------------------------------------------------------ disk usage
++
++def _entries(scan: Scan, asset_type: str) -> List[StorageEntryRead]:
++    items = [(k, b) for k, b in scan.buckets.items()]
++    if asset_type == "volume":
++        items.sort(key=lambda kb: (0 if kb[0].startswith("lod") else 1, kb[0]))
++    else:
++        items.sort(key=lambda kb: -kb[1].bytes)
++    return [StorageEntryRead(key=k, label=b.label, bytes=b.bytes, apparent_bytes=b.apparent, files=b.files) for k, b in items]
++
++
++@router.get("/api/storage/{asset_type}/{asset_id}", response_model=AssetStorageRead)
++def asset_storage(
++    asset_type: str,
++    asset_id: int,
++    refresh: bool = Query(False),
++    session: Session = Depends(get_session),
++    user: User = Depends(require_editor),
++):
++    """What one asset takes on disk, by kind of file (editors and administrators)."""
++    model = _MODELS.get(asset_type)
++    if model is None:
++        raise HTTPException(status_code=404, detail="Unknown asset type")
++    row = session.get(model, asset_id)
++    if row is None:
++        raise HTTPException(status_code=404, detail=f"{asset_type.capitalize()} not found")
++    scan = cached_scan(asset_type, row.slug, row.thumbnail_path, refresh=refresh)
++    out = AssetStorageRead(
++        asset_type=asset_type, asset_id=row.id, slug=row.slug, bytes=scan.bytes,
++        apparent_bytes=scan.apparent, files=scan.files, entries=_entries(scan, asset_type),
++    )
++    if asset_type == "volume":
++        try:
++            meta = json.loads((asset_root("volume", row.slug) / "volume.json").read_text(encoding="utf-8"))
++        except (OSError, ValueError):
++            meta = {}
++        raw = raw_voxel_bytes(meta)
++        lod0 = scan.buckets.get("lod0000")
++        if raw and lod0 and lod0.apparent:
++            out.raw_bytes = raw
++            out.ratio = round(raw / lod0.apparent, 2)
++    if user.role.value == "admin":
++        out.disk = DiskRead(**disk_usage(settings.DATA_DIR)) if disk_usage(settings.DATA_DIR) else None
++        out.data_bytes = _kind_total(session, asset_type)
++    return out
++
++
++def _kind_total(session: Session, asset_type: str) -> int:
++    model = _MODELS[asset_type]
++    return sum(cached_scan(asset_type, r.slug, r.thumbnail_path).bytes for r in session.exec(select(model)).all())
++
++
++def _same_device(a, b) -> bool:
++    try:
++        return os.stat(a).st_dev == os.stat(b).st_dev
++    except OSError:
++        return True
++
++
++@router.get("/api/admin/storage", response_model=StorageOverviewRead)
++def admin_storage(
++    refresh: bool = Query(False),
++    session: Session = Depends(get_session),
++    _admin: User = Depends(require_admin),
++):
++    """Disk usage of every asset, the space nothing points at, and the free space (administrators)."""
++    rows: List[StorageAssetRow] = []
++    missing: List[StorageAssetRow] = []
++    kind_bytes = {"volume": 0, "mesh": 0, "pointcloud": 0}
++    known: Dict[str, set] = {k: set() for k in kind_bytes}
++    for kind, model in _MODELS.items():
++        for r in session.exec(select(model)).all():
++            known[kind].add(r.slug)
++            scan = cached_scan(kind, r.slug, r.thumbnail_path, refresh=refresh)
++            status = r.status.value if hasattr(r.status, "value") else str(r.status)
++            row = StorageAssetRow(type=kind, id=r.id, title=r.title, slug=r.slug, status=status, bytes=scan.bytes, files=scan.files)
++            rows.append(row)
++            kind_bytes[kind] += scan.bytes
++            if status == "ready" and not asset_root(kind, r.slug).exists():
++                missing.append(row)
++    rows.sort(key=lambda x: -x.bytes)
++
++    leftovers: List[StorageLeftover] = []
++    for kind in kind_bytes:
++        base = kind_dir(kind)
++        try:
++            names = [e.name for e in os.scandir(base) if e.is_dir(follow_symlinks=False)]
++        except OSError:
++            names = []
++        for name in names:
++            if name not in known[kind]:
++                s = scan_dir(base / name)
++                leftovers.append(StorageLeftover(type=kind, slug=name, bytes=s.bytes, files=s.files))
++    leftovers.sort(key=lambda x: -x.bytes)
++
++    db = 0
++    for suffix in ("", "-wal", "-shm"):
++        try:
++            db += os.path.getsize(f"{settings.DB_PATH}{suffix}")
++        except OSError:
++            pass
++    staging = scan_dir(settings.DATA_DIR / ".uploads").bytes + scan_dir(settings.PROCESSING_DIR / ".uploads").bytes
++    processing = scan_dir(settings.PROCESSING_DIR).bytes
++    data_disk = disk_usage(settings.DATA_DIR)
++    proc_disk = None if _same_device(settings.DATA_DIR, settings.PROCESSING_DIR) else disk_usage(settings.PROCESSING_DIR)
++    return StorageOverviewRead(
++        disk=DiskRead(**data_disk) if data_disk else None,
++        processing_disk=DiskRead(**proc_disk) if proc_disk else None,
++        kind_bytes=kind_bytes, database_bytes=db, staging_bytes=staging, processing_bytes=processing,
++        assets=rows, leftovers=leftovers, missing=missing, scanned_at=get_utc_now().isoformat(),
++    )
+diff --git a/backend/app/routers/shares.py b/backend/app/routers/shares.py
+index e1fb985..8b76934 100644
+--- a/backend/app/routers/shares.py
++++ b/backend/app/routers/shares.py
+@@ -1,4 +1,5 @@
+ import hashlib
++import random
+ import re
+ import secrets
+ from datetime import datetime, timedelta, timezone
+@@ -6,12 +7,13 @@ from typing import List, Optional
+ 
+ from fastapi import APIRouter, Depends, HTTPException, Query, Request
+ from fastapi.responses import HTMLResponse, RedirectResponse
++from sqlalchemy import delete
+ from sqlmodel import Session, select
+ 
+ from ..config import settings
+ from ..database import get_session
+ from ..deps import require_editor
+-from ..models import Mesh, PointCloud, ShareLink, User, Volume
++from ..models import Mesh, PointCloud, ShareLink, ShareView, User, Volume
+ from ..schemas import ShareConfigRead, ShareLinkCreate, ShareLinkRead
+ from ..security import create_share_session_token
+ from ..utils import NEVER_EXPIRES, NEVER_EXPIRES_THRESHOLD, get_utc_now
+@@ -24,6 +26,8 @@ _MAX_EXPIRY_MINUTES = 525600  # 1 year
+ # Whoever opens a never-expiring link gets a session token for this long (opening the link again
+ # issues a fresh one); the link itself stays valid until it is revoked.
+ _NEVER_LINK_SESSION = timedelta(days=30)
++# The view log (ShareView) is kept this long; older rows are pruned now and then as links are opened.
++_VIEW_LOG_DAYS = 400
+ _VIEWER_PATHS = {
+     "volume": "/viewers/volume.html",
+     "mesh": "/viewers/mesh.html",
+@@ -182,6 +186,7 @@ def delete_or_revoke_share_link(
+     share = session.get(ShareLink, share_id)
+     if not share:
+         raise HTTPException(status_code=404, detail="Share link not found")
++    session.exec(delete(ShareView).where(ShareView.share_id == share.id))
+     session.delete(share)
+     session.commit()
+     return {"ok": True}
+@@ -209,6 +214,9 @@ def resolve_short_share_link(code: str, session: Session = Depends(get_session))
+ 
+     share.views_count = (share.views_count or 0) + 1
+     session.add(share)
++    session.add(ShareView(share_id=share.id, viewed_at=now))
++    if random.random() < 0.01:  # housekeeping: about once per hundred openings
++        session.exec(delete(ShareView).where(ShareView.viewed_at < now - timedelta(days=_VIEW_LOG_DAYS)))
+     session.commit()
+ 
+     exp = _as_utc(share.expires_at)
+diff --git a/backend/app/schemas.py b/backend/app/schemas.py
+index 141150f..b158fb9 100644
+--- a/backend/app/schemas.py
++++ b/backend/app/schemas.py
+@@ -290,3 +290,134 @@ class BookmarkRead(BaseModel):
+     created_at: str
+     updated_at: str
+     created_by_name: Optional[str] = None
++
++
++# ---------- administration: share links with statistics, and disk usage ----------
++
++class ShareStatsRead(BaseModel):
++    views_total: int
++    views_24h: int
++    views_7d: int
++    views_30d: int
++    first_viewed_at: Optional[str] = None     # from the view log, which starts when this was introduced
++    last_viewed_at: Optional[str] = None
++    daily: List[int]                          # views per day over the last 14 days, oldest first, today last
++
++
++class RelatedAssetRead(BaseModel):
++    type: str
++    id: int
++    title: str
++    slug: str
++    bytes: Optional[int] = None               # on disk
++
++
++class ShareAssetRead(BaseModel):
++    type: str
++    id: int
++    exists: bool                              # False when the asset was deleted after the link was made
++    title: Optional[str] = None
++    slug: Optional[str] = None
++    status: Optional[str] = None
++    bytes: Optional[int] = None               # on disk
++    created_by_name: Optional[str] = None
++    has_thumbnail: bool = False
++
++
++class ShareAdminRead(BaseModel):
++    id: int
++    code: str
++    url: str
++    state: Literal["active", "expired", "revoked"]
++    created_at: str
++    expires_at: str
++    never_expires: bool
++    seconds_left: Optional[int] = None        # None for a link that never expires or has ended
++    created_by_name: Optional[str] = None
++    can_download: bool
++    min_lod: Optional[int] = None
++    view_query: str = ""
++    asset: ShareAssetRead
++    stats: ShareStatsRead
++    related: List[RelatedAssetRead] = Field(default_factory=list)   # a volume's meshes, or a mesh's volume
++    paths_count: int = 0                      # saved paths / bookmarks of the volume (what a link may open)
++    bookmarks_count: int = 0
++    sibling_links: int = 0                    # other share links to the same asset
++
++
++class ShareAdminSummary(BaseModel):
++    total: int
++    active: int
++    expired: int
++    revoked: int
++    never_expire: int
++    orphaned: int                             # links whose asset no longer exists
++    views_total: int
++    views_24h: int
++    views_7d: int
++    views_30d: int
++    assets_shared: int
++    bytes_shared: int                         # on disk, each shared asset counted once
++
++
++class ShareAdminOverview(BaseModel):
++    summary: ShareAdminSummary
++    shares: List[ShareAdminRead]
++
++
++class DiskRead(BaseModel):
++    total: int
++    used: int
++    free: int
++
++
++class StorageEntryRead(BaseModel):
++    key: str
++    label: str
++    bytes: int                                # on disk
++    apparent_bytes: int                       # sum of the file sizes
++    files: int
++
++
++class AssetStorageRead(BaseModel):
++    asset_type: str
++    asset_id: int
++    slug: str
++    bytes: int
++    apparent_bytes: int
++    files: int
++    entries: List[StorageEntryRead]
++    raw_bytes: Optional[int] = None           # volumes: the full-resolution voxels without compression
++    ratio: Optional[float] = None             # raw_bytes / the LOD 0 bricks
++    disk: Optional[DiskRead] = None           # administrators only
++    data_bytes: Optional[int] = None          # administrators only: everything the assets of this kind take
++
++
++class StorageAssetRow(BaseModel):
++    type: str
++    id: int
++    title: str
++    slug: str
++    status: str
++    bytes: int
++    files: int
++
++
++class StorageLeftover(BaseModel):
++    type: str
++    slug: str
++    bytes: int
++    files: int
++
++
++class StorageOverviewRead(BaseModel):
++    disk: Optional[DiskRead] = None
++    processing_disk: Optional[DiskRead] = None   # None when the scratch folder is on the same disk
++    kind_bytes: dict[str, int]                   # volume / mesh / pointcloud
++    database_bytes: int
++    staging_bytes: int                           # uploads waiting to be claimed
++    processing_bytes: int                        # scratch space of running conversions
++    assets: List[StorageAssetRow]
++    leftovers: List[StorageLeftover]             # folders in the data directory that no asset points at
++    missing: List[StorageAssetRow]               # ready assets whose folder is gone
++    scanned_at: str
+diff --git a/frontend/account.html b/frontend/account.html
+index 902162a..7d51b20 100644
+--- a/frontend/account.html
++++ b/frontend/account.html
+@@ -11,7 +11,7 @@
+   <div class="app-shell" id="shell"></div>
+ 
+   <script type="module">
+-    import { api, requireLogin, getRole, getUsername, setSession, renderShell, wireLogout } from "/js/api.js?v=sw1";
++    import { api, requireLogin, getRole, getUsername, setSession, renderShell, wireLogout } from "/js/api.js?v=share1";
+     import { pageHint } from "/js/help.js?v=help6";
+ 
+     requireLogin();
+diff --git a/frontend/admin.html b/frontend/admin.html
+index e2610a5..026f4ee 100644
+--- a/frontend/admin.html
++++ b/frontend/admin.html
+@@ -11,7 +11,7 @@
+   <div class="app-shell" id="shell"></div>
+ 
+   <script type="module">
+-    import { api, requireLogin, getRole, getUsername, renderShell, wireLogout } from "/js/api.js?v=sw1";
++    import { api, requireLogin, getRole, getUsername, renderShell, wireLogout } from "/js/api.js?v=share1";
+     import { pageHint } from "/js/help.js?v=help6";
+ 
+     requireLogin();
+diff --git a/frontend/help.html b/frontend/help.html
+index 1eadc01..1b33eec 100644
+--- a/frontend/help.html
++++ b/frontend/help.html
+@@ -11,7 +11,7 @@
+   <div class="app-shell" id="shell"></div>
+ 
+   <script type="module">
+-    import { requireLogin, getRole, getUsername, renderShell, wireLogout, getBranding, contactItems } from "/js/api.js?v=sw1";
++    import { requireLogin, getRole, getUsername, renderShell, wireLogout, getBranding, contactItems } from "/js/api.js?v=share1";
+     import { helpPageHtml, wireHelpPage } from "/js/help.js?v=help6";
+ 
+     requireLogin();
+diff --git a/frontend/index.html b/frontend/index.html
+index 2a33790..ba209a0 100644
+--- a/frontend/index.html
++++ b/frontend/index.html
+@@ -51,7 +51,7 @@
+   <div class="app-shell" id="shell"></div>
+ 
+   <script type="module">
+-    import { api, requireLogin, getRole, getUsername, renderShell, wireLogout } from "/js/api.js?v=org1";
++    import { api, requireLogin, getRole, getUsername, renderShell, wireLogout } from "/js/api.js?v=share1";
+     import { pageHint } from "/js/help.js?v=help6";
+     import { makeDescriptionExpandable } from "/js/description.js?v=org2";
+     import {
+diff --git a/frontend/js/api.js b/frontend/js/api.js
+index fd052ca..af4f4d3 100644
+--- a/frontend/js/api.js
++++ b/frontend/js/api.js
+@@ -79,6 +79,7 @@ const NAV_ICONS = {
+   upload: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>`,
+   admin: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>`,
+   help: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M9.1 9a3 3 0 0 1 5.8 1c0 2-3 3-3 3M12 17h.01"/></svg>`,
++  shares: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>`,
+   account: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>`,
+ };
+ 
+@@ -119,6 +120,15 @@ export function getBranding() {
+     return brandingPromise;
+ }
+ 
++// "1.5 MB": a size in bytes for people (binary units, as file managers show them).
++export function formatBytes(n) {
++    if (n == null || !Number.isFinite(n)) return "\u2014";
++    const units = ["B", "KB", "MB", "GB", "TB"];
++    let i = 0, v = n;
++    while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
++    return `${i === 0 ? v : v.toFixed(v >= 100 ? 0 : v >= 10 ? 1 : 2)} ${units[i]}`;
++}
++
+ // Escapes text for use in HTML, including inside attribute values.
+ export function escapeHtml(s) {
+     return String(s ?? "").replace(/[&<>"']/g, (c) => ({
+@@ -548,6 +558,18 @@ export const api = {
+         return request(`/api/shares/${shareId}`, {method: "DELETE"});
+     },
+ 
++    // administration: every share link with its statistics (admin), and disk usage
++    adminShares() {
++        return request("/api/admin/shares");
++    },
++    adminStorage(refresh = false) {
++        return request(`/api/admin/storage${refresh ? "?refresh=true" : ""}`);
++    },
++    // what one asset takes on disk (editor / admin); assetType is volume | mesh | pointcloud
++    assetStorage(assetType, assetId, refresh = false) {
++        return request(`/api/storage/${encodeURIComponent(assetType)}/${encodeURIComponent(assetId)}${refresh ? "?refresh=true" : ""}`);
++    },
++
+ 
+     // volumes
+     listVolumes() {
+@@ -759,6 +781,7 @@ export function renderShell(activePage, role, username) {
+         }
+         if (role === "admin") {
+             navItems.push({href: "/admin.html", label: "Users", key: "admin"});
++            navItems.push({href: "/shares.html", label: "Shares", key: "shares"});
+         }
+         // In a viewer the full Help opens in a new tab, so the viewer keeps its state (the viewer's own
+         // Help button shows a small panel next to the view).
+diff --git a/frontend/manage.html b/frontend/manage.html
+index 0fa0f15..18e0eb4 100644
+--- a/frontend/manage.html
++++ b/frontend/manage.html
+@@ -14,7 +14,7 @@
+   <div class="app-shell" id="shell"></div>
+ 
+   <script type="module">
+-    import { api, requireLogin, getRole, getUsername, renderShell, wireLogout } from "/js/api.js?v=org1";
++    import { api, requireLogin, getRole, getUsername, renderShell, wireLogout, formatBytes } from "/js/api.js?v=share1";
+     import { pageHint } from "/js/help.js?v=help6";
+     import { folderIndex, detailsFormHtml, saveDetailsForm } from "/js/organize.js?v=org1";
+ 
+@@ -62,6 +62,54 @@
+ 
+     const content = document.getElementById("content");
+ 
++    // What this item takes on disk, by kind of file. Measured on the server (the first time can take a
++    // moment for a big dataset), so it fills in after the rest of the page is there.
++    async function loadStorageBox(refresh = false) {
++      const box = document.getElementById("storage-box");
++      if (!box) return;
++      let s;
++      try {
++        s = await api.assetStorage(kind, itemId, refresh);
++      } catch (err) {
++        box.textContent = `Disk usage is not available: ${err.message}`;
++        return;
++      }
++      const biggest = Math.max(1, ...s.entries.map((e) => e.bytes));
++      const rows = s.entries
++        .map(
++          (e) => `<tr>
++            <td>${escapeHtml(e.label)}</td>
++            <td class="mono" style="text-align:right">${e.files}</td>
++            <td class="mono" style="text-align:right" title="${escapeHtml(formatBytes(e.apparent_bytes))} of file contents">${formatBytes(e.bytes)}</td>
++            <td style="width:30%"><div style="height:8px;background:var(--panel-raised);border:1px solid var(--line);border-radius:2px;overflow:hidden"><i style="display:block;height:100%;width:${Math.max(1, Math.round((e.bytes / biggest) * 100))}%;background:var(--accent)"></i></div></td>
++          </tr>`
++        )
++        .join("");
++      const notes = [];
++      if (s.raw_bytes && s.ratio) {
++        notes.push(`The full-resolution voxels would take ${formatBytes(s.raw_bytes)} uncompressed; the stored bricks are ${s.ratio}\u00d7 smaller.`);
++      }
++      if (s.disk) {
++        const share = s.data_bytes ? Math.round((s.bytes / s.data_bytes) * 100) : null;
++        notes.push(
++          `${share != null ? `This is ${share}% of the ${formatBytes(s.data_bytes)} taken by all ${KIND.label.toLowerCase()}s. ` : ""}The data disk has ${formatBytes(s.disk.free)} free of ${formatBytes(s.disk.total)}.`
++        );
++      }
++      box.className = "";
++      box.innerHTML = `
++        <table style="max-width:640px">
++          <thead><tr><th>Kind of file</th><th style="text-align:right">Files</th><th style="text-align:right">On disk</th><th></th></tr></thead>
++          <tbody>${rows || `<tr><td colspan="4" class="dim">No files yet.</td></tr>`}</tbody>
++          <tfoot><tr><td><strong>Total</strong></td><td class="mono" style="text-align:right">${s.files}</td><td class="mono" style="text-align:right"><strong>${formatBytes(s.bytes)}</strong></td><td></td></tr></tfoot>
++        </table>
++        ${notes.map((n) => `<p class="dim" style="font-size:0.9em;margin:0.5em 0 0">${escapeHtml(n)}</p>`).join("")}
++        <p style="margin-top:0.6em"><button type="button" id="storage-refresh">Measure again</button></p>`;
++      document.getElementById("storage-refresh").addEventListener("click", (e) => {
++        e.target.disabled = true;
++        loadStorageBox(true);
++      });
++    }
++
+     async function load() {
+       const [item, granted, allUsers, shares, shareCfg, folders] = await Promise.all([
+         KIND.get(itemId),
+@@ -207,9 +255,13 @@
+           </tbody>
+         </table>
+ 
++        <h2 style="margin-top:2em">Disk usage</h2>
++        <div id="storage-box" class="dim">Measuring\u2026</div>
++
+         <h2 style="margin-top:2em" id="danger-heading">Danger zone</h2>
+         <button class="danger" id="delete-btn">Delete this ${KIND.label.toLowerCase()}</button>
+       `;
++      loadStorageBox();
+ 
+       document.getElementById("details-save").addEventListener("click", async (e) => {
+         e.target.disabled = true;
+diff --git a/frontend/shares.html b/frontend/shares.html
+new file mode 100644
+index 0000000..3676d96
+--- /dev/null
++++ b/frontend/shares.html
+@@ -0,0 +1,339 @@
++<!DOCTYPE html>
++<html lang="en">
++<head>
++<meta charset="UTF-8" />
++<meta name="viewport" content="width=device-width, initial-scale=1.0" />
++<title>Shares — Volume Gallery</title>
++<script src="/js/theme-init.js?v=hist1"></script>
++<link rel="stylesheet" href="/css/style.css?v=org2" />
++<style>
++  .stats { display: flex; flex-wrap: wrap; border: 1px solid var(--line); border-radius: var(--radius); margin: 1em 0; }
++  .stat { flex: 1 1 190px; padding: 0.7em 1em; border-right: 1px solid var(--line); min-width: 0; }
++  .stat:last-child { border-right: 0; }
++  .stat .n { font: 600 1.5em var(--mono); }
++  .stat .l { color: var(--text-dim); font-size: 0.8em; text-transform: uppercase; letter-spacing: 0.04em; }
++  .stat .d { color: var(--text-dim); font-size: 0.85em; margin-top: 0.2em; }
++  .tabs { display: flex; gap: 0.4em; margin: 0.4em 0 0.2em; }
++  .tabs button[aria-selected="true"] { border-color: var(--accent); color: var(--accent); }
++  .filters { display: flex; flex-wrap: wrap; gap: 0.5em; align-items: center; margin: 0.8em 0; }
++  .filters input[type="search"] { flex: 1 1 220px; min-width: 0; }
++  .sub { color: var(--text-dim); font-size: 0.85em; }
++  .warn { color: var(--danger); }
++  .okc { color: var(--ok); }
++  .bar { height: 8px; background: var(--panel-raised); border: 1px solid var(--line); border-radius: 2px; overflow: hidden; min-width: 60px; }
++  .bar > i { display: block; height: 100%; background: var(--accent); }
++  .bar.big { height: 14px; }
++  .spark { display: block; color: var(--accent); margin: 0.25em 0; }
++  .spark rect { fill: currentColor; }
++  td.num, th.num { text-align: right; font-family: var(--mono); white-space: nowrap; }
++  .related { margin-top: 0.25em; font-size: 0.85em; color: var(--text-dim); }
++  .clip { max-width: 22ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: inline-block; vertical-align: bottom; }
++  .kv { display: grid; grid-template-columns: max-content 1fr; gap: 0.2em 1em; margin: 0.6em 0 1em; }
++  .kv dt { color: var(--text-dim); }
++  .kv dd { margin: 0; font-family: var(--mono); }
++</style>
++</head>
++<body>
++  <div class="app-shell" id="shell"></div>
++
++  <script type="module">
++    import { api, requireLogin, getRole, getUsername, renderShell, wireLogout, escapeHtml } from "/js/api.js?v=share1";
++
++    requireLogin();
++    const role = getRole();
++    if (role !== "admin") window.location.href = "/index.html";
++
++    document.getElementById("shell").innerHTML = `
++      ${renderShell("shares", role, getUsername())}
++      <main>
++        <div class="toolbar">
++          <h1>Shares</h1>
++          <button type="button" id="refresh-btn" title="Load the numbers again (disk usage is measured afresh)">Refresh</button>
++        </div>
++        <div class="tabs" role="tablist">
++          <button type="button" role="tab" id="tab-links" aria-selected="true">Share links</button>
++          <button type="button" role="tab" id="tab-storage" aria-selected="false">Storage</button>
++        </div>
++        <div id="error" style="display:none" class="error-box"></div>
++        <section id="links-panel">
++          <div class="stats" id="link-stats"></div>
++          <div class="filters">
++            <input type="search" id="q" placeholder="Search code, asset, creator…" aria-label="Search" />
++            <select id="f-state" aria-label="State">
++              <option value="">All states</option><option value="active">Active</option>
++              <option value="expired">Expired</option><option value="revoked">Revoked</option>
++            </select>
++            <select id="f-type" aria-label="Asset type">
++              <option value="">All assets</option><option value="volume">Volumes</option>
++              <option value="mesh">Meshes</option><option value="pointcloud">Point clouds</option>
++            </select>
++            <select id="f-sort" aria-label="Sort">
++              <option value="newest">Newest first</option><option value="views">Most views</option>
++              <option value="last">Last viewed</option><option value="expiry">Expiring soonest</option>
++              <option value="size">Largest asset</option>
++            </select>
++          </div>
++          <table class="responsive">
++            <thead><tr><th>Link</th><th>Asset</th><th>Access</th><th>Views</th><th>Created</th><th></th></tr></thead>
++            <tbody id="links-body"><tr><td colspan="6" class="dim">Loading…</td></tr></tbody>
++          </table>
++          <p class="sub" id="links-foot"></p>
++        </section>
++        <section id="storage-panel" style="display:none"><p class="dim">Measuring the data folders…</p></section>
++      </main>
++    `;
++    wireLogout();
++
++    // ---------------------------------------------------------------- formatting
++    const esc = escapeHtml;
++    function bytes(n) {
++      if (n == null) return "—";
++      const units = ["B", "KB", "MB", "GB", "TB"];
++      let i = 0, v = n;
++      while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
++      return `${i === 0 ? v : v.toFixed(v >= 100 ? 0 : v >= 10 ? 1 : 2)} ${units[i]}`;
++    }
++    function ago(iso) {
++      if (!iso) return "never";
++      const s = Math.max(0, (Date.now() - new Date(iso).getTime()) / 1000);
++      if (s < 90) return "just now";
++      if (s < 5400) return `${Math.round(s / 60)} min ago`;
++      if (s < 129600) return `${Math.round(s / 3600)} h ago`;
++      if (s < 86400 * 60) return `${Math.round(s / 86400)} d ago`;
++      return new Date(iso).toLocaleDateString();
++    }
++    function left(sec) {
++      if (sec == null) return "";
++      if (sec < 90) return "under a minute";
++      if (sec < 5400) return `${Math.round(sec / 60)} min`;
++      if (sec < 172800) return `${Math.round(sec / 3600)} h`;
++      return `${Math.round(sec / 86400)} d`;
++    }
++    const when = (iso) => new Date(iso).toLocaleString();
++    const TYPE_LABEL = { volume: "Volume", mesh: "Mesh", pointcloud: "Point cloud" };
++    const manageHref = (type, id) => `/manage.html?kind=${encodeURIComponent(type)}&id=${encodeURIComponent(id)}`;
++
++    function spark(daily) {
++      const max = Math.max(1, ...daily);
++      const w = 4, gap = 1, h = 18;
++      const bars = daily.map((n, i) => {
++        const bh = n ? Math.max(2, Math.round((n / max) * h)) : 1;
++        return `<rect x="${i * (w + gap)}" y="${h - bh}" width="${w}" height="${bh}" opacity="${n ? 1 : 0.3}"><title>${n} view${n === 1 ? "" : "s"}</title></rect>`;
++      }).join("");
++      return `<svg class="spark" width="${daily.length * (w + gap)}" height="${h}" role="img" aria-label="Views per day, last ${daily.length} days">${bars}</svg>`;
++    }
++
++    function showError(err) {
++      const box = document.getElementById("error");
++      box.textContent = err ? (err.message || String(err)) : "";
++      box.style.display = err ? "block" : "none";
++    }
++
++    // ---------------------------------------------------------------- share links
++    let overview = null;
++
++    function renderStats() {
++      const s = overview.summary;
++      document.getElementById("link-stats").innerHTML = `
++        <div class="stat"><div class="l">Links</div><div class="n">${s.total}</div>
++          <div class="d"><span class="okc">${s.active} active</span> · ${s.expired} expired · ${s.revoked} revoked${s.never_expire ? ` · ${s.never_expire} never expire` : ""}</div></div>
++        <div class="stat"><div class="l">Views</div><div class="n">${s.views_total}</div>
++          <div class="d">${s.views_24h} in 24 h · ${s.views_7d} in 7 d · ${s.views_30d} in 30 d</div></div>
++        <div class="stat"><div class="l">Assets shared</div><div class="n">${s.assets_shared}</div>
++          <div class="d">${bytes(s.bytes_shared)} on disk${s.orphaned ? ` · <span class="warn">${s.orphaned} link${s.orphaned === 1 ? "" : "s"} to deleted assets</span>` : ""}</div></div>`;
++    }
++
++    function matches(x, q) {
++      if (!q) return true;
++      const hay = [x.code, x.asset.title, x.asset.slug, x.created_by_name, x.asset.created_by_name, x.view_query, ...x.related.map((r) => r.title)]
++        .filter(Boolean).join(" ").toLowerCase();
++      return q.toLowerCase().split(/\s+/).every((w) => hay.includes(w));
++    }
++    const SORTS = {
++      newest: (a, b) => b.created_at.localeCompare(a.created_at),
++      views: (a, b) => b.stats.views_total - a.stats.views_total,
++      last: (a, b) => (b.stats.last_viewed_at || "").localeCompare(a.stats.last_viewed_at || ""),
++      expiry: (a, b) => (a.state === "active" ? (a.seconds_left ?? Infinity) : Infinity + 1) - (b.state === "active" ? (b.seconds_left ?? Infinity) : Infinity + 1) || 0,
++      size: (a, b) => (b.asset.bytes ?? -1) - (a.asset.bytes ?? -1),
++    };
++
++    function assetCell(x) {
++      const a = x.asset;
++      if (!a.exists) return `<span class="pill">${esc(TYPE_LABEL[a.type] || a.type)}</span> <span class="warn">asset deleted</span><div class="sub mono">id ${a.id}</div>`;
++      const related = x.related.map((r) =>
++        `<div>+ ${esc(TYPE_LABEL[r.type] || r.type)} <a href="${manageHref(r.type, r.id)}">${esc(r.title)}</a> · ${bytes(r.bytes)}</div>`).join("");
++      const extras = [];
++      if (x.paths_count) extras.push(`${x.paths_count} saved path${x.paths_count === 1 ? "" : "s"}`);
++      if (x.bookmarks_count) extras.push(`${x.bookmarks_count} bookmark${x.bookmarks_count === 1 ? "" : "s"}`);
++      if (x.sibling_links) extras.push(`${x.sibling_links} other link${x.sibling_links === 1 ? "" : "s"} to it`);
++      return `<span class="pill">${esc(TYPE_LABEL[a.type] || a.type)}</span>
++        <a href="${manageHref(a.type, a.id)}">${esc(a.title)}</a>
++        <div class="sub"><span class="mono">${esc(a.slug)}</span> · ${esc(a.status)}${a.status !== "ready" ? " ⚠" : ""} · ${bytes(a.bytes)} on disk${a.created_by_name ? ` · by ${esc(a.created_by_name)}` : ""}</div>
++        ${related ? `<div class="related">${related}</div>` : ""}
++        ${extras.length ? `<div class="related">${esc(extras.join(" · "))}</div>` : ""}`;
++    }
++
++    function accessCell(x) {
++      const color = x.state === "active" ? "var(--ok)" : x.state === "revoked" ? "var(--danger)" : "var(--text-dim)";
++      const expiry = x.never_expires ? "never expires"
++        : x.state === "active" ? `<span title="${esc(when(x.expires_at))}">ends in ${left(x.seconds_left)}</span>`
++        : `<span title="${esc(when(x.expires_at))}">${x.state === "expired" ? "ended " + ago(x.expires_at) : esc(when(x.expires_at))}</span>`;
++      const flags = [];
++      if (x.can_download) flags.push("download allowed");
++      if (x.min_lod != null) flags.push(`lower resolution only (LOD ${x.min_lod}+)`);
++      return `<span class="pill" style="color:${color};border-color:${color}">${esc(x.state)}</span>
++        <div class="sub">${expiry}</div>
++        ${flags.length ? `<div class="sub">${esc(flags.join(" · "))}</div>` : ""}
++        ${x.view_query ? `<div class="sub">opens with <span class="mono clip" title="${esc(x.view_query)}">${esc(x.view_query)}</span></div>` : ""}`;
++    }
++
++    function viewsCell(x) {
++      const st = x.stats;
++      return `<strong class="mono">${st.views_total}</strong>
++        <div class="sub">${st.views_24h} · ${st.views_7d} · ${st.views_30d} <span title="views in the last 24 hours · 7 days · 30 days">(24 h · 7 d · 30 d)</span></div>
++        ${spark(st.daily)}
++        <div class="sub">last viewed ${esc(ago(st.last_viewed_at))}</div>`;
++    }
++
++    function renderLinks() {
++      const q = document.getElementById("q").value.trim();
++      const fs = document.getElementById("f-state").value;
++      const ft = document.getElementById("f-type").value;
++      const sort = SORTS[document.getElementById("f-sort").value] || SORTS.newest;
++      const rows = overview.shares
++        .filter((x) => (!fs || x.state === fs) && (!ft || x.asset.type === ft) && matches(x, q))
++        .sort(sort);
++      document.getElementById("links-body").innerHTML = rows.map((x) => `
++        <tr>
++          <td><a class="mono" href="${esc(x.url)}" target="_blank" rel="noopener">${esc(x.code)}</a></td>
++          <td>${assetCell(x)}</td>
++          <td>${accessCell(x)}</td>
++          <td>${viewsCell(x)}</td>
++          <td><span title="${esc(when(x.created_at))}">${esc(ago(x.created_at))}</span><div class="sub">${x.created_by_name ? "by " + esc(x.created_by_name) : "creator removed"}</div></td>
++          <td class="row-actions">
++            <button type="button" data-copy="${esc(x.url)}">Copy URL</button>
++            <button type="button" class="danger" data-del="${x.id}" data-code="${esc(x.code)}">Delete</button>
++          </td>
++        </tr>`).join("") || `<tr><td colspan="6" class="dim">${overview.shares.length ? "No link matches the filters." : "No share links yet."}</td></tr>`;
++      document.getElementById("links-foot").textContent =
++        `Showing ${rows.length} of ${overview.shares.length}. Per-day numbers come from a view log that starts when this page was introduced; the all-time count includes earlier views.`;
++    }
++
++    async function loadLinks() {
++      overview = await api.adminShares();
++      renderStats();
++      renderLinks();
++    }
++
++    document.getElementById("links-body").addEventListener("click", async (e) => {
++      const copy = e.target.closest("[data-copy]");
++      if (copy) {
++        try { await navigator.clipboard.writeText(copy.dataset.copy); copy.textContent = "Copied!"; }
++        catch { copy.textContent = "Copy failed"; }
++        setTimeout(() => (copy.textContent = "Copy URL"), 1500);
++        return;
++      }
++      const del = e.target.closest("[data-del]");
++      if (del) {
++        if (!confirm(`Delete the share link “${del.dataset.code}”? Anyone using it loses access. This cannot be undone.`)) return;
++        try { await api.deleteShare(del.dataset.del); showError(null); await loadLinks(); } catch (err) { showError(err); }
++      }
++    });
++    for (const id of ["q", "f-state", "f-type", "f-sort"]) {
++      document.getElementById(id).addEventListener(id === "q" ? "input" : "change", () => overview && renderLinks());
++    }
++
++    // ---------------------------------------------------------------- storage
++    let storage = null;
++
++    function diskBlock(title, d) {
++      if (!d) return "";
++      const pct = d.total ? Math.round((d.used / d.total) * 100) : 0;
++      return `<div class="stat"><div class="l">${esc(title)}</div><div class="n">${bytes(d.free)} free</div>
++        <div class="bar big" style="margin:0.4em 0"><i style="width:${pct}%"></i></div>
++        <div class="d">${bytes(d.used)} of ${bytes(d.total)} used (${pct}%)</div></div>`;
++    }
++
++    function renderStorage() {
++      const s = storage;
++      const kinds = [["volume", "Volumes"], ["mesh", "Meshes"], ["pointcloud", "Point clouds"]];
++      const assetsTotal = kinds.reduce((n, [k]) => n + (s.kind_bytes[k] || 0), 0);
++      const biggest = Math.max(1, ...s.assets.map((a) => a.bytes));
++      const leftoverTotal = s.leftovers.reduce((n, l) => n + l.bytes, 0);
++      document.getElementById("storage-panel").innerHTML = `
++        <div class="stats">
++          ${diskBlock("Data disk", s.disk)}
++          ${diskBlock("Scratch disk", s.processing_disk)}
++          <div class="stat"><div class="l">Assets</div><div class="n">${bytes(assetsTotal)}</div>
++            <div class="d">${kinds.map(([k, l]) => `${l.toLowerCase()} ${bytes(s.kind_bytes[k])}`).join(" · ")}</div></div>
++          <div class="stat"><div class="l">Other</div><div class="n">${bytes(s.database_bytes + s.staging_bytes + s.processing_bytes + leftoverTotal)}</div>
++            <div class="d">database ${bytes(s.database_bytes)} · waiting uploads ${bytes(s.staging_bytes)} · scratch ${bytes(s.processing_bytes)}${leftoverTotal ? ` · leftovers ${bytes(leftoverTotal)}` : ""}</div></div>
++        </div>
++        ${s.missing.length ? `<div class="error-box"><strong>Folder missing</strong> for ${s.missing.length} asset${s.missing.length === 1 ? "" : "s"} marked ready: ${s.missing.map((m) => `<a href="${manageHref(m.type, m.id)}">${esc(m.title)}</a>`).join(", ")}</div>` : ""}
++        <div class="filters">
++          <select id="s-type" aria-label="Asset type">
++            <option value="">All assets</option><option value="volume">Volumes</option>
++            <option value="mesh">Meshes</option><option value="pointcloud">Point clouds</option>
++          </select>
++          <span class="sub">Sizes are what the files occupy on disk. Measured ${esc(ago(s.scanned_at))}.</span>
++        </div>
++        <table class="responsive">
++          <thead><tr><th>Asset</th><th>Type</th><th>Status</th><th class="num">Files</th><th class="num">On disk</th><th style="width:22%"></th></tr></thead>
++          <tbody id="storage-body"></tbody>
++        </table>
++        ${s.leftovers.length ? `
++          <h2 style="margin-top:1.6em">Folders no asset points at</h2>
++          <p class="dim" style="font-size:0.9em">These folders sit in the data directory but belong to no volume, mesh or point cloud — usually what an interrupted delete or upload left behind. Nothing here is removed automatically.</p>
++          <table class="responsive">
++            <thead><tr><th>Folder</th><th>Type</th><th class="num">Files</th><th class="num">On disk</th></tr></thead>
++            <tbody>${s.leftovers.map((l) => `<tr><td class="mono">${esc(l.slug)}</td><td>${esc(TYPE_LABEL[l.type] || l.type)}</td><td class="num">${l.files}</td><td class="num">${bytes(l.bytes)}</td></tr>`).join("")}</tbody>
++          </table>` : ""}`;
++      const body = () => {
++        const t = document.getElementById("s-type").value;
++        document.getElementById("storage-body").innerHTML = s.assets.filter((a) => !t || a.type === t).map((a) => `
++          <tr>
++            <td><a href="${manageHref(a.type, a.id)}">${esc(a.title)}</a> <span class="sub mono">${esc(a.slug)}</span></td>
++            <td>${esc(TYPE_LABEL[a.type] || a.type)}</td>
++            <td>${esc(a.status)}</td>
++            <td class="num">${a.files}</td>
++            <td class="num">${bytes(a.bytes)}</td>
++            <td><div class="bar"><i style="width:${Math.max(1, Math.round((a.bytes / biggest) * 100))}%"></i></div></td>
++          </tr>`).join("") || `<tr><td colspan="6" class="dim">Nothing here.</td></tr>`;
++      };
++      document.getElementById("s-type").addEventListener("change", body);
++      body();
++    }
++
++    async function loadStorage(refresh = false) {
++      document.getElementById("storage-panel").innerHTML = `<p class="dim">Measuring the data folders…</p>`;
++      storage = await api.adminStorage(refresh);
++      renderStorage();
++    }
++
++    // ---------------------------------------------------------------- tabs, refresh
++    let tab = location.hash === "#storage" ? "storage" : "links";
++    function setTab(next) {
++      tab = next;
++      history.replaceState(null, "", next === "storage" ? "#storage" : location.pathname + location.search);
++      document.getElementById("tab-links").setAttribute("aria-selected", String(next === "links"));
++      document.getElementById("tab-storage").setAttribute("aria-selected", String(next === "storage"));
++      document.getElementById("links-panel").style.display = next === "links" ? "" : "none";
++      document.getElementById("storage-panel").style.display = next === "storage" ? "" : "none";
++      if (next === "storage" && !storage) loadStorage().catch(showError);
++    }
++    document.getElementById("tab-links").addEventListener("click", () => setTab("links"));
++    document.getElementById("tab-storage").addEventListener("click", () => setTab("storage"));
++    document.getElementById("refresh-btn").addEventListener("click", async (e) => {
++      e.target.disabled = true;
++      try {
++        showError(null);
++        await (tab === "storage" ? loadStorage(true) : loadLinks());
++      } catch (err) { showError(err); }
++      e.target.disabled = false;
++    });
++
++    loadLinks().catch(showError);
++    setTab(tab);
++  </script>
++</body>
++</html>
+diff --git a/frontend/upload.html b/frontend/upload.html
+index a29f0ba..3f675f0 100644
+--- a/frontend/upload.html
++++ b/frontend/upload.html
+@@ -119,7 +119,7 @@
+ <div class="app-shell" id="shell"></div>
+ 
+ <script type="module">
+-    import {api, requireLogin, getRole, getUsername, renderShell, wireLogout} from "/js/api.js?v=sw1";
++    import {api, requireLogin, getRole, getUsername, renderShell, wireLogout} from "/js/api.js?v=share1";
+     import { pageHint } from "/js/help.js?v=help6";
+ 
+     requireLogin();
+diff --git a/frontend/viewers/mesh.html b/frontend/viewers/mesh.html
+index 4b07a79..3184eeb 100644
+--- a/frontend/viewers/mesh.html
++++ b/frontend/viewers/mesh.html
+@@ -133,7 +133,7 @@
+   <script src="/vendor/3dhop/js/trackball_turntable_pan.js"></script>
+ 
+   <script type="module">
+-    import { api, requireLogin, getRole, getUsername, renderShell, wireLogout } from "/js/api.js?v=sw1";
++    import { api, requireLogin, getRole, getUsername, renderShell, wireLogout } from "/js/api.js?v=share1";
+     import { toggleHelpPanel } from "/js/help.js?v=help6";
+     import { makeDescriptionExpandable } from "/js/description.js?v=org2";
+ 
+diff --git a/frontend/viewers/pointcloud.html b/frontend/viewers/pointcloud.html
+index abd6b14..6ad45d6 100644
+--- a/frontend/viewers/pointcloud.html
++++ b/frontend/viewers/pointcloud.html
+@@ -125,7 +125,7 @@
+   <script src="/vendor/potree/potree.js"></script>
+ 
+   <script type="module">
+-    import { api, requireLogin, getRole, getUsername, renderShell, wireLogout } from "/js/api.js?v=sw1";
++    import { api, requireLogin, getRole, getUsername, renderShell, wireLogout } from "/js/api.js?v=share1";
+     import { toggleHelpPanel } from "/js/help.js?v=help6";
+     import { makeDescriptionExpandable } from "/js/description.js?v=org2";
+ 
+diff --git a/frontend/viewers/volume.html b/frontend/viewers/volume.html
+index df1067a..b91d841 100644
+--- a/frontend/viewers/volume.html
++++ b/frontend/viewers/volume.html
+@@ -459,7 +459,7 @@
+   <div class="app-shell" id="shell"></div>
+ 
+   <script type="module">
+-    import { api, requireLogin, getRole, getUsername, renderShell, wireLogout } from "/js/api.js?v=org5";
++    import { api, requireLogin, getRole, getUsername, renderShell, wireLogout } from "/js/api.js?v=share1";
+     import { syncHistogram } from "/js/histogram.js?v=hist1";
+ import { insertStop, sampleStops, rgbToHex, decodeTf, encodeTf } from "/js/slice/transfer-function.js";
+     import { KilnViewer } from "/vendor/kiln-render/lib/kiln-render.js?v=atlas3";

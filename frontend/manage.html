@@ -14,7 +14,7 @@
   <div class="app-shell" id="shell"></div>
 
   <script type="module">
-    import { api, requireLogin, getRole, getUsername, renderShell, wireLogout } from "/js/api.js?v=org1";
+    import { api, requireLogin, getRole, getUsername, renderShell, wireLogout, formatBytes } from "/js/api.js?v=share1";
     import { pageHint } from "/js/help.js?v=help6";
     import { folderIndex, detailsFormHtml, saveDetailsForm } from "/js/organize.js?v=org1";
 
@@ -61,6 +61,54 @@
     wireLogout();
 
     const content = document.getElementById("content");
+
+    // What this item takes on disk, by kind of file. Measured on the server (the first time can take a
+    // moment for a big dataset), so it fills in after the rest of the page is there.
+    async function loadStorageBox(refresh = false) {
+      const box = document.getElementById("storage-box");
+      if (!box) return;
+      let s;
+      try {
+        s = await api.assetStorage(kind, itemId, refresh);
+      } catch (err) {
+        box.textContent = `Disk usage is not available: ${err.message}`;
+        return;
+      }
+      const biggest = Math.max(1, ...s.entries.map((e) => e.bytes));
+      const rows = s.entries
+        .map(
+          (e) => `<tr>
+            <td>${escapeHtml(e.label)}</td>
+            <td class="mono" style="text-align:right">${e.files}</td>
+            <td class="mono" style="text-align:right" title="${escapeHtml(formatBytes(e.apparent_bytes))} of file contents">${formatBytes(e.bytes)}</td>
+            <td style="width:30%"><div style="height:8px;background:var(--panel-raised);border:1px solid var(--line);border-radius:2px;overflow:hidden"><i style="display:block;height:100%;width:${Math.max(1, Math.round((e.bytes / biggest) * 100))}%;background:var(--accent)"></i></div></td>
+          </tr>`
+        )
+        .join("");
+      const notes = [];
+      if (s.raw_bytes && s.ratio) {
+        notes.push(`The full-resolution voxels would take ${formatBytes(s.raw_bytes)} uncompressed; the stored bricks are ${s.ratio}\u00d7 smaller.`);
+      }
+      if (s.disk) {
+        const share = s.data_bytes ? Math.round((s.bytes / s.data_bytes) * 100) : null;
+        notes.push(
+          `${share != null ? `This is ${share}% of the ${formatBytes(s.data_bytes)} taken by all ${KIND.label.toLowerCase()}s. ` : ""}The data disk has ${formatBytes(s.disk.free)} free of ${formatBytes(s.disk.total)}.`
+        );
+      }
+      box.className = "";
+      box.innerHTML = `
+        <table style="max-width:640px">
+          <thead><tr><th>Kind of file</th><th style="text-align:right">Files</th><th style="text-align:right">On disk</th><th></th></tr></thead>
+          <tbody>${rows || `<tr><td colspan="4" class="dim">No files yet.</td></tr>`}</tbody>
+          <tfoot><tr><td><strong>Total</strong></td><td class="mono" style="text-align:right">${s.files}</td><td class="mono" style="text-align:right"><strong>${formatBytes(s.bytes)}</strong></td><td></td></tr></tfoot>
+        </table>
+        ${notes.map((n) => `<p class="dim" style="font-size:0.9em;margin:0.5em 0 0">${escapeHtml(n)}</p>`).join("")}
+        <p style="margin-top:0.6em"><button type="button" id="storage-refresh">Measure again</button></p>`;
+      document.getElementById("storage-refresh").addEventListener("click", (e) => {
+        e.target.disabled = true;
+        loadStorageBox(true);
+      });
+    }
 
     async function load() {
       const [item, granted, allUsers, shares, shareCfg, folders] = await Promise.all([
@@ -207,9 +255,13 @@
           </tbody>
         </table>
 
+        <h2 style="margin-top:2em">Disk usage</h2>
+        <div id="storage-box" class="dim">Measuring\u2026</div>
+
         <h2 style="margin-top:2em" id="danger-heading">Danger zone</h2>
         <button class="danger" id="delete-btn">Delete this ${KIND.label.toLowerCase()}</button>
       `;
+      loadStorageBox();
 
       document.getElementById("details-save").addEventListener("click", async (e) => {
         e.target.disabled = true;

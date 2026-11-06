@@ -290,3 +290,134 @@ class BookmarkRead(BaseModel):
     created_at: str
     updated_at: str
     created_by_name: Optional[str] = None
+
+
+# ---------- administration: share links with statistics, and disk usage ----------
+
+class ShareStatsRead(BaseModel):
+    views_total: int
+    views_24h: int
+    views_7d: int
+    views_30d: int
+    first_viewed_at: Optional[str] = None     # from the view log, which starts when this was introduced
+    last_viewed_at: Optional[str] = None
+    daily: List[int]                          # views per day over the last 14 days, oldest first, today last
+
+
+class RelatedAssetRead(BaseModel):
+    type: str
+    id: int
+    title: str
+    slug: str
+    bytes: Optional[int] = None               # on disk
+
+
+class ShareAssetRead(BaseModel):
+    type: str
+    id: int
+    exists: bool                              # False when the asset was deleted after the link was made
+    title: Optional[str] = None
+    slug: Optional[str] = None
+    status: Optional[str] = None
+    bytes: Optional[int] = None               # on disk
+    created_by_name: Optional[str] = None
+    has_thumbnail: bool = False
+
+
+class ShareAdminRead(BaseModel):
+    id: int
+    code: str
+    url: str
+    state: Literal["active", "expired", "revoked"]
+    created_at: str
+    expires_at: str
+    never_expires: bool
+    seconds_left: Optional[int] = None        # None for a link that never expires or has ended
+    created_by_name: Optional[str] = None
+    can_download: bool
+    min_lod: Optional[int] = None
+    view_query: str = ""
+    asset: ShareAssetRead
+    stats: ShareStatsRead
+    related: List[RelatedAssetRead] = Field(default_factory=list)   # a volume's meshes, or a mesh's volume
+    paths_count: int = 0                      # saved paths / bookmarks of the volume (what a link may open)
+    bookmarks_count: int = 0
+    sibling_links: int = 0                    # other share links to the same asset
+
+
+class ShareAdminSummary(BaseModel):
+    total: int
+    active: int
+    expired: int
+    revoked: int
+    never_expire: int
+    orphaned: int                             # links whose asset no longer exists
+    views_total: int
+    views_24h: int
+    views_7d: int
+    views_30d: int
+    assets_shared: int
+    bytes_shared: int                         # on disk, each shared asset counted once
+
+
+class ShareAdminOverview(BaseModel):
+    summary: ShareAdminSummary
+    shares: List[ShareAdminRead]
+
+
+class DiskRead(BaseModel):
+    total: int
+    used: int
+    free: int
+
+
+class StorageEntryRead(BaseModel):
+    key: str
+    label: str
+    bytes: int                                # on disk
+    apparent_bytes: int                       # sum of the file sizes
+    files: int
+
+
+class AssetStorageRead(BaseModel):
+    asset_type: str
+    asset_id: int
+    slug: str
+    bytes: int
+    apparent_bytes: int
+    files: int
+    entries: List[StorageEntryRead]
+    raw_bytes: Optional[int] = None           # volumes: the full-resolution voxels without compression
+    ratio: Optional[float] = None             # raw_bytes / the LOD 0 bricks
+    disk: Optional[DiskRead] = None           # administrators only
+    data_bytes: Optional[int] = None          # administrators only: everything the assets of this kind take
+
+
+class StorageAssetRow(BaseModel):
+    type: str
+    id: int
+    title: str
+    slug: str
+    status: str
+    bytes: int
+    files: int
+
+
+class StorageLeftover(BaseModel):
+    type: str
+    slug: str
+    bytes: int
+    files: int
+
+
+class StorageOverviewRead(BaseModel):
+    disk: Optional[DiskRead] = None
+    processing_disk: Optional[DiskRead] = None   # None when the scratch folder is on the same disk
+    kind_bytes: dict[str, int]                   # volume / mesh / pointcloud
+    database_bytes: int
+    staging_bytes: int                           # uploads waiting to be claimed
+    processing_bytes: int                        # scratch space of running conversions
+    assets: List[StorageAssetRow]
+    leftovers: List[StorageLeftover]             # folders in the data directory that no asset points at
+    missing: List[StorageAssetRow]               # ready assets whose folder is gone
+    scanned_at: str

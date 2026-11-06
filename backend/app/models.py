@@ -153,3 +153,15 @@ class ShareLink(SQLModel, table=True):
     )
     revoked: bool = Field(default=False)
     views_count: int = Field(default=0)
+
+
+class ShareView(SQLModel, table=True):
+    """One opening of a share link (/s/<code>): the log behind the statistics on the admin's Shares page.
+    Deleted with its link; old rows are pruned (see routers/shares.py)."""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    share_id: int = Field(index=True)
+    viewed_at: datetime = Field(
+        default_factory=get_utc_now,
+        sa_type=DateTime(timezone=True),
+        index=True,
+    )
