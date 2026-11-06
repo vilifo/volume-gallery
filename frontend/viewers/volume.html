@@ -305,6 +305,17 @@
     user-select: none;
     -webkit-user-select: none;
   }
+  /* Colour-stop editor under the TF canvas (preset "Custom"); the side padding matches .ctl-tf-stage
+     so the strip lines up with the canvas x axis. */
+  .ctl-tf-colors { background: #000; padding: 4px 10px 6px; color: var(--text-dim); font-size: 11px; }
+  .ctl-cs-bar { position: relative; height: 18px; margin: 6px 0 4px; border: 1px solid var(--viewer-border); border-radius: 4px; cursor: copy; touch-action: none; user-select: none; -webkit-user-select: none; outline: none; }
+  .ctl-cs-bar:focus-visible { box-shadow: 0 0 0 2px var(--accent); }
+  .ctl-cs-stop { position: absolute; top: -5px; width: 10px; height: 26px; margin-left: -5px; box-sizing: border-box; border: 2px solid #fff; border-radius: 3px; background: var(--c); box-shadow: 0 0 0 1px rgba(0,0,0,0.75); cursor: ew-resize; }
+  .ctl-cs-stop.sel { border-color: var(--accent); z-index: 1; }
+  .ctl-cs-row { display: flex; align-items: center; gap: 0.5em; padding-top: 4px; }
+  .ctl-cs-row input[type="color"] { width: 34px; height: 24px; padding: 0; border: 1px solid var(--viewer-border); border-radius: 4px; background: none; cursor: pointer; }
+  .ctl-cs-row input[type="number"] { width: 4.6em; padding: 2px 4px; font: inherit; color: inherit; background: transparent; border: 1px solid var(--viewer-border); border-radius: 4px; }
+  .ctl-cs-row .ctl-chip:disabled { opacity: 0.4; cursor: default; }
   .ctl-tf-help { font-size: 10px; color: var(--text-dim); text-align: center; padding: 0.35em 0; background: color-mix(in srgb, var(--panel) 86%, transparent); }
 
   .ctl-slider-row { display: flex; align-items: center; gap: 0.6em; margin-bottom: 0.7em; }
@@ -450,7 +461,8 @@
   <script type="module">
     import { api, requireLogin, getRole, getUsername, renderShell, wireLogout } from "/js/api.js?v=org5";
     import { syncHistogram } from "/js/histogram.js?v=hist1";
-    import { KilnViewer } from "/vendor/kiln-render/lib/kiln-render.js?v=atlas2";
+import { insertStop, sampleStops, rgbToHex, decodeTf, encodeTf } from "/js/slice/transfer-function.js";
+    import { KilnViewer } from "/vendor/kiln-render/lib/kiln-render.js?v=atlas3";
     import {
       ATLAS_VRAM_OPTIONS_MB,
       formatVram,
@@ -558,6 +570,7 @@
       p.set("density", fx(state.densityScale, 2));
       p.set("iso", fx(state.isoValue));
       p.set("tf", state.tfPreset);
+      if (state.tfPreset === "custom" && state.tfColorStops) p.set("tfcol", encodeTf({ preset: "custom", stops: state.tfColorStops }));
       p.set("tfpts", state.tfPoints.map((pt) => `${fx(pt.x)},${fx(pt.y)}`).join(","));
       p.set("up", state.upAxis);
       p.set("scale", fx(state.renderScale, 2));
@@ -580,6 +593,7 @@
         isoValue: state.isoValue,
         renderScale: state.renderScale,
         tfPreset: state.tfPreset,
+        tfColorStops: state.tfColorStops ? state.tfColorStops.map((st) => ({ ...st })) : null,
         tfPoints: state.tfPoints.map((pt) => ({ x: pt.x, y: pt.y })),
         upAxis: state.upAxis,
         cam: state.cam,
@@ -612,6 +626,11 @@
       const scale = num("scale"); if (scale !== undefined) o.renderScale = scale;
       const tf = p.get("tf");
       if (TF_PRESETS.some(([v]) => v === tf)) o.tfPreset = tf;
+      else if (tf === "custom") {
+        // custom colour stops travel in `tfcol` ("pos:rrggbb,..."); a malformed value drops the whole custom map
+        const custom = decodeTf(p.get("tfcol"));
+        if (custom && custom.preset === "custom") { o.tfPreset = "custom"; o.tfColorStops = custom.stops; }
+      }
       const tfpts = (p.get("tfpts") || "").split(",").filter((x) => x !== "").map(Number);
       if (tfpts.length >= 2 && tfpts.length % 2 === 0 && tfpts.every(Number.isFinite)) {
         o.tfPoints = [];
@@ -1378,6 +1397,9 @@
       const renderer = viewer.renderer;
       const camera = viewer.camera;
       const tf = viewer.transferFunction;
+      // "Custom" colour stops need kiln-render patch 0007; without it the preset list stays as it was.
+      const canCustomColours = typeof tf.setColorStops === "function";
+      const tfPresetChoices = canCustomColours ? [...TF_PRESETS, ["custom", "Custom"]] : TF_PRESETS;
       const [dimX, dimY, dimZ] = viewer.metadata.dimensions;
       const dims = { X: dimX, Y: dimY, Z: dimZ };
 
@@ -1820,6 +1842,202 @@
         return redraw;
       }
 
+      // --- colour editor (preset "Custom"): a strip under the TF canvas with one handle per colour
+      // stop. Drag a handle to move it (the end stops stay at 0 and 1), click the strip to add a stop
+      // coloured like the map at that spot, double-click or Delete to remove one, arrow keys nudge the
+      // selected stop. The colour box and position field below edit the selected stop. kiln-render
+      // keeps the stops (tf.getColorStops()), so share links and in-place reloads carry them. ---
+      let selStop = 0;
+      let lastCustomStops = null; // restored when "Custom" is picked again after a built-in preset
+      const MIN_GAP = 0.001;
+
+      // The current colour map as a short list of stops (collinear ones dropped), the starting point
+      // when switching from a built-in preset to editing.
+      function currentColourStops() {
+        const n = 17;
+        let stops = Array.from({ length: n }, (_, i) => ({ pos: i / (n - 1), color: rgbToHex(tf.getColor(i / (n - 1))) }));
+        for (let i = 1; i < stops.length - 1;) {
+          const a = stops[i - 1], b = stops[i + 1];
+          const expect = sampleStops([a, b], stops[i].pos);
+          const got = tf.getColor(stops[i].pos);
+          if (expect.every((v, k) => Math.abs(v - got[k]) <= 3)) stops.splice(i, 1); else i++;
+        }
+        return stops;
+      }
+
+      function wireColorEditor(root) {
+        const host = root.querySelector('[data-role="tf-colors"]');
+        let bar = null, drag = null;
+
+        const gradient = (stops) =>
+          `linear-gradient(to right, ${stops.map((s) => `${s.color} ${(s.pos * 100).toFixed(2)}%`).join(", ")})`;
+
+        function commit(stops) {
+          tf.setColorStops(stops);
+          state.tfPreset = tf.preset;
+          dirty();
+          if (redrawTf) redrawTf();
+          paint();
+        }
+
+        function paint() {
+          const stops = tf.getColorStops();
+          if (!bar || !stops) return;
+          selStop = Math.min(selStop, stops.length - 1);
+          bar.style.background = gradient(stops);
+          if (bar.children.length !== stops.length) {
+            bar.replaceChildren(...stops.map(() => Object.assign(document.createElement("div"), { className: "ctl-cs-stop" })));
+          }
+          stops.forEach((s, i) => {
+            const el = bar.children[i];
+            el.style.left = `${s.pos * 100}%`;
+            el.style.setProperty("--c", s.color);
+            el.classList.toggle("sel", i === selStop);
+          });
+          const interior = selStop > 0 && selStop < stops.length - 1;
+          const colorInput = host.querySelector('[data-role="cs-color"]');
+          if (colorInput.value !== stops[selStop].color) colorInput.value = stops[selStop].color;
+          const posInput = host.querySelector('[data-role="cs-pos"]');
+          if (document.activeElement !== posInput) posInput.value = stops[selStop].pos.toFixed(3);
+          posInput.disabled = !interior;
+          host.querySelector('[data-role="cs-remove"]').disabled = !interior;
+        }
+
+        function build() {
+          bar = null;
+          if (!tf.getColorStops()) {
+            host.innerHTML = canCustomColours
+              ? `<button type="button" class="ctl-chip" data-role="cs-edit">Edit colours&hellip;</button>`
+              : "";
+            host.hidden = !canCustomColours;
+            host.querySelector('[data-role="cs-edit"]')?.addEventListener("click", () => {
+              selectPreset("custom");
+              root.querySelector('[data-role="tf-preset"]').value = "custom";
+            });
+            return;
+          }
+          host.hidden = false;
+          host.innerHTML = `
+            <div class="ctl-cs-bar" data-role="cs-bar" tabindex="0" title="Click to add a colour stop"></div>
+            <div class="ctl-cs-row">
+              <input type="color" data-role="cs-color" aria-label="Colour of the selected stop">
+              <input type="number" data-role="cs-pos" min="0" max="1" step="0.01" aria-label="Position of the selected stop">
+              <button type="button" class="ctl-chip" data-role="cs-remove">Remove</button>
+              <button type="button" class="ctl-chip" data-role="cs-reverse">Reverse</button>
+            </div>`;
+          bar = host.querySelector('[data-role="cs-bar"]');
+          wire();
+          paint();
+        }
+
+        function posFromEvent(evt) {
+          const rect = bar.getBoundingClientRect();
+          return Math.min(1, Math.max(0, (evt.clientX - rect.left) / rect.width));
+        }
+        function hitStop(pos) {
+          const stops = tf.getColorStops();
+          const widthPx = bar.getBoundingClientRect().width;
+          let best = -1, bestDist = Infinity;
+          stops.forEach((s, i) => {
+            const d = Math.abs(s.pos - pos) * widthPx;
+            if (d < bestDist) { bestDist = d; best = i; }
+          });
+          return bestDist <= 8 ? best : -1;
+        }
+        function removeStop(i) {
+          const stops = tf.getColorStops();
+          if (i <= 0 || i >= stops.length - 1) return;
+          stops.splice(i, 1);
+          selStop = Math.min(selStop, stops.length - 1);
+          commit(stops);
+        }
+        function moveStop(i, pos) {
+          const stops = tf.getColorStops();
+          if (i <= 0 || i >= stops.length - 1) return;
+          stops[i].pos = Math.min(stops[i + 1].pos - MIN_GAP, Math.max(stops[i - 1].pos + MIN_GAP, pos));
+          commit(stops);
+        }
+
+        function wire() {
+          bar.addEventListener("pointerdown", (evt) => {
+            if (evt.button !== 0) return;
+            evt.preventDefault();
+            bar.focus();
+            bar.setPointerCapture(evt.pointerId);
+            const pos = posFromEvent(evt);
+            let idx = hitStop(pos);
+            if (idx < 0) {
+              const stops = insertStop(tf.getColorStops(), pos);
+              idx = stops.reduce((best, s, i) => (Math.abs(s.pos - pos) < Math.abs(stops[best].pos - pos) ? i : best), 0);
+              selStop = idx;
+              commit(stops);
+            }
+            selStop = idx;
+            drag = { index: idx };
+            paint();
+          });
+          bar.addEventListener("pointermove", (evt) => {
+            if (drag) moveStop(drag.index, posFromEvent(evt));
+          });
+          const endDrag = () => { drag = null; };
+          bar.addEventListener("pointerup", endDrag);
+          bar.addEventListener("pointercancel", endDrag);
+          bar.addEventListener("lostpointercapture", endDrag);
+          bar.addEventListener("dblclick", (evt) => {
+            const idx = hitStop(posFromEvent(evt));
+            if (idx > 0) removeStop(idx);
+          });
+          bar.addEventListener("keydown", (evt) => {
+            if (evt.key === "Delete" || evt.key === "Backspace") {
+              evt.preventDefault();
+              removeStop(selStop);
+            } else if (evt.key === "ArrowLeft" || evt.key === "ArrowRight") {
+              evt.preventDefault();
+              const step = (evt.shiftKey ? 0.05 : 0.01) * (evt.key === "ArrowLeft" ? -1 : 1);
+              moveStop(selStop, tf.getColorStops()[selStop].pos + step);
+            }
+          });
+          host.querySelector('[data-role="cs-color"]').addEventListener("input", (evt) => {
+            const stops = tf.getColorStops();
+            stops[selStop].color = evt.target.value;
+            commit(stops);
+          });
+          host.querySelector('[data-role="cs-pos"]').addEventListener("change", (evt) => {
+            const v = Number(evt.target.value);
+            if (Number.isFinite(v)) moveStop(selStop, v);
+            paint();
+          });
+          host.querySelector('[data-role="cs-remove"]').addEventListener("click", () => removeStop(selStop));
+          host.querySelector('[data-role="cs-reverse"]').addEventListener("click", () => {
+            const stops = tf.getColorStops().map((s) => ({ ...s, pos: 1 - s.pos })).sort((a, b) => a.pos - b.pos);
+            selStop = stops.length - 1 - selStop;
+            commit(stops);
+          });
+        }
+
+        build();
+        return build;
+      }
+
+      // Switches the colour map: a built-in preset, or "custom" (the last custom stops, else the
+      // current colours as an editable starting point).
+      function selectPreset(value) {
+        if (value === "custom") {
+          const stops = tf.getColorStops() ?? lastCustomStops ?? currentColourStops();
+          selStop = 0;
+          tf.setColorStops(stops);
+        } else {
+          const keep = tf.getColorStops();
+          if (keep) lastCustomStops = keep;
+          tf.setPreset(value);
+        }
+        state.tfPreset = tf.preset;
+        dirty();
+        if (redrawTf) redrawTf();
+        if (rebuildColorEditor) rebuildColorEditor();
+      }
+      let rebuildColorEditor = null;
+
       // --- swap region: rebuilt whenever the mode changes, since which
       // controls are relevant differs by mode. ---
       let redrawTf = null;
@@ -1831,7 +2049,7 @@
           <label class="ctl-select-row">
             <span class="ctl-row-label ctl-select-label">Preset</span>
             <select class="ctl-select-input" data-role="tf-preset">
-              ${TF_PRESETS.map(([v, label]) => `<option value="${v}"${state.tfPreset === v ? " selected" : ""}>${label}</option>`).join("")}
+              ${tfPresetChoices.map(([v, label]) => `<option value="${v}"${state.tfPreset === v ? " selected" : ""}>${label}</option>`).join("")}
             </select>
           </label>
           <div class="ctl-tf-canvas-container">
@@ -1839,6 +2057,7 @@
               <canvas class="ctl-tf-canvas"></canvas>
               <canvas class="ctl-tf-overlay"></canvas>
             </div>
+            <div class="ctl-tf-colors" data-role="tf-colors"></div>
               <div class="ctl-tf-help">Drag point or line to move &#x00b7; double-click to add/remove</div>
           <div class="ctl-slider-row">
             <span class="ctl-row-label ctl-slider-label">Center</span>
@@ -1882,13 +2101,11 @@
         if (showIso) wireSlider(swap, "iso", (v) => { viewer.isoValue = v; }, (v) => v.toFixed(3));
 
         swap.querySelector('[data-role="tf-preset"]').addEventListener("change", (evt) => {
-          state.tfPreset = evt.target.value;
-          tf.setPreset(state.tfPreset);
-          dirty();
-          if (redrawTf) redrawTf();
+          selectPreset(evt.target.value);
         });
 
         redrawTf = wireTfCanvas(swap);
+        rebuildColorEditor = wireColorEditor(swap);
       }
       renderSwapRegion();
 
