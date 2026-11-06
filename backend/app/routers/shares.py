@@ -14,12 +14,16 @@ from ..deps import require_editor
 from ..models import Mesh, PointCloud, ShareLink, User, Volume
 from ..schemas import ShareConfigRead, ShareLinkCreate, ShareLinkRead
 from ..security import create_share_session_token
-from ..utils import get_utc_now
+from ..utils import NEVER_EXPIRES, NEVER_EXPIRES_THRESHOLD, get_utc_now
 
 router = APIRouter(tags=["shares"])
 
 _CODE_CHARS_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]*$")
 _VALID_ASSET_TYPES = {"volume", "mesh", "pointcloud"}
+_MAX_EXPIRY_MINUTES = 525600  # 1 year
+# Whoever opens a never-expiring link gets a session token for this long (opening the link again
+# issues a fresh one); the link itself stays valid until it is revoked.
+_NEVER_LINK_SESSION = timedelta(days=30)
 _VIEWER_PATHS = {
     "volume": "/viewers/volume.html",
     "mesh": "/viewers/mesh.html",
@@ -89,6 +93,7 @@ def _share_read(s: ShareLink, request: Request) -> ShareLinkRead:
         min_lod=getattr(s, "min_lod", None),
         created_at=s.created_at.isoformat(),
         expires_at=exp.isoformat(),
+        never_expires=exp >= NEVER_EXPIRES_THRESHOLD,
         revoked=bool(getattr(s, "revoked", False)),
         expired=exp <= now,
         views_count=int(getattr(s, "views_count", 0) or 0),
@@ -134,8 +139,12 @@ def create_share_link(
     editor: User = Depends(require_editor),
 ):
     _ensure_asset_exists(session, payload.asset_type, payload.asset_id)
-    if payload.expires_in_minutes < 1 or payload.expires_in_minutes > 525600:
-        raise HTTPException(status_code=400, detail="expires_in_minutes must be between 1 and 525600 (1 year)")
+    never = payload.expires_in_minutes == 0
+    if not never and not 1 <= payload.expires_in_minutes <= _MAX_EXPIRY_MINUTES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"expires_in_minutes must be 0 (never expires) or between 1 and {_MAX_EXPIRY_MINUTES} (1 year)",
+        )
 
     if payload.code and payload.code.strip():
         code = _validate_custom_code(payload.code)
@@ -156,7 +165,7 @@ def create_share_link(
         min_lod=payload.min_lod,
         created_by=editor.id,
         created_at=now,
-        expires_at=now + timedelta(minutes=payload.expires_in_minutes),
+        expires_at=NEVER_EXPIRES if never else now + timedelta(minutes=payload.expires_in_minutes),
     )
     session.add(share)
     session.commit()
@@ -203,6 +212,8 @@ def resolve_short_share_link(code: str, session: Session = Depends(get_session))
     session.commit()
 
     exp = _as_utc(share.expires_at)
+    if exp >= NEVER_EXPIRES_THRESHOLD:
+        exp = min(exp, now + _NEVER_LINK_SESSION)
     scoped_token = create_share_session_token(
         share_id=share.id,
         code=share.code,

@@ -9,8 +9,9 @@
 // others re-request their plane and move their crosshair lines.
 
 import { PlaneClient, prefetchIndices } from "./plane-client.js";
-import { SliceRenderer, requestSliceDevice } from "./slice-renderer.js";
+import { SliceRenderer, requestSliceDevice } from "./slice-renderer.js?v=org3";
 import { SliceState } from "./cursor.js";
+import { bindTouchGestures } from "./touch-gestures.js?v=org6";
 import { buildLut, isGrayRamp } from "./transfer-function.js";
 import { Overlay3D } from "./overlay-3d.js";
 import { niceScaleLength } from "../scalebar.js";
@@ -48,7 +49,30 @@ export function scaleBarSvg(umPerPx, width, height) {
 
 // ------------------------------------------------------------------------- pane
 
-class Pane {
+/**
+ * Calls `handler(button)` for a click on a button inside `container`. For touch it does not wait for the
+ * click: it acts on pointerup when the finger lifts on the button it touched, and ignores the click that
+ * follows.
+ */
+function onButtonTap(container, handler) {
+  let downOn = null;
+  let handledAt = -Infinity;
+  container.addEventListener("pointerdown", (e) => { downOn = e.pointerType === "touch" ? e.target.closest("button") : null; });
+  container.addEventListener("pointerup", (e) => {
+    if (e.pointerType !== "touch") return;
+    const btn = e.target.closest("button");
+    if (!btn || btn !== downOn) return;
+    handledAt = performance.now();
+    handler(btn);
+  });
+  container.addEventListener("click", (e) => {
+    if (performance.now() - handledAt < 700) return; // the touch tap was dealt with above
+    const btn = e.target.closest("button");
+    if (btn) handler(btn);
+  });
+}
+
+export class Pane {
   constructor(views, axis, el) {
     this.views = views;
     this.axis = axis;
@@ -83,6 +107,12 @@ class Pane {
           <button type="button" data-act="max" title="Maximize / restore">\u2922</button>
         </span>
       </div>
+      <div class="slice-tools" role="group" aria-label="What one finger does">
+        <button type="button" data-tool="cursor" title="One finger: move the crosshair">\u2316</button>
+        <button type="button" data-tool="pan" title="One finger: pan">\u2725</button>
+        <button type="button" data-tool="scroll" title="One finger: scroll through the slices">\u2195</button>
+        <button type="button" data-tool="window" title="One finger: window / level">\u25d0</button>
+      </div>
       <div class="slice-hud"></div>
       <div class="slice-busy" hidden></div>`;
     this.canvas = el.querySelector("canvas");
@@ -99,6 +129,8 @@ class Pane {
     this.ro = new ResizeObserver(() => this.resize());
     this.ro.observe(el);
     this.bindInput();
+    this.bindTouch();
+    this.showTouchTool();
     this.resize();
   }
 
@@ -311,7 +343,7 @@ class Pane {
     el.addEventListener("contextmenu", (e) => e.preventDefault());
 
     el.addEventListener("pointerdown", (e) => {
-      if (e.target.closest(".slice-head")) return;
+      if (e.pointerType === "touch" || e.target.closest(".slice-head, .slice-tools")) return; // touch: see bindTouch()
       el.focus({ preventScroll: true });
       const mode = e.button === 1 || (e.button === 0 && (e.shiftKey || spaceDown)) ? "pan" : e.button === 0 ? "cursor" : e.button === 2 ? "window" : null;
       if (!mode) return;
@@ -324,6 +356,7 @@ class Pane {
     });
 
     el.addEventListener("pointermove", (e) => {
+      if (e.pointerType === "touch") return;
       const { x, y } = this.local(e);
       if (!this.drag) {
         this.hover(x, y);
@@ -396,13 +429,65 @@ class Pane {
     });
     el.addEventListener("keyup", (e) => { if (e.key === " ") spaceDown = false; });
 
-    el.querySelector(".slice-btns").addEventListener("click", (e) => {
-      const act = e.target.closest("button")?.dataset.act;
+    // A tap on a button acts when the finger lifts: after a quick drag or pinch some touch screens do not
+    // send the click of the next tap, and a button that sometimes ignores a tap is worse than none.
+    onButtonTap(el.querySelector(".slice-tools"), (btn) => {
+      if (btn.dataset.tool) this.views.setTouchTool(btn.dataset.tool);
+    });
+    onButtonTap(el.querySelector(".slice-btns"), (btn) => {
+      const act = btn.dataset.act;
       if (act === "reset") st().resetView(this.axis);
       else if (act === "flip-u") st().toggleFlip(this.axis, "u");
       else if (act === "flip-v") st().toggleFlip(this.axis, "v");
       else if (act === "max") st().setLayout(st().layout === this.axis ? "quad" : this.axis);
     });
+  }
+
+  // Touch: one finger taps and drags (what a drag does is the chosen tool), two fingers pinch and pan.
+  bindTouch() {
+    this.scrollAcc = 0;
+    bindTouchGestures(this.el, {
+      local: (e) => this.local(e),
+      tool: () => this.views.touchTool,
+      focus: () => this.el.focus({ preventScroll: true }),
+      begin: () => { this.scrollAcc = 0; this.state.beginInteraction(); },
+      end: () => this.state.endInteraction(),
+      tap: (x, y) => { this.moveCursorTo(x, y); this.hover(x, y); },
+      doubleTap: () => this.state.resetView(this.axis),
+      drag: (tool, x, y, dx, dy) => this.touchDrag(tool, x, y, dx, dy),
+      pinch: (g) => this.touchPinch(g),
+    });
+  }
+
+  touchDrag(tool, x, y, dx, dy) {
+    const s = this.state;
+    if (tool === "pan") {
+      const ppv = this.ppv(), flip = s.flips[this.axis], v = s.views[this.axis];
+      s.setView(this.axis, { centerU: v.centerU - (flip.u * dx) / ppv.u, centerV: v.centerV - (flip.v * dy) / ppv.v });
+    } else if (tool === "window") {
+      s.setWindow(dragWindow(s.window, dx, dy, s.dtype));
+    } else if (tool === "scroll") {
+      // dragging up goes to the next slice, like scrolling a page; about one slice per 10 px
+      this.scrollAcc -= dy;
+      const steps = Math.trunc(this.scrollAcc / 10);
+      if (!steps) return;
+      this.scrollAcc -= steps * 10;
+      this.lastDir = steps > 0 ? 1 : -1;
+      s.moveAlong(this.axis, steps, this.axis);
+    } else {
+      this.moveCursorTo(x, y);
+    }
+  }
+
+  touchPinch({ factor, cx, cy, dx, dy }) {
+    const s = this.state, axis = this.axis;
+    s.setView(axis, zoomAt(s.views[axis], factor, cx, cy, this.size.width, this.size.height, this.ppv(), s.flips[axis]));
+    const ppv = this.ppv(), flip = s.flips[axis], v = s.views[axis];
+    s.setView(axis, { centerU: v.centerU - (flip.u * dx) / ppv.u, centerV: v.centerV - (flip.v * dy) / ppv.v });
+  }
+
+  showTouchTool() {
+    for (const b of this.el.querySelectorAll(".slice-tools button")) b.setAttribute("aria-pressed", String(b.dataset.tool === this.views.touchTool));
   }
 
   hover(x, y) {
@@ -468,6 +553,12 @@ export class SliceViews {
     this.info = info;
     this.device = device;
     this.state = state;
+    // What one finger drags do on a touch screen (see Pane.bindTouch); remembered in this browser
+    this.touchTool = "cursor";
+    try {
+      const saved = localStorage.getItem("vg_slice_touch_tool");
+      if (["cursor", "pan", "scroll", "window"].includes(saved)) this.touchTool = saved;
+    } catch (_) { /* storage unavailable */ }
     this.renderer = new SliceRenderer(device);
     this.renderer.setLut(buildLut(state.tf.stops));
     this._raf = 0;
@@ -553,6 +644,90 @@ export class SliceViews {
     });
   }
 
+  // ------------------------------------------------------------ saving a slice as an image
+
+  /** The slice panes on screen now: [{ axis, label, index }]. */
+  visibleSlices() {
+    return AXES.filter((a) => this.panes[a].visible).map((axis) => {
+      const info = AXIS_INFO[axis];
+      const index = planeIndex(axis, this.state.cursor);
+      return { axis, label: `${info.label} slice (${info.normal.toUpperCase()} = ${index})`, name: `${info.label}-${info.normal}${index}`, index, count: this.state.dims[info.normal], normal: info.normal };
+    });
+  }
+
+  /**
+   * The part of a plane that is saved: [u0, u1) x [v0, v1) in voxels. "whole" = the full plane,
+   * "visible" = what the pane shows at its current zoom and pan (clipped to the plane).
+   */
+  exportRegion(axis, area) {
+    const ext = planeExtents(axis, this.state.dims);
+    if (area !== "visible") return { u0: 0, v0: 0, width: ext.u, height: ext.v };
+    const pane = this.panes[axis];
+    const ppv = pane.ppv();
+    const view = this.state.views[axis];
+    const halfU = pane.size.width / ppv.u / 2;
+    const halfV = pane.size.height / ppv.v / 2;
+    const u0 = Math.max(0, Math.floor(view.centerU - halfU));
+    const u1 = Math.min(ext.u, Math.ceil(view.centerU + halfU));
+    const v0 = Math.max(0, Math.floor(view.centerV - halfV));
+    const v1 = Math.min(ext.v, Math.ceil(view.centerV + halfV));
+    return { u0, v0, width: Math.max(0, u1 - u0), height: Math.max(0, v1 - v0) };
+  }
+
+  /**
+   * Saves a slice at the full resolution of the data: one image pixel per voxel, whatever the zoom.
+   * Orientation (flips), window / level, invert and the colour table are those of the pane.
+   * @param {"xy"|"xz"|"yz"} axis
+   * @param {{area?: "whole"|"visible", raw?: boolean, index?: number}} [o]  raw: the voxel values themselves,
+   *   not the picture; index: a slice other than the cursor's (the cursor is not moved)
+   * @returns {Promise<{width, height, rgba, gray} | {width, height, raw}>}
+   */
+  async exportSlice(axis, { area = "whole", raw = false, index } = {}) {
+    const st = this.state;
+    const region = this.exportRegion(axis, area);
+    if (region.width < 1 || region.height < 1) throw new Error("The slice is not in view");
+    const idx = index ?? planeIndex(axis, st.cursor);
+    // always the full-resolution plane (the pane may be showing a coarser preview)
+    const plane = await this.client.get(axis, idx, { channel: st.channel, stride: 1, priority: 2 });
+    const { width, height } = region;
+    const flip = st.flips[axis];
+    const cu = region.u0 + width / 2;
+    const cv = region.v0 + height / 2;
+
+    if (raw) {
+      // the same orientation as the picture; voxel (i, j) of the output is read straight from the plane
+      const data = new plane.data.constructor(width * height);
+      for (let j = 0; j < height; j++) {
+        const pv = Math.min(plane.height - 1, Math.max(0, Math.floor(cv + (flip.v * (j + 0.5 - height / 2)))));
+        for (let i = 0; i < width; i++) {
+          const pu = Math.min(plane.width - 1, Math.max(0, Math.floor(cu + (flip.u * (i + 0.5 - width / 2)))));
+          data[j * width + i] = plane.data[pv * plane.width + pu];
+        }
+      }
+      return { width, height, raw: data };
+    }
+
+    const gpu = this.renderer.createPane();
+    try {
+      this.renderer.upload(gpu, plane);
+      const gray = isGrayRamp(st.tf.stops);
+      const rgba = await this.renderer.renderToPixels(gpu, {
+        width,
+        height,
+        extent: planeExtents(axis, st.dims),
+        view: { centerU: cu, centerV: cv },
+        ppv: { u: 1, v: 1 },
+        flip,
+        window: st.window,
+        invert: st.invert,
+        lut: !gray,
+      });
+      return { width, height, rgba, gray };
+    } finally {
+      this.renderer.destroyPane(gpu);
+    }
+  }
+
   // ----------------------------------------------------------------- the rest
 
   toParams() {
@@ -568,6 +743,12 @@ export class SliceViews {
       uploadMB: +(this.renderer.uploadBytes / 1e6).toFixed(1),
       panes: Object.fromEntries(AXES.map((a) => [a, { shown: this.panes[a].shownKey, pending: this.panes[a].pendingKey }])),
     };
+  }
+
+  setTouchTool(tool) {
+    this.touchTool = tool;
+    try { localStorage.setItem("vg_slice_touch_tool", tool); } catch (_) { /* storage unavailable */ }
+    for (const axis of AXES) this.panes[axis].showTouchTool();
   }
 
   dispose() {

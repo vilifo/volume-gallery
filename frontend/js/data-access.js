@@ -11,6 +11,13 @@
 // (kiln fetches on the main thread, so a wrapper around window.fetch sees them, including the 403s
 // the worker answers with for a token the server no longer accepts) and asks the user to reload,
 // which gets a fresh token.
+//
+// Renewal without a reload: the token is a path segment of every brick URL, so setDataAccess() lets the
+// page hand over a function that gets a fresh one. The wrapper renews it in good time (at three quarters
+// of its life), puts the newest token into the URL of every brick request, and when a request is refused
+// anyway it renews and repeats that request once. The dialog (and the expiry listeners) only come into
+// play if renewing fails. Nothing is rebuilt: the view keeps running, which is what a screen that plays
+// for hours needs.
 
 const DATASET_PATH = "/dataset/";
 
@@ -19,6 +26,27 @@ let installed = false;
 let dialogOpen = false;
 let dismissed = false; // "Not now": stay quiet until a fresh token arrives or the page reloads
 let cacheStarted = null;
+const expiredListeners = new Set();
+
+// The newest token and how to get another (see setDataAccess)
+const DATASET_URL = /^(\/api\/volumes\/\d+\/dataset\/)([^/]+)(.*)$/;
+let currentToken = null;
+let tokenExpiresAt = null;
+let tokenTtlMs = 0;
+let renewer = null;
+let renewing = null;
+let renewTimer = null;
+
+/**
+ * Registers a function to call whenever a brick request of the watched volume is refused (the access
+ * token ran out). While at least one is registered the "Session expired" dialog is not shown: whoever
+ * registered takes care of renewing access (an animation being rendered does). Returns a function that
+ * unregisters it.
+ */
+export function onDataAccessExpired(listener) {
+  expiredListeners.add(listener);
+  return () => expiredListeners.delete(listener);
+}
 
 function timeout(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -82,6 +110,82 @@ function showReloadDialog() {
   backdrop.querySelector("#data-access-reload").focus();
 }
 
+function tokenOf(url) {
+  try {
+    const match = DATASET_URL.exec(new URL(url, window.location.href).pathname);
+    return match ? match[2] : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function withToken(url, token) {
+  const u = new URL(url, window.location.href);
+  const match = DATASET_URL.exec(u.pathname);
+  if (!match || match[2] === token) return url;
+  u.pathname = `${match[1]}${token}${match[3]}`;
+  return u.toString();
+}
+
+function urlOf(input) {
+  return typeof input === "string" ? input : input instanceof URL ? input.href : (input && input.url) || "";
+}
+
+function retarget(input, url) {
+  if (typeof input === "string") return url;
+  if (input instanceof URL) return new URL(url);
+  return new Request(url, input);
+}
+
+/** When the current token runs out (ms timestamp), or null when unknown. */
+export const dataAccessExpiresAt = () => tokenExpiresAt;
+/** The life of a token in ms (0 when unknown). */
+export const dataAccessTtlMs = () => tokenTtlMs;
+
+/**
+ * Tells the wrapper which token is in use and how to get a fresh one.
+ * @param {{url: string, ttlMs: number, renew: () => Promise<string>}} o  `url`: the data URL the viewer was given;
+ *   `renew` resolves with a new data URL (same volume and same detail levels)
+ */
+export function setDataAccess({ url, ttlMs, renew }) {
+  currentToken = tokenOf(url);
+  renewer = renew;
+  tokenTtlMs = ttlMs || 0;
+  tokenExpiresAt = tokenTtlMs ? Date.now() + tokenTtlMs : null;
+  scheduleRenewal();
+}
+
+function scheduleRenewal(delayMs) {
+  clearTimeout(renewTimer);
+  if (!renewer || !tokenTtlMs) return;
+  const delay = delayMs ?? Math.max(5000, tokenExpiresAt - Date.now() - tokenTtlMs * 0.25);
+  renewTimer = setTimeout(() => { renewNow(); }, delay);
+}
+
+// One renewal at a time; everybody who needs one waits for the same. Resolves with the new token, or null.
+function renewNow() {
+  if (!renewer) return Promise.resolve(null);
+  if (!renewing) {
+    renewing = (async () => {
+      try {
+        const url = await renewer();
+        currentToken = tokenOf(url) || currentToken;
+        tokenExpiresAt = tokenTtlMs ? Date.now() + tokenTtlMs : null;
+        dismissed = false;
+        scheduleRenewal();
+        return currentToken;
+      } catch (err) {
+        console.warn("Could not renew access to the volume data:", err);
+        scheduleRenewal(15000); // try again shortly
+        return null;
+      } finally {
+        renewing = null;
+      }
+    })();
+  }
+  return renewing;
+}
+
 function isThisVolumesData(url) {
   try {
     const path = new URL(url, window.location.href).pathname;
@@ -98,10 +202,22 @@ export function watchDataAccess(volumeId) {
   installed = true;
   const originalFetch = window.fetch.bind(window);
   window.fetch = async (input, init) => {
-    const response = await originalFetch(input, init);
-    if (response.status === 403) {
-      const url = typeof input === "string" ? input : input && input.url;
-      if (url && isThisVolumesData(url)) showReloadDialog();
+    const ours = isThisVolumesData(urlOf(input));
+    if (ours && currentToken) {
+      const fixed = withToken(urlOf(input), currentToken); // always the newest token
+      if (fixed !== urlOf(input)) input = retarget(input, fixed);
+    }
+    let response = await originalFetch(input, init);
+    if (ours && response.status === 403 && renewer) {
+      const fresh = await renewNow();
+      if (fresh) {
+        input = retarget(input, withToken(urlOf(input), fresh));
+        response = await originalFetch(input, init);
+      }
+    }
+    if (ours && response.status === 403) {
+      if (expiredListeners.size) expiredListeners.forEach((fn) => { try { fn(); } catch (_) { /* a listener must not break loading */ } });
+      else showReloadDialog();
     }
     return response;
   };

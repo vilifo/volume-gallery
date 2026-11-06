@@ -45,6 +45,22 @@ class AssetBase(SQLModel):
     )
     status: AssetStatus = Field(default=AssetStatus.ready)
     status_log: str = Field(default="")
+    # Gallery organisation: the folder the asset is filed in (None = top level) and its tags
+    # (comma-separated; see organize.clean_tags).
+    folder_id: Optional[int] = Field(default=None, foreign_key="folder.id", index=True)
+    tags: str = Field(default="")
+
+
+class Folder(SQLModel, table=True):
+    """A gallery folder. Folders nest (parent_id) and hold assets of any kind."""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    name: str
+    parent_id: Optional[int] = Field(default=None, foreign_key="folder.id", index=True)
+    created_by: Optional[int] = Field(default=None, foreign_key="user.id")
+    created_at: datetime = Field(
+        default_factory=get_utc_now,
+        sa_type=DateTime(timezone=True)
+    )
 
 
 class AssetAccessBase(SQLModel):
@@ -67,6 +83,30 @@ class VolumeAccess(AssetAccessBase, table=True):
     """Grants a reader visibility into a volume."""
     id: Optional[int] = Field(default=None, primary_key=True)
     volume_id: int = Field(foreign_key="volume.id", index=True)
+
+
+class AnimationPath(SQLModel, table=True):
+    """A saved way of showing a volume on screen (camera path, turntable or slice sweep), visible to
+    everybody who can see the volume. `spec` is the validated PlaybackSpec as JSON text."""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    volume_id: int = Field(foreign_key="volume.id", index=True)
+    name: str
+    spec: str
+    created_by: Optional[int] = Field(default=None, foreign_key="user.id")
+    created_at: datetime = Field(default_factory=get_utc_now, sa_type=DateTime(timezone=True))
+    updated_at: datetime = Field(default_factory=get_utc_now, sa_type=DateTime(timezone=True))
+
+
+class ViewBookmark(SQLModel, table=True):
+    """A saved view of a volume (camera, render settings, slice position), visible to everybody who can see
+    the volume. `spec` is the validated BookmarkSpec as JSON text."""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    volume_id: int = Field(foreign_key="volume.id", index=True)
+    name: str
+    spec: str
+    created_by: Optional[int] = Field(default=None, foreign_key="user.id")
+    created_at: datetime = Field(default_factory=get_utc_now, sa_type=DateTime(timezone=True))
+    updated_at: datetime = Field(default_factory=get_utc_now, sa_type=DateTime(timezone=True))
 
 
 class Mesh(AssetBase, table=True):

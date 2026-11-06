@@ -235,6 +235,46 @@ export class SliceRenderer {
     this.device.queue.submit([encoder.finish()]);
   }
 
+  /**
+   * Draws the pane's plane into an offscreen RGBA image and reads it back (for saving as a file).
+   * `v` is the same description draw() takes; it is rendered in horizontal bands so the readback
+   * buffer stays small however tall the image is.
+   * @returns {Promise<Uint8ClampedArray>} width * height * 4 bytes, row by row
+   */
+  async renderToPixels(pane, v) {
+    const { width, height } = v;
+    const bytesPerRow = Math.ceil((width * 4) / 256) * 256;
+    const bandRows = Math.max(1, Math.min(height, Math.floor(96e6 / bytesPerRow)));
+    const out = new Uint8ClampedArray(width * height * 4);
+    const texture = this.device.createTexture({
+      size: [width, bandRows],
+      format: "rgba8unorm",
+      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC,
+    });
+    const buffer = this.device.createBuffer({ size: bytesPerRow * bandRows, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    try {
+      for (let y0 = 0; y0 < height; y0 += bandRows) {
+        const rows = Math.min(bandRows, height - y0);
+        // the shader maps pixel (x, y) of a target of size (w, h) to the plane around the view centre:
+        // moving the centre by the band's offset from the middle of the whole image gives the same pixels
+        const shift = (y0 + rows / 2 - height / 2) / v.ppv.v;
+        const band = { ...v, width, height: rows, view: { ...v.view, centerV: v.view.centerV + v.flip.v * shift } };
+        this.draw(pane, texture.createView(), "rgba8unorm", band);
+        const encoder = this.device.createCommandEncoder();
+        encoder.copyTextureToBuffer({ texture }, { buffer, bytesPerRow }, [width, rows]);
+        this.device.queue.submit([encoder.finish()]);
+        await buffer.mapAsync(GPUMapMode.READ);
+        const src = new Uint8Array(buffer.getMappedRange());
+        for (let r = 0; r < rows; r++) out.set(src.subarray(r * bytesPerRow, r * bytesPerRow + width * 4), (y0 + r) * width * 4);
+        buffer.unmap();
+      }
+    } finally {
+      texture.destroy();
+      buffer.destroy();
+    }
+    return out;
+  }
+
   destroyPane(pane) {
     pane.texture?.destroy();
     pane.uniforms.destroy();

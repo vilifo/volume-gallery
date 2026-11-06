@@ -73,7 +73,7 @@ FROM python:3.12-slim
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1
 
-# Install system dependencies required for CMake and building Nexus
+# Install system dependencies
 RUN apt-get update && apt-get install -y \
     wget \
     tar \
@@ -82,6 +82,14 @@ RUN apt-get update && apt-get install -y \
     libtbb12 \
     libgl1 \
     unzip \
+    libgl1 \
+    libopengl0 \
+    libglib2.0-0 \
+    libsm6 \
+    libxext6 \
+    libxrender-dev \
+    libcom-err2 \
+    libgssapi-krb5-2 \
     && rm -rf /var/lib/apt/lists/*
 
 # Create a dedicated directory for PotreeConverter

@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Viewer — Volume Gallery</title>
 <script src="/js/theme-init.js?v=hist1"></script>
-<link rel="stylesheet" href="/css/style.css?v=theme1" />
+<link rel="stylesheet" href="/css/style.css?v=org5" />
 <style>
   /* This page trades the app's normal padded/max-width main column for an
      edge-to-edge canvas — the render is the point of the page, everything
@@ -100,6 +100,15 @@
   .slice-title { font-weight: 600; letter-spacing: 0.02em; }
   .slice-sub { opacity: 0.85; font-variant-numeric: tabular-nums; }
   .slice-btns { margin-left: auto; display: flex; gap: 2px; pointer-events: auto; opacity: 0; transition: opacity 0.15s; }
+  /* what one finger does on a touch screen: a strip at the right edge of each slice pane */
+  .slice-tools { position: absolute; right: 6px; top: 50%; transform: translateY(-50%); display: none; flex-direction: column; gap: 4px; z-index: 3; }
+  .slice-tools button { width: 36px; height: 36px; padding: 0; font-size: 18px; line-height: 1; color: #ddd; background: rgba(0,0,0,0.5); border: 1px solid rgba(255,255,255,0.2); border-radius: 8px; cursor: pointer; }
+  .slice-tools button[aria-pressed="true"] { background: rgba(70,110,200,0.85); border-color: rgba(160,190,255,0.8); color: #fff; }
+  .slice-tools button, .slice-btns button { touch-action: manipulation; } /* no double-tap-zoom delay on taps */
+  @media (any-pointer: coarse) { .slice-tools { display: flex; } }
+  /* no hover on touch screens: the buttons must always be there, and big enough for a finger */
+  @media (hover: none) { .slice-btns { opacity: 1; } }
+  @media (pointer: coarse) { .slice-btns button { width: 32px; height: 32px; font-size: 16px; } .slice-btns { gap: 4px; } }
   .slice-pane:hover .slice-btns, .slice-pane:focus-within .slice-btns { opacity: 1; }
   .slice-btns button { background: rgba(0,0,0,0.55); color: #ddd; border: 1px solid rgba(255,255,255,0.15); border-radius: 4px; width: 22px; height: 22px; padding: 0; cursor: pointer; font-size: 12px; line-height: 1; }
   .slice-btns button:hover { background: rgba(60,80,120,0.8); }
@@ -296,6 +305,17 @@
     user-select: none;
     -webkit-user-select: none;
   }
+  /* Colour-stop editor under the TF canvas (preset "Custom"); the side padding matches .ctl-tf-stage
+     so the strip lines up with the canvas x axis. */
+  .ctl-tf-colors { background: #000; padding: 4px 10px 6px; color: var(--text-dim); font-size: 11px; }
+  .ctl-cs-bar { position: relative; height: 18px; margin: 6px 0 4px; border: 1px solid var(--viewer-border); border-radius: 4px; cursor: copy; touch-action: none; user-select: none; -webkit-user-select: none; outline: none; }
+  .ctl-cs-bar:focus-visible { box-shadow: 0 0 0 2px var(--accent); }
+  .ctl-cs-stop { position: absolute; top: -5px; width: 10px; height: 26px; margin-left: -5px; box-sizing: border-box; border: 2px solid #fff; border-radius: 3px; background: var(--c); box-shadow: 0 0 0 1px rgba(0,0,0,0.75); cursor: ew-resize; }
+  .ctl-cs-stop.sel { border-color: var(--accent); z-index: 1; }
+  .ctl-cs-row { display: flex; align-items: center; gap: 0.5em; padding-top: 4px; }
+  .ctl-cs-row input[type="color"] { width: 34px; height: 24px; padding: 0; border: 1px solid var(--viewer-border); border-radius: 4px; background: none; cursor: pointer; }
+  .ctl-cs-row input[type="number"] { width: 4.6em; padding: 2px 4px; font: inherit; color: inherit; background: transparent; border: 1px solid var(--viewer-border); border-radius: 4px; }
+  .ctl-cs-row .ctl-chip:disabled { opacity: 0.4; cursor: default; }
   .ctl-tf-help { font-size: 10px; color: var(--text-dim); text-align: center; padding: 0.35em 0; background: color-mix(in srgb, var(--panel) 86%, transparent); }
 
   .ctl-slider-row { display: flex; align-items: center; gap: 0.6em; margin-bottom: 0.7em; }
@@ -439,9 +459,10 @@
   <div class="app-shell" id="shell"></div>
 
   <script type="module">
-    import { api, requireLogin, getRole, getUsername, renderShell, wireLogout } from "/js/api.js?v=sw1";
+    import { api, requireLogin, getRole, getUsername, renderShell, wireLogout } from "/js/api.js?v=org5";
     import { syncHistogram } from "/js/histogram.js?v=hist1";
-    import { KilnViewer } from "/vendor/kiln-render/lib/kiln-render.js?v=atlas2";
+import { insertStop, sampleStops, rgbToHex, decodeTf, encodeTf } from "/js/slice/transfer-function.js";
+    import { KilnViewer } from "/vendor/kiln-render/lib/kiln-render.js?v=atlas3";
     import {
       ATLAS_VRAM_OPTIONS_MB,
       formatVram,
@@ -449,10 +470,18 @@
       planAtlas,
       saveAtlasMB,
     } from "/js/atlas-budget.js?v=atlas3";
-    import { setupSliceIntegration } from "/js/slice/slice-integration.js?v=slice2";
+    import { setupSliceIntegration } from "/js/slice/slice-integration.js?v=slice6";
     import { niceScaleLength } from "/js/scalebar.js?v=sb1";
-    import { toggleHelpPanel } from "/js/help.js?v=help2";
-    import { startBrickCache, watchDataAccess, resetDataAccessWatch } from "/js/data-access.js?v=sw1";
+    import { toggleHelpPanel } from "/js/help.js?v=help6";
+    import { makeDescriptionExpandable } from "/js/description.js?v=org2";
+    import { openExportPanel } from "/js/export-image.js?v=org2";
+    import { openAnimatePanel } from "/js/animate.js?v=org5";
+    import { createPlayer } from "/js/playback.js?v=org5";
+    import { createPathStore, createBookmarkStore } from "/js/saved-paths.js?v=org5";
+    import { openBookmarksPanel } from "/js/bookmarks.js?v=org5";
+    import { interpolatePose, readPose, writePose } from "/js/animate.js?v=org5";
+    import { captureStill } from "/js/render-capture.js?v=org4";
+    import { startBrickCache, watchDataAccess, resetDataAccessWatch, onDataAccessExpired, setDataAccess, dataAccessExpiresAt, dataAccessTtlMs } from "/js/data-access.js?v=org4";
 
     requireLogin();
     const role = getRole();
@@ -466,6 +495,9 @@
     const COLLAPSE_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3v3a2 2 0 0 1-2 2H4M15 3v3a2 2 0 0 0 2 2h3M4 16h3a2 2 0 0 1 2 2v3M20 16h-3a2 2 0 0 0-2 2v3"/></svg>`;
     const CUBE_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8 12 3 3 8m18 0v8l-9 5m9-13-9 5m0 8-9-5V8m9 13v-8M3 8l9 5"/></svg>`;
     const HELP_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.1 9a3 3 0 0 1 5.8 1c0 2-3 3-3 3M12 17h.01"/></svg>`;
+    const DOWNLOAD_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>`;
+    const ANIMATE_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polygon points="10 8 16 12 10 16 10 8"/></svg>`;
+    const BOOKMARK_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>`;
     const LINK_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>`;
 
     document.getElementById("shell").innerHTML = `
@@ -538,6 +570,7 @@
       p.set("density", fx(state.densityScale, 2));
       p.set("iso", fx(state.isoValue));
       p.set("tf", state.tfPreset);
+      if (state.tfPreset === "custom" && state.tfColorStops) p.set("tfcol", encodeTf({ preset: "custom", stops: state.tfColorStops }));
       p.set("tfpts", state.tfPoints.map((pt) => `${fx(pt.x)},${fx(pt.y)}`).join(","));
       p.set("up", state.upAxis);
       p.set("scale", fx(state.renderScale, 2));
@@ -560,6 +593,7 @@
         isoValue: state.isoValue,
         renderScale: state.renderScale,
         tfPreset: state.tfPreset,
+        tfColorStops: state.tfColorStops ? state.tfColorStops.map((st) => ({ ...st })) : null,
         tfPoints: state.tfPoints.map((pt) => ({ x: pt.x, y: pt.y })),
         upAxis: state.upAxis,
         cam: state.cam,
@@ -592,6 +626,11 @@
       const scale = num("scale"); if (scale !== undefined) o.renderScale = scale;
       const tf = p.get("tf");
       if (TF_PRESETS.some(([v]) => v === tf)) o.tfPreset = tf;
+      else if (tf === "custom") {
+        // custom colour stops travel in `tfcol` ("pos:rrggbb,..."); a malformed value drops the whole custom map
+        const custom = decodeTf(p.get("tfcol"));
+        if (custom && custom.preset === "custom") { o.tfPreset = "custom"; o.tfColorStops = custom.stops; }
+      }
       const tfpts = (p.get("tfpts") || "").split(",").filter((x) => x !== "").map(Number);
       if (tfpts.length >= 2 && tfpts.length % 2 === 0 && tfpts.every(Number.isFinite)) {
         o.tfPoints = [];
@@ -685,6 +724,9 @@
               <button type="button" data-layout="yz" title="YZ plane: slices along X">YZ</button>
             </div>
             <button id="help-btn" class="icon-btn" aria-pressed="false" title="Show help for this viewer next to the view">${HELP_ICON}<span class="icon-btn-label">Help</span></button>
+            <button id="bookmarks-btn" class="icon-btn" title="Save this view and come back to it later">${BOOKMARK_ICON}<span class="icon-btn-label">Bookmarks</span></button>
+            <button id="animate-btn" class="icon-btn" title="Render an animation: a sweep through the slices, a 3D turntable or a camera path">${ANIMATE_ICON}<span class="icon-btn-label">Animate</span></button>
+            <button id="export-btn" class="icon-btn" title="Save the view or a slice as an image file at full resolution">${DOWNLOAD_ICON}<span class="icon-btn-label">Export</span></button>
             <button id="share-btn" class="icon-btn" title="Copy a link to this exact view">${LINK_ICON}<span class="icon-btn-label">Share</span></button>
             ${
               volume.mesh_status === "ready"
@@ -707,6 +749,9 @@
           </div>
         </div>
       `;
+
+      const descEl = content.querySelector(".viewer-desc");
+      if (descEl) makeDescriptionExpandable(descEl, { title: volume.title, text: volume.description });
 
       const canvasWrap = $("canvas-wrap");
       const canvasArea = $("canvas-area");
@@ -754,6 +799,7 @@
       // a brand-new canvas (starting at 1x1, so a resize is always seen).
       // loadToken discards the result of a load superseded by a newer one.
       let loadToken = 0;
+
       let stopStats = null;
       let stopScaleBar = null;
       let urlSync = null;
@@ -783,7 +829,7 @@
         return canvas;
       }
 
-      async function loadVolume(minLevel) {
+      async function loadVolume(minLevel, overrideOptions = null) {
         const token = ++loadToken;
         activeMinLevel = minLevel;
 
@@ -794,6 +840,7 @@
           urlSync = null;
           nextOptions = stateToOptions(currentViewer.getState());
         }
+        if (overrideOptions) nextOptions = { ...nextOptions, ...overrideOptions }; // e.g. a bookmark's render settings
         showStatus(currentViewer ? "Reloading volume\u2026" : "Requesting WebGPU device\u2026");
         setLoadUi("indeterminate", 0, "Loading\u2026");
         if (stopStats) {
@@ -826,6 +873,12 @@
           await startBrickCache();
           watchDataAccess(volumeId); // asks for a reload when the data link expires
           resetDataAccessWatch();    // this is a fresh link: allow the notice again
+          // Renew the token in the background before it runs out, without rebuilding the viewer
+          setDataAccess({
+            url: access.url,
+            ttlMs: (access.expires_in_minutes || 0) * 60000,
+            renew: async () => (await api.volumeDataAccessUrl(volumeId, minLevel)).url,
+          });
 
           if (token !== loadToken) return;
 
@@ -872,6 +925,8 @@
             initialLayoutApplied = true;
             slices.applyInitial();
           }
+          startAutoplay();
+          openBookmarkLink();
         } catch (err) {
           if (token !== loadToken) return;
           console.error(err);
@@ -882,12 +937,234 @@
 
       loadVolume(activeMinLevel);
 
+      // ---- Bookmarks: saved views (camera, render settings, slice position)
+      const bookmarkStore = createBookmarkStore({ api, volumeId, canShare: role === "admin" || role === "editor" });
+
+      // A small JPEG of the current 3D view, for the list. Best effort: a bookmark is fine without it.
+      async function viewThumbnail(viewer) {
+        try {
+          const bitmap = await createImageBitmap(await viewer.captureImage("image/png"), { resizeWidth: 240, resizeQuality: "medium" });
+          const c = document.createElement("canvas");
+          c.width = bitmap.width;
+          c.height = bitmap.height;
+          c.getContext("2d").drawImage(bitmap, 0, 0);
+          bitmap.close?.();
+          const url = c.toDataURL("image/jpeg", 0.72);
+          return url.length < 55000 ? url : null;
+        } catch (_) {
+          return null;
+        }
+      }
+
+      async function captureBookmark() {
+        const viewer = currentViewer;
+        if (!viewer) throw new Error("The 3D view is not ready yet");
+        const options = stateToOptions(viewer.getState());
+        delete options.renderScale; // a performance setting of this screen, not part of a view
+        let pose = null;
+        try { pose = readPose(viewer.camera); } catch (_) { /* no free-rotation camera: the view still restores */ }
+        const sliceParams = {};
+        for (const [k, val] of Object.entries(sliceUrlParams())) sliceParams[k] = String(val);
+        return {
+          options,
+          pose,
+          min_level: Number.isInteger(activeMinLevel) ? activeMinLevel : null,
+          slices: Object.keys(sliceParams).length ? sliceParams : null,
+          thumb: await viewThumbnail(viewer),
+        };
+      }
+
+      // The camera glides to a pose in a moment instead of jumping
+      function flyTo(viewer, target, ms = 800) {
+        return new Promise((resolve) => {
+          let from;
+          try { from = readPose(viewer.camera); } catch (_) { writePose(viewer.camera, target); resolve(); return; }
+          viewer.camera.setFreeRotation?.(true);
+          const t0 = performance.now();
+          const step = (now) => {
+            if (viewer !== currentViewer) { resolve(); return; }
+            const t = Math.min(1, (now - t0) / ms);
+            const eased = t * t * (3 - 2 * t);
+            writePose(viewer.camera, t >= 1 ? target : interpolatePose(from, target, eased));
+            if (t < 1) requestAnimationFrame(step); else resolve();
+          };
+          requestAnimationFrame(step);
+        });
+      }
+
+      async function restoreBookmark(entry) {
+        const b = entry.spec;
+        player.stop(); // a running path would fight the camera
+        if (b.slices || slices.views) {
+          const layout = b.slices?.layout || "3d";
+          await slices.requestLayout(layout);
+          if (slices.views && b.slices) slices.views.state.applyParams({ ...b.slices, layout });
+        }
+        const viewer = currentViewer;
+        if (!viewer) return;
+        const current = stateToOptions(viewer.getState());
+        const { cam, ...want } = b.options;
+        const levelChanged = Number.isInteger(b.min_level) && b.min_level !== activeMinLevel;
+        const settingsChanged = Object.keys(want).some((k) => JSON.stringify(want[k]) !== JSON.stringify(current[k]));
+        if (settingsChanged || levelChanged) {
+          // other render settings (mode, transfer function, clipping, ...): rebuild the viewer with them
+          await loadVolume(levelChanged ? b.min_level : activeMinLevel, { ...want, ...(cam ? { cam } : {}) });
+        } else if (b.pose) {
+          await flyTo(viewer, b.pose);
+        } else if (cam) {
+          await loadVolume(activeMinLevel, { cam });
+        }
+      }
+
+      // Playing a camera path, turntable or slice sweep on screen by itself, and the saved paths (this browser's,
+      // and the shared ones editors keep on the server). ?play=<id> in the link starts a shared one.
+      const player = createPlayer({
+        host: canvasWrap,
+        getViewer: () => currentViewer,
+        getSlices: () => slices.views,
+        is3dVisible: () => $("pane-3d").dataset.visible === "1" && !!currentViewer,
+        onChange: (state) => {
+          if (state !== "idle") return;
+          const url = new URL(window.location.href); // stopped: the link no longer starts it again
+          if (url.searchParams.has("play")) {
+            url.searchParams.delete("play");
+            history.replaceState(history.state, "", url.pathname + url.search + url.hash);
+          }
+        },
+      });
+      const pathStore = createPathStore({ api, volumeId, canShare: role === "admin" || role === "editor" });
+      let autoplayStarted = false;
+      let bookmarkLinkOpened = false;
+      async function openBookmarkLink() { // ?bookmark=<id>
+        const id = params.get("bookmark");
+        if (!id || bookmarkLinkOpened) return;
+        bookmarkLinkOpened = true;
+        try {
+          await restoreBookmark(await bookmarkStore.getShared(id));
+        } catch (err) {
+          console.error("[bookmark link]", err);
+          showStatus(`Could not open the bookmark: ${err.message}`, { busy: false });
+        }
+      }
+      async function startAutoplay() {
+        const id = params.get("play");
+        if (!id || autoplayStarted) return;
+        autoplayStarted = true;
+        try {
+          const entry = await pathStore.getShared(id);
+          if (entry.spec.kind === "slices") await slices.requestLayout(entry.spec.axis);
+          await player.play(entry.spec);
+        } catch (err) {
+          console.error("[autoplay]", err);
+          showStatus(`Could not start the saved path: ${err.message}`, { busy: false });
+        }
+      }
+
+      // Last resort when the background renewal of the data token (see setDataAccess) has failed: rebuilds the
+      // viewer with a fresh one. The view, transfer function and clipping carry over, the bricks come back
+      // from the browser's brick cache or the server. Resolves with the new viewer.
+      async function refreshDataAccess() {
+        await loadVolume(activeMinLevel);
+        if (!currentViewer) throw new Error("Access to the volume\u2019s data could not be renewed");
+        return currentViewer;
+      }
+
       // Share view URL button
       // Help: a floating panel, not a dialog, so the view stays usable while it is open.
       const helpBtn = document.getElementById("help-btn");
       helpBtn.addEventListener("click", () => {
         const open = toggleHelpPanel({ topic: "volume", role: getRole(), onClose: () => helpBtn.setAttribute("aria-pressed", "false") });
         helpBtn.setAttribute("aria-pressed", String(open));
+      });
+
+      // Export: the 3D render at render scale 1.00 once everything has been streamed in, or a slice at
+      // one pixel per voxel. Not modal, so it can stay open while you move to the next slice.
+      const capture3d = async (onProgress) => {
+        for (let attempt = 0; ; attempt++) {
+          let viewer = currentViewer;
+          if (!viewer) throw new Error("The 3D view is not ready yet");
+          let expired = false;
+          const unsubscribe = onDataAccessExpired(() => { expired = true; });
+          try {
+            if (dataAccessExpiresAt() != null && dataAccessExpiresAt() - Date.now() < Math.min(60000, dataAccessTtlMs() / 10)) {
+              onProgress("Renewing access to the data\u2026");
+              viewer = await refreshDataAccess();
+            }
+            const current = viewer;
+            return await captureStill(current, { isCurrent: () => current === currentViewer, onProgress, expired: () => expired });
+          } catch (err) {
+            if (!err.expired || attempt >= 2) throw err;
+            onProgress("Renewing access to the data\u2026");
+            await refreshDataAccess(); // then draw it again
+          } finally {
+            unsubscribe();
+          }
+        }
+      };
+
+      const exportBtn = document.getElementById("export-btn");
+      exportBtn.addEventListener("click", () => {
+        const open = openExportPanel({
+          anchor: exportBtn,
+          baseName: volume.slug,
+          description: volume.title,
+          onClose: () => exportBtn.setAttribute("aria-pressed", "false"),
+          targets: () => {
+            const list = [];
+            if (currentViewer && $("pane-3d").dataset.visible === "1") list.push({ id: "3d", kind: "3d", label: "3D render", name: "3d" });
+            for (const s of slices.views?.visibleSlices() ?? []) list.push({ id: s.axis, kind: "slice", label: s.label, name: s.name });
+            return list;
+          },
+          sizeOf: (id, area) => {
+            if (id === "3d") { const c = $("canvas"); return c ? { width: c.width, height: c.height } : null; }
+            return slices.views ? slices.views.exportRegion(id, area) : null;
+          },
+          capture: (id, opts, onProgress) => {
+            if (id === "3d") return capture3d(onProgress);
+            onProgress("Loading the slice\u2026");
+            return slices.views.exportSlice(id, opts);
+          },
+          note3d: () => (activeMinLevel > 0
+            ? `It uses the data up to Max detail level ${activeMinLevel}; set that to 0 under Advanced for the finest detail.`
+            : ""),
+        });
+        exportBtn.setAttribute("aria-pressed", String(!!open));
+      });
+
+      const bookmarksBtn = document.getElementById("bookmarks-btn");
+      bookmarksBtn.addEventListener("click", () => {
+        const open = openBookmarksPanel({
+          anchor: bookmarksBtn,
+          store: bookmarkStore,
+          capture: captureBookmark,
+          restore: restoreBookmark,
+          onClose: () => bookmarksBtn.setAttribute("aria-pressed", "false"),
+        });
+        bookmarksBtn.setAttribute("aria-pressed", String(!!open));
+      });
+
+      const animateBtn = document.getElementById("animate-btn");
+      animateBtn.addEventListener("click", () => {
+        const open = openAnimatePanel({
+          anchor: animateBtn,
+          baseName: volume.slug,
+          description: volume.title,
+          getViewer: () => currentViewer,
+          getSlices: () => slices.views,
+          getCanvas: () => $("canvas"),
+          pane: $("pane-3d"),
+          player,
+          store: pathStore,
+          bookmarks: bookmarkStore,
+          access: {
+            expiresAt: dataAccessExpiresAt,
+            ttlMs: dataAccessTtlMs,
+            renew: refreshDataAccess,
+            onExpired: onDataAccessExpired,
+          },
+          onClose: () => animateBtn.setAttribute("aria-pressed", "false"),
+        });
+        animateBtn.setAttribute("aria-pressed", String(!!open));
       });
 
       document.getElementById("share-btn").addEventListener("click", async () => {
@@ -981,6 +1258,9 @@
                         <option value="1440" selected>24 hours</option>
                         <option value="10080">7 days</option>
                         <option value="43200">30 days</option>
+                        <option value="262800">6 months</option>
+                        <option value="525600">1 year</option>
+                        <option value="0">Never</option>
                       </select>
                     </div>
                   </div>
@@ -1089,6 +1369,8 @@
         try {
           const p = stateToParams(viewer.getState(), getMinLevel());
           for (const [k, v] of Object.entries(sliceUrlParams())) p.set(k, v);
+          const play = new URLSearchParams(window.location.search).get("play"); // a link that plays a saved path
+          if (play) p.set("play", play);
           const qs = "?" + p.toString();
           if (qs !== last) {
             history.replaceState(history.state, "", window.location.pathname + qs + window.location.hash);
@@ -1115,6 +1397,9 @@
       const renderer = viewer.renderer;
       const camera = viewer.camera;
       const tf = viewer.transferFunction;
+      // "Custom" colour stops need kiln-render patch 0007; without it the preset list stays as it was.
+      const canCustomColours = typeof tf.setColorStops === "function";
+      const tfPresetChoices = canCustomColours ? [...TF_PRESETS, ["custom", "Custom"]] : TF_PRESETS;
       const [dimX, dimY, dimZ] = viewer.metadata.dimensions;
       const dims = { X: dimX, Y: dimY, Z: dimZ };
 
@@ -1557,6 +1842,202 @@
         return redraw;
       }
 
+      // --- colour editor (preset "Custom"): a strip under the TF canvas with one handle per colour
+      // stop. Drag a handle to move it (the end stops stay at 0 and 1), click the strip to add a stop
+      // coloured like the map at that spot, double-click or Delete to remove one, arrow keys nudge the
+      // selected stop. The colour box and position field below edit the selected stop. kiln-render
+      // keeps the stops (tf.getColorStops()), so share links and in-place reloads carry them. ---
+      let selStop = 0;
+      let lastCustomStops = null; // restored when "Custom" is picked again after a built-in preset
+      const MIN_GAP = 0.001;
+
+      // The current colour map as a short list of stops (collinear ones dropped), the starting point
+      // when switching from a built-in preset to editing.
+      function currentColourStops() {
+        const n = 17;
+        let stops = Array.from({ length: n }, (_, i) => ({ pos: i / (n - 1), color: rgbToHex(tf.getColor(i / (n - 1))) }));
+        for (let i = 1; i < stops.length - 1;) {
+          const a = stops[i - 1], b = stops[i + 1];
+          const expect = sampleStops([a, b], stops[i].pos);
+          const got = tf.getColor(stops[i].pos);
+          if (expect.every((v, k) => Math.abs(v - got[k]) <= 3)) stops.splice(i, 1); else i++;
+        }
+        return stops;
+      }
+
+      function wireColorEditor(root) {
+        const host = root.querySelector('[data-role="tf-colors"]');
+        let bar = null, drag = null;
+
+        const gradient = (stops) =>
+          `linear-gradient(to right, ${stops.map((s) => `${s.color} ${(s.pos * 100).toFixed(2)}%`).join(", ")})`;
+
+        function commit(stops) {
+          tf.setColorStops(stops);
+          state.tfPreset = tf.preset;
+          dirty();
+          if (redrawTf) redrawTf();
+          paint();
+        }
+
+        function paint() {
+          const stops = tf.getColorStops();
+          if (!bar || !stops) return;
+          selStop = Math.min(selStop, stops.length - 1);
+          bar.style.background = gradient(stops);
+          if (bar.children.length !== stops.length) {
+            bar.replaceChildren(...stops.map(() => Object.assign(document.createElement("div"), { className: "ctl-cs-stop" })));
+          }
+          stops.forEach((s, i) => {
+            const el = bar.children[i];
+            el.style.left = `${s.pos * 100}%`;
+            el.style.setProperty("--c", s.color);
+            el.classList.toggle("sel", i === selStop);
+          });
+          const interior = selStop > 0 && selStop < stops.length - 1;
+          const colorInput = host.querySelector('[data-role="cs-color"]');
+          if (colorInput.value !== stops[selStop].color) colorInput.value = stops[selStop].color;
+          const posInput = host.querySelector('[data-role="cs-pos"]');
+          if (document.activeElement !== posInput) posInput.value = stops[selStop].pos.toFixed(3);
+          posInput.disabled = !interior;
+          host.querySelector('[data-role="cs-remove"]').disabled = !interior;
+        }
+
+        function build() {
+          bar = null;
+          if (!tf.getColorStops()) {
+            host.innerHTML = canCustomColours
+              ? `<button type="button" class="ctl-chip" data-role="cs-edit">Edit colours&hellip;</button>`
+              : "";
+            host.hidden = !canCustomColours;
+            host.querySelector('[data-role="cs-edit"]')?.addEventListener("click", () => {
+              selectPreset("custom");
+              root.querySelector('[data-role="tf-preset"]').value = "custom";
+            });
+            return;
+          }
+          host.hidden = false;
+          host.innerHTML = `
+            <div class="ctl-cs-bar" data-role="cs-bar" tabindex="0" title="Click to add a colour stop"></div>
+            <div class="ctl-cs-row">
+              <input type="color" data-role="cs-color" aria-label="Colour of the selected stop">
+              <input type="number" data-role="cs-pos" min="0" max="1" step="0.01" aria-label="Position of the selected stop">
+              <button type="button" class="ctl-chip" data-role="cs-remove">Remove</button>
+              <button type="button" class="ctl-chip" data-role="cs-reverse">Reverse</button>
+            </div>`;
+          bar = host.querySelector('[data-role="cs-bar"]');
+          wire();
+          paint();
+        }
+
+        function posFromEvent(evt) {
+          const rect = bar.getBoundingClientRect();
+          return Math.min(1, Math.max(0, (evt.clientX - rect.left) / rect.width));
+        }
+        function hitStop(pos) {
+          const stops = tf.getColorStops();
+          const widthPx = bar.getBoundingClientRect().width;
+          let best = -1, bestDist = Infinity;
+          stops.forEach((s, i) => {
+            const d = Math.abs(s.pos - pos) * widthPx;
+            if (d < bestDist) { bestDist = d; best = i; }
+          });
+          return bestDist <= 8 ? best : -1;
+        }
+        function removeStop(i) {
+          const stops = tf.getColorStops();
+          if (i <= 0 || i >= stops.length - 1) return;
+          stops.splice(i, 1);
+          selStop = Math.min(selStop, stops.length - 1);
+          commit(stops);
+        }
+        function moveStop(i, pos) {
+          const stops = tf.getColorStops();
+          if (i <= 0 || i >= stops.length - 1) return;
+          stops[i].pos = Math.min(stops[i + 1].pos - MIN_GAP, Math.max(stops[i - 1].pos + MIN_GAP, pos));
+          commit(stops);
+        }
+
+        function wire() {
+          bar.addEventListener("pointerdown", (evt) => {
+            if (evt.button !== 0) return;
+            evt.preventDefault();
+            bar.focus();
+            bar.setPointerCapture(evt.pointerId);
+            const pos = posFromEvent(evt);
+            let idx = hitStop(pos);
+            if (idx < 0) {
+              const stops = insertStop(tf.getColorStops(), pos);
+              idx = stops.reduce((best, s, i) => (Math.abs(s.pos - pos) < Math.abs(stops[best].pos - pos) ? i : best), 0);
+              selStop = idx;
+              commit(stops);
+            }
+            selStop = idx;
+            drag = { index: idx };
+            paint();
+          });
+          bar.addEventListener("pointermove", (evt) => {
+            if (drag) moveStop(drag.index, posFromEvent(evt));
+          });
+          const endDrag = () => { drag = null; };
+          bar.addEventListener("pointerup", endDrag);
+          bar.addEventListener("pointercancel", endDrag);
+          bar.addEventListener("lostpointercapture", endDrag);
+          bar.addEventListener("dblclick", (evt) => {
+            const idx = hitStop(posFromEvent(evt));
+            if (idx > 0) removeStop(idx);
+          });
+          bar.addEventListener("keydown", (evt) => {
+            if (evt.key === "Delete" || evt.key === "Backspace") {
+              evt.preventDefault();
+              removeStop(selStop);
+            } else if (evt.key === "ArrowLeft" || evt.key === "ArrowRight") {
+              evt.preventDefault();
+              const step = (evt.shiftKey ? 0.05 : 0.01) * (evt.key === "ArrowLeft" ? -1 : 1);
+              moveStop(selStop, tf.getColorStops()[selStop].pos + step);
+            }
+          });
+          host.querySelector('[data-role="cs-color"]').addEventListener("input", (evt) => {
+            const stops = tf.getColorStops();
+            stops[selStop].color = evt.target.value;
+            commit(stops);
+          });
+          host.querySelector('[data-role="cs-pos"]').addEventListener("change", (evt) => {
+            const v = Number(evt.target.value);
+            if (Number.isFinite(v)) moveStop(selStop, v);
+            paint();
+          });
+          host.querySelector('[data-role="cs-remove"]').addEventListener("click", () => removeStop(selStop));
+          host.querySelector('[data-role="cs-reverse"]').addEventListener("click", () => {
+            const stops = tf.getColorStops().map((s) => ({ ...s, pos: 1 - s.pos })).sort((a, b) => a.pos - b.pos);
+            selStop = stops.length - 1 - selStop;
+            commit(stops);
+          });
+        }
+
+        build();
+        return build;
+      }
+
+      // Switches the colour map: a built-in preset, or "custom" (the last custom stops, else the
+      // current colours as an editable starting point).
+      function selectPreset(value) {
+        if (value === "custom") {
+          const stops = tf.getColorStops() ?? lastCustomStops ?? currentColourStops();
+          selStop = 0;
+          tf.setColorStops(stops);
+        } else {
+          const keep = tf.getColorStops();
+          if (keep) lastCustomStops = keep;
+          tf.setPreset(value);
+        }
+        state.tfPreset = tf.preset;
+        dirty();
+        if (redrawTf) redrawTf();
+        if (rebuildColorEditor) rebuildColorEditor();
+      }
+      let rebuildColorEditor = null;
+
       // --- swap region: rebuilt whenever the mode changes, since which
       // controls are relevant differs by mode. ---
       let redrawTf = null;
@@ -1568,7 +2049,7 @@
           <label class="ctl-select-row">
             <span class="ctl-row-label ctl-select-label">Preset</span>
             <select class="ctl-select-input" data-role="tf-preset">
-              ${TF_PRESETS.map(([v, label]) => `<option value="${v}"${state.tfPreset === v ? " selected" : ""}>${label}</option>`).join("")}
+              ${tfPresetChoices.map(([v, label]) => `<option value="${v}"${state.tfPreset === v ? " selected" : ""}>${label}</option>`).join("")}
             </select>
           </label>
           <div class="ctl-tf-canvas-container">
@@ -1576,6 +2057,7 @@
               <canvas class="ctl-tf-canvas"></canvas>
               <canvas class="ctl-tf-overlay"></canvas>
             </div>
+            <div class="ctl-tf-colors" data-role="tf-colors"></div>
               <div class="ctl-tf-help">Drag point or line to move &#x00b7; double-click to add/remove</div>
           <div class="ctl-slider-row">
             <span class="ctl-row-label ctl-slider-label">Center</span>
@@ -1619,13 +2101,11 @@
         if (showIso) wireSlider(swap, "iso", (v) => { viewer.isoValue = v; }, (v) => v.toFixed(3));
 
         swap.querySelector('[data-role="tf-preset"]').addEventListener("change", (evt) => {
-          state.tfPreset = evt.target.value;
-          tf.setPreset(state.tfPreset);
-          dirty();
-          if (redrawTf) redrawTf();
+          selectPreset(evt.target.value);
         });
 
         redrawTf = wireTfCanvas(swap);
+        rebuildColorEditor = wireColorEditor(swap);
       }
       renderSwapRegion();
 

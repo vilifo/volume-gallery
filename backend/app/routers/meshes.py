@@ -6,17 +6,30 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, UploadFi
 from fastapi.responses import FileResponse
 from sqlmodel import Session, select
 
+import re
 from ..database import get_session, engine
 from ..models import User, Role, Mesh, MeshAccess, AssetStatus
-from ..schemas import MeshRead, AssetStatusRead, AccessGrant, GrantedUserRead, FileAccessUrl
+from ..schemas import MeshRead, AssetStatusRead, AssetUpdate, AccessGrant, GrantedUserRead, FileAccessUrl
 from ..deps import file_token_revoked, get_current_user, require_editor
 from ..security import create_file_token, decode_token
 from ..config import settings
 from .. import workdir
-from ..helpers import convert_mesh_to_nxz, read_thumbnail, write_thumbnail, store_thumbnail, remove_thumbnail, thumbnail_response, mesh_path
+from ..organize import apply_asset_update, split_tags
+from ..helpers import read_thumbnail, write_thumbnail, store_thumbnail, remove_thumbnail, thumbnail_response
 from ..utils import SLUG_RE, _now  # shared slug validation + timestamp helper
 
+import os
+import pymeshlab
+
 router = APIRouter(prefix="/api/meshes", tags=["meshes"])
+
+# Regex to strictly allow safe flat filenames for textures (prevents path traversal)
+TEXTURE_FILENAME_RE = re.compile(r"^[A-Za-z0-9._-]+\.(png|jpg|jpeg|webp)$", re.IGNORECASE)
+OUTPUT_FILE = "mesh.nxz"
+
+
+def mesh_path(mesh_dir: Path) -> Path:
+    return mesh_dir / OUTPUT_FILE
 
 
 def _mesh_dir(slug: str) -> Path:
@@ -64,6 +77,7 @@ def _mesh_read(m: Mesh, can_download: bool = False) -> MeshRead:
     return MeshRead(
         id=m.id, slug=m.slug, title=m.title, description=m.description, created_at=m.created_at.isoformat(),
         status=m.status, status_log=log_lines, can_download=can_download, has_thumbnail=bool(m.thumbnail_path),
+        folder_id=m.folder_id, tags=split_tags(m.tags),
     )
 
 
@@ -242,12 +256,34 @@ def _process_mesh_upload(mesh_id: int, mesh_dir_str: str, upload_fd: int) -> Non
 
         # The original upload (kept for downloads) already sits in mesh_dir and the
         # .nxz is compressed straight into it; only the intermediate .ply/.nxs
-        # files go to work_dir (the scratch folder, discarded afterwards).
+        # files go to work_dir (the scratch folder, discarded afterward).
         work_dir = _work_dir(mesh.slug)
         try:
             log("Saving upload")
-            workdir.save_detached(upload_fd, mesh_dir / f"_upload.{mesh.file_extension}")
-            convert_mesh_to_nxz(work_dir, mesh_dir, log)
+            input_file = mesh_dir / f"_upload.{mesh.file_extension}"
+            workdir.save_detached(upload_fd, input_file)
+            log("Converting to nxz file")
+            ms = pymeshlab.MeshSet()
+            ms.load_new_mesh(str(input_file))
+            log("Loaded mesh")
+            for i in range(ms.mesh_number()):
+                ms.set_current_mesh(i)
+                c_mesh = ms.current_mesh()
+                if c_mesh.has_vertex_tex_coord():
+                    ms.compute_texcoord_transfer_vertex_to_wedge()
+
+                if c_mesh.texture_number() > 0:
+                    tex_filename = f"texture_{i}.png"
+                    tex_path = os.path.join(work_dir, tex_filename)
+                    c_mesh.texture(0).save(tex_path)
+                    ms.set_texture_per_mesh(textname=tex_path)
+                    log(f"Saved texture {i}")
+
+            if ms.mesh_number() > 1:
+                ms.generate_by_merging_visible_meshes(mergevisible=True, deletelayer=True)
+            log("Before saving")
+            ms.save_current_mesh(str(mesh_path(mesh_dir)), save_textures=True, pow_2_textures=True, save_vertex_normal=True)
+            log("Saved that mesh")
             mesh.status = AssetStatus.ready
             log("Ready")
         except Exception as exc:  # noqa: BLE001 - the failure message IS the point, shown to the user
@@ -257,6 +293,22 @@ def _process_mesh_upload(mesh_id: int, mesh_dir_str: str, upload_fd: int) -> Non
             workdir.discard_job("meshes", mesh.slug)  # success or failure: scratch is never kept
         session.add(mesh)
         session.commit()
+
+
+@router.patch("/{mesh_id}", response_model=MeshRead)
+def update_mesh(
+    mesh_id: int, payload: AssetUpdate,
+    session: Session = Depends(get_session), _editor: User = Depends(require_editor),
+):
+    """Edit the mesh's title, description, tags and folder. (The slug names its folder on disk and stays.)"""
+    mesh = session.get(Mesh, mesh_id)
+    if not mesh:
+        raise HTTPException(status_code=404, detail="Mesh not found")
+    _require_standalone(mesh, "Edit the volume instead")
+    apply_asset_update(session, mesh, payload)
+    session.commit()
+    session.refresh(mesh)
+    return _mesh_read(mesh, can_download=True)
 
 
 @router.get("/{mesh_id}/thumbnail")
@@ -425,17 +477,76 @@ def _check_mesh_token(token: str, mesh_id: int) -> str:
     return payload["kind"]
 
 
+def _resolve_safe_mesh_asset(mesh_dir: Path, filename: str) -> Path:
+    """Validates and resolves a texture or mesh file inside mesh_dir, blocking
+    path traversal and internal files (like _upload.* or thumbnail.*)."""
+    if (
+        not TEXTURE_FILENAME_RE.fullmatch(filename)
+        or filename.startswith("_upload.")
+        or filename.startswith("thumbnail.")
+    ):
+        raise HTTPException(status_code=404, detail="Asset not found")
+
+    target = (mesh_dir / filename).resolve()
+    if target.parent != mesh_dir.resolve() or not target.is_file():
+        raise HTTPException(status_code=404, detail="Asset not found")
+    return target
+
+
 @router.get("/{mesh_id}/mesh-access-file/{token}")
-def serve_mesh_file(mesh_id: int, token: str, session: Session = Depends(get_session)):
+def serve_mesh_file(
+    mesh_id: int,
+    token: str,
+    texture: Optional[str] = None,
+    session: Session = Depends(get_session),
+):
     kind = _check_mesh_token(token, mesh_id)
     mesh = session.get(Mesh, mesh_id)
     if not mesh or mesh.volume_id is not None:
         raise HTTPException(status_code=404, detail=f"Mesh with id {mesh_id} not found or not ready")
-    nxz_path = mesh_path(_mesh_dir(mesh.slug))
+
+    m_dir = _mesh_dir(mesh.slug)
+    cache_headers = {"Cache-Control": f"public, max-age={settings.FILE_TOKEN_EXPIRE_MINUTES * 60}, immutable"}
+
+    if kind == "mesh-download":
+        upload_path = m_dir / f"_upload.{mesh.file_extension}"
+        if not upload_path.exists():
+            raise HTTPException(status_code=404, detail="Original upload file not found")
+        return FileResponse(upload_path, filename=f"{mesh.slug}.{mesh.file_extension}", headers=cache_headers)
+
+    # Optional support for ?texture=foo.png on the base URL
+    if texture:
+        tex_path = _resolve_safe_mesh_asset(m_dir, texture)
+        return FileResponse(tex_path, headers=cache_headers)
+
+    nxz_path = mesh_path(m_dir)
     if not nxz_path.exists():
         raise HTTPException(status_code=404, detail=f"Mesh not ready: {nxz_path} does not exist")
+    return FileResponse(nxz_path, media_type="application/octet-stream", headers=cache_headers)
+
+
+@router.get("/{mesh_id}/mesh-access-file/{token}/{filename}")
+def serve_mesh_subfile(
+    mesh_id: int,
+    token: str,
+    filename: str,
+    session: Session = Depends(get_session),
+):
+    """Serves sibling files (such as .png textures or mesh.nxz) under the same
+    token URL so 3DHOP can resolve relative texture paths or named files."""
+    _check_mesh_token(token, mesh_id)
+    mesh = session.get(Mesh, mesh_id)
+    if not mesh or mesh.volume_id is not None:
+        raise HTTPException(status_code=404, detail=f"Mesh with id {mesh_id} not found or not ready")
+
+    m_dir = _mesh_dir(mesh.slug)
     cache_headers = {"Cache-Control": f"public, max-age={settings.FILE_TOKEN_EXPIRE_MINUTES * 60}, immutable"}
-    if kind == "mesh-download":
-        upload_path = _mesh_dir(mesh.slug) / f"_upload.{mesh.file_extension}"
-        return FileResponse(upload_path, filename=f"{mesh.slug}.{mesh.file_extension}", headers=cache_headers)
-    return FileResponse(nxz_path, headers=cache_headers)
+
+    if filename == "mesh.nxz":
+        nxz_path = mesh_path(m_dir)
+        if not nxz_path.exists():
+            raise HTTPException(status_code=404, detail="Mesh not ready")
+        return FileResponse(nxz_path, media_type="application/octet-stream", headers=cache_headers)
+
+    tex_path = _resolve_safe_mesh_asset(m_dir, filename)
+    return FileResponse(tex_path, headers=cache_headers)

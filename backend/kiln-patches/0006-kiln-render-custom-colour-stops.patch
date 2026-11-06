@@ -1,0 +1,110 @@
+diff --git a/lib/kiln-render.js b/lib/kiln-render.js
+index ff1793e..217648f 100644
+--- a/lib/kiln-render.js
++++ b/lib/kiln-render.js
+@@ -7513,6 +7513,8 @@ class TransferFunction {
+   // RGB only, no alpha
+   opacityPoints;
+   preset = "grayscale";
++  /** Local patch: user-defined colour stops ([{ pos: 0..1, color: "#rrggbb" }]) while preset is "custom". */
++  colorStops = null;
+   histogram = null;
+   constructor(device) {
+     this.device = device;
+@@ -7535,6 +7537,15 @@ class TransferFunction {
+     this.texture.destroy();
+   }
+   setPreset(preset) {
++    if (preset === "custom") {
++      if (this.colorStops) {
++        this.setColorStops(this.colorStops);
++        return;
++      }
++      preset = "grayscale";
++    } else {
++      this.colorStops = null;
++    }
+     this.preset = preset;
+     for (let i = 0; i < this.size; i++) {
+       const t = i / (this.size - 1);
+@@ -7675,6 +7686,61 @@ class TransferFunction {
+     return [...this.opacityPoints];
+   }
+   /** RGB (0–255) of the colour map at t in [0, 1]. */
++  /**
++   * Local patch: defines the colour map from colour stops (linear interpolation between them),
++   * so the preset becomes "custom". The opacity curve is left alone. Stops are { pos, color } with
++   * color "#rrggbb" or [r, g, b] (0-255); invalid entries are dropped, positions are clamped and
++   * sorted, and missing end points at 0 and 1 are added with the nearest colour. Returns the
++   * normalised stops (hex colours), or null (nothing changed) if no valid stop was given.
++   */
++  setColorStops(stops) {
++    const hex = /^#[0-9a-f]{6}$/i;
++    const toRgb = (c) => {
++      if (typeof c === "string" && hex.test(c)) {
++        const n = parseInt(c.slice(1), 16);
++        return [n >> 16 & 255, n >> 8 & 255, n & 255];
++      }
++      if (Array.isArray(c) && c.length >= 3 && c.slice(0, 3).every(Number.isFinite)) {
++        return c.slice(0, 3).map((v) => Math.round(Math.min(255, Math.max(0, v))));
++      }
++      return null;
++    };
++    const ok = [];
++    for (const s of stops ?? []) {
++      const rgb = s && Number.isFinite(s.pos) ? toRgb(s.color) : null;
++      if (rgb) ok.push({ pos: Math.min(1, Math.max(0, s.pos)), rgb });
++    }
++    if (!ok.length) return null;
++    ok.sort((a, b) => a.pos - b.pos);
++    const pts = [];
++    for (const s of ok) {
++      if (pts.length && s.pos - pts[pts.length - 1].pos < 1e-6) pts[pts.length - 1] = s;
++      else pts.push(s);
++    }
++    if (pts[0].pos > 0) pts.unshift({ pos: 0, rgb: pts[0].rgb });
++    if (pts[pts.length - 1].pos < 1) pts.push({ pos: 1, rgb: pts[pts.length - 1].rgb });
++    if (pts.length < 2) pts.push({ pos: 1, rgb: pts[0].rgb });
++    let k = 1;
++    for (let i = 0; i < this.size; i++) {
++      const t = i / (this.size - 1);
++      while (k < pts.length - 1 && pts[k].pos < t) k++;
++      const a = pts[k - 1], b = pts[k];
++      const span = b.pos - a.pos;
++      const f = span > 0 ? Math.min(1, Math.max(0, (t - a.pos) / span)) : 0;
++      for (let c = 0; c < 3; c++) {
++        this.colorData[i * 3 + c] = Math.round(a.rgb[c] + (b.rgb[c] - a.rgb[c]) * f);
++      }
++    }
++    const toHex = (rgb) => "#" + rgb.map((v) => v.toString(16).padStart(2, "0")).join("");
++    this.colorStops = pts.map((p) => ({ pos: p.pos, color: toHex(p.rgb) }));
++    this.preset = "custom";
++    this.updateTexture();
++    return this.getColorStops();
++  }
++  /** Local patch: the colour stops of the "custom" preset (a copy), or null for a built-in preset. */
++  getColorStops() {
++    return this.colorStops ? this.colorStops.map((s) => ({ ...s })) : null;
++  }
+   getColor(t) {
+     const i = Math.round(Math.max(0, Math.min(1, t)) * (this.size - 1)) * 3;
+     return [this.colorData[i], this.colorData[i + 1], this.colorData[i + 2]];
+@@ -12813,6 +12879,10 @@ class KilnEngine {
+       transferFunction.setPreset(options.tfPreset);
+       renderer.resetAccumulation();
+     }
++    if (options.tfColorStops !== void 0 && options.tfColorStops !== null) {
++      transferFunction.setColorStops(options.tfColorStops);
++      renderer.resetAccumulation();
++    }
+     if (options.tfPoints !== void 0) {
+       transferFunction.setOpacityPoints(options.tfPoints);
+       renderer.resetAccumulation();
+@@ -13082,6 +13152,7 @@ class KilnViewer {
+       isoValue: this.renderer.isoValue,
+       renderScale: this.engine.renderScale,
+       tfPreset: this.transferFunction.preset,
++      tfColorStops: this.transferFunction.getColorStops(),
+       tfPoints: this.transferFunction.getOpacityPoints(),
+       upAxis: this.camera.getUpAxis(),
+       cam,

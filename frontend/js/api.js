@@ -444,6 +444,89 @@ export const api = {
         }
     },
 
+    // item details (title, description, tags, folder) — editor / admin. `payload` holds only the
+    // fields to change; folder_id: null moves the item to the top level.
+    updateAsset(kind, id, payload) {
+        return request(`/api/${ASSET_API[kind]}/${id}`, {
+            method: "PATCH",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify(payload),
+        });
+    },
+
+    // saved ways of showing a volume (camera paths etc.); reading: anybody who can see the volume,
+    // writing: editor / admin
+    listVolumePaths(volumeId) {
+        return request(`/api/volumes/${volumeId}/paths`);
+    },
+    getVolumePath(volumeId, pathId) {
+        return request(`/api/volumes/${volumeId}/paths/${pathId}`);
+    },
+    createVolumePath(volumeId, {name, spec}) {
+        return request(`/api/volumes/${volumeId}/paths`, {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({name, spec}),
+        });
+    },
+    updateVolumePath(volumeId, pathId, {name, spec}) {
+        return request(`/api/volumes/${volumeId}/paths/${pathId}`, {
+            method: "PUT",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({name, spec}),
+        });
+    },
+    deleteVolumePath(volumeId, pathId) {
+        return request(`/api/volumes/${volumeId}/paths/${pathId}`, {method: "DELETE"});
+    },
+
+    // bookmarks: saved views of a volume (same rules as the saved paths above)
+    listVolumeBookmarks(volumeId) {
+        return request(`/api/volumes/${volumeId}/bookmarks`);
+    },
+    getVolumeBookmark(volumeId, id) {
+        return request(`/api/volumes/${volumeId}/bookmarks/${id}`);
+    },
+    createVolumeBookmark(volumeId, {name, spec}) {
+        return request(`/api/volumes/${volumeId}/bookmarks`, {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({name, spec}),
+        });
+    },
+    updateVolumeBookmark(volumeId, id, {name, spec}) {
+        return request(`/api/volumes/${volumeId}/bookmarks/${id}`, {
+            method: "PUT",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({name, spec}),
+        });
+    },
+    deleteVolumeBookmark(volumeId, id) {
+        return request(`/api/volumes/${volumeId}/bookmarks/${id}`, {method: "DELETE"});
+    },
+
+    // gallery folders
+    listFolders() {
+        return request("/api/folders");
+    },
+    createFolder(name, parentId = null) {
+        return request("/api/folders", {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({name, parent_id: parentId}),
+        });
+    },
+    updateFolder(id, payload) { // {name?, parent_id?}; parent_id: null = top level
+        return request(`/api/folders/${id}`, {
+            method: "PATCH",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify(payload),
+        });
+    },
+    deleteFolder(id) {
+        return request(`/api/folders/${id}`, {method: "DELETE"});
+    },
+
     // share links (editor / admin)
     suggestShareCode() {
         return request("/api/shares/suggest");

@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Manage — Volume Gallery</title>
 <script src="/js/theme-init.js?v=hist1"></script>
-<link rel="stylesheet" href="/css/style.css?v=help2" />
+<link rel="stylesheet" href="/css/style.css?v=org2" />
 <style>
   .cd-toggle { display: inline-flex; align-items: center; gap: 0.4em; font-size: 0.85em; color: var(--text-dim); }
 </style>
@@ -14,8 +14,9 @@
   <div class="app-shell" id="shell"></div>
 
   <script type="module">
-    import { api, requireLogin, getRole, getUsername, renderShell, wireLogout } from "/js/api.js?v=sw1";
-    import { pageHint } from "/js/help.js?v=help2";
+    import { api, requireLogin, getRole, getUsername, renderShell, wireLogout } from "/js/api.js?v=org1";
+    import { pageHint } from "/js/help.js?v=help6";
+    import { folderIndex, detailsFormHtml, saveDetailsForm } from "/js/organize.js?v=org1";
 
     requireLogin();
     const role = getRole();
@@ -62,12 +63,13 @@
     const content = document.getElementById("content");
 
     async function load() {
-      const [item, granted, allUsers, shares, shareCfg] = await Promise.all([
+      const [item, granted, allUsers, shares, shareCfg, folders] = await Promise.all([
         KIND.get(itemId),
         KIND.listAccess(itemId),
         api.listUsers().catch(() => []), // editors may not have list-users; fall back gracefully
         api.listShares(kind, itemId).catch(() => []),
         api.suggestShareCode().catch(() => ({ min_length: 8, max_length: 24, suggested_code: "" })),
+        api.listFolders().catch(() => []),
       ]);
 
       const grantedIds = new Set(granted.map((u) => u.id));
@@ -77,6 +79,12 @@
         <h1>${escapeHtml(item.title)}</h1>
         <p class="subtitle mono">${KIND.label} \u00b7 ${escapeHtml(item.slug)}</p>
         ${pageHint("manage", role)}
+        <h2>Details</h2>
+        <div class="details-form">
+          ${detailsFormHtml(item, folderIndex(folders), "details")}
+          <p class="dim" style="font-size:0.85em;margin-top:-0.4em">The slug (<code>${escapeHtml(item.slug)}</code>) names the item\u2019s folder on the server and cannot be changed.</p>
+          <button type="button" id="details-save" class="primary">Save details</button>
+        </div>
         ${
           item.status !== "ready"
             ? `<div class="${item.status === "failed" ? "error-box" : "dim"}" style="margin-bottom:1.2em">
@@ -148,6 +156,9 @@
               <option value="1440" selected>24 hours</option>
               <option value="10080">7 days</option>
               <option value="43200">30 days</option>
+              <option value="262800">6 months</option>
+              <option value="525600">1 year</option>
+              <option value="0">Never</option>
             </select>
           </div>
           ${kind === "mesh" ? `<label class="cd-toggle" style="margin-bottom:0.6em"><input type="checkbox" id="share-cd"> allow download</label>` : ""}
@@ -172,7 +183,9 @@
                   : null;
                 const expValid = expDate && !Number.isNaN(expDate.getTime());
                 const isExpired = s.expired ?? (expValid && expDate.getTime() <= Date.now());
-                const expLabel = isExpired
+                const expLabel = s.never_expires
+                  ? "Never"
+                  : isExpired
                   ? '<span class="dim">expired</span>'
                   : expValid
                     ? escapeHtml(expDate.toLocaleString())
@@ -197,6 +210,19 @@
         <h2 style="margin-top:2em" id="danger-heading">Danger zone</h2>
         <button class="danger" id="delete-btn">Delete this ${KIND.label.toLowerCase()}</button>
       `;
+
+      document.getElementById("details-save").addEventListener("click", async (e) => {
+        e.target.disabled = true;
+        try {
+          await saveDetailsForm(api, kind, item, "details");
+          load();
+        } catch (err) {
+          const box = document.getElementById("details-error");
+          box.textContent = err.message;
+          box.style.display = "block";
+          e.target.disabled = false;
+        }
+      });
 
       document.getElementById("share-regen-btn").addEventListener("click", async () => {
         const next = await api.suggestShareCode();

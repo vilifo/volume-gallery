@@ -9,11 +9,12 @@ from sqlmodel import Session, select
 
 from ..database import get_session, engine
 from ..models import User, Role, PointCloud, PointCloudAccess, AssetStatus
-from ..schemas import PointCloudRead, AssetStatusRead, AccessGrant, GrantedUserRead, FileAccessUrl
+from ..schemas import PointCloudRead, AssetStatusRead, AssetUpdate, AccessGrant, GrantedUserRead, FileAccessUrl
 from ..deps import file_token_revoked, get_current_user, require_editor
 from ..security import create_file_token, decode_token
 from ..config import settings
 from .. import workdir
+from ..organize import apply_asset_update, split_tags
 from ..helpers import convert_pointcloud, read_thumbnail, write_thumbnail, store_thumbnail, remove_thumbnail, thumbnail_response
 from .volumes import SLUG_RE, _now
 
@@ -49,6 +50,7 @@ def _pointcloud_read(pc: PointCloud) -> PointCloudRead:
     return PointCloudRead(
         id=pc.id, slug=pc.slug, title=pc.title, description=pc.description, created_at=pc.created_at.isoformat(),
         status=pc.status, status_log=log_lines, has_thumbnail=bool(pc.thumbnail_path),
+        folder_id=pc.folder_id, tags=split_tags(pc.tags),
     )
 
 
@@ -172,6 +174,21 @@ def _process_pointcloud_upload(pc_id: int, pc_dir_str: str, upload_path_str: str
             workdir.discard_job("pointclouds", pc.slug)  # scratch is never kept
         session.add(pc)
         session.commit()
+
+
+@router.patch("/{pc_id}", response_model=PointCloudRead)
+def update_pointcloud(
+    pc_id: int, payload: AssetUpdate,
+    session: Session = Depends(get_session), _editor: User = Depends(require_editor),
+):
+    """Edit the point cloud's title, description, tags and folder. (The slug names its folder on disk and stays.)"""
+    pc = session.get(PointCloud, pc_id)
+    if not pc:
+        raise HTTPException(status_code=404, detail="Point cloud not found")
+    apply_asset_update(session, pc, payload)
+    session.commit()
+    session.refresh(pc)
+    return _pointcloud_read(pc)
 
 
 @router.get("/{pc_id}/thumbnail")
