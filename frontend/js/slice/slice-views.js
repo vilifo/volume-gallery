@@ -231,6 +231,7 @@ export class Pane {
   }
 
   prefetch(plane) {
+    if (!this.views.prefetchEnabled) return; // switched off while a slice sweep plays: only the plane on screen is fetched
     const st = this.state;
     const n = AXIS_INFO[this.axis].normal;
     const list = prefetchIndices(plane.index, this.lastDir, st.dims[n], this.views.info.chunk[n]);
@@ -645,6 +646,12 @@ export class SliceViews {
   }
 
   // ------------------------------------------------------------ saving a slice as an image
+
+  /** Whether planes next to the one shown are fetched ahead (on by default; a playing sweep turns it off). */
+  prefetchEnabled = true;
+  setPrefetch(on) {
+    this.prefetchEnabled = !!on;
+  }
 
   /** The slice panes on screen now: [{ axis, label, index }]. */
   visibleSlices() {

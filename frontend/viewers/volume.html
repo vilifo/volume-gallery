@@ -459,7 +459,7 @@
   <div class="app-shell" id="shell"></div>
 
   <script type="module">
-    import { api, requireLogin, getRole, getUsername, renderShell, wireLogout } from "/js/api.js?v=share1";
+    import { api, requireLogin, getRole, getUsername, renderShell, wireLogout } from "/js/api.js?v=org5";
     import { syncHistogram } from "/js/histogram.js?v=hist1";
 import { insertStop, sampleStops, rgbToHex, decodeTf, encodeTf } from "/js/slice/transfer-function.js";
     import { KilnViewer } from "/vendor/kiln-render/lib/kiln-render.js?v=atlas3";
@@ -470,16 +470,17 @@ import { insertStop, sampleStops, rgbToHex, decodeTf, encodeTf } from "/js/slice
       planAtlas,
       saveAtlasMB,
     } from "/js/atlas-budget.js?v=atlas3";
-    import { setupSliceIntegration } from "/js/slice/slice-integration.js?v=slice6";
+    import { setupSliceIntegration } from "/js/slice/slice-integration.js?v=slice7";
     import { niceScaleLength } from "/js/scalebar.js?v=sb1";
-    import { toggleHelpPanel } from "/js/help.js?v=help6";
+    import { toggleHelpPanel } from "/js/help.js?v=help7";
     import { makeDescriptionExpandable } from "/js/description.js?v=org2";
     import { openExportPanel } from "/js/export-image.js?v=org2";
-    import { openAnimatePanel } from "/js/animate.js?v=org5";
-    import { createPlayer } from "/js/playback.js?v=org5";
+    import { createTimeline } from "/js/timeline.js?v=tl1";
+    import { decodeSpec, ANIM_PARAM } from "/js/anim-url.js?v=tl1";
+    import { createPlayer } from "/js/playback.js?v=tl1";
     import { createPathStore, createBookmarkStore } from "/js/saved-paths.js?v=org5";
     import { openBookmarksPanel } from "/js/bookmarks.js?v=org5";
-    import { interpolatePose, readPose, writePose } from "/js/animate.js?v=org5";
+    import { interpolatePose, readPose, writePose } from "/js/animate.js?v=tl1";
     import { captureStill } from "/js/render-capture.js?v=org4";
     import { startBrickCache, watchDataAccess, resetDataAccessWatch, onDataAccessExpired, setDataAccess, dataAccessExpiresAt, dataAccessTtlMs } from "/js/data-access.js?v=org4";
 
@@ -725,7 +726,7 @@ import { insertStop, sampleStops, rgbToHex, decodeTf, encodeTf } from "/js/slice
             </div>
             <button id="help-btn" class="icon-btn" aria-pressed="false" title="Show help for this viewer next to the view">${HELP_ICON}<span class="icon-btn-label">Help</span></button>
             <button id="bookmarks-btn" class="icon-btn" title="Save this view and come back to it later">${BOOKMARK_ICON}<span class="icon-btn-label">Bookmarks</span></button>
-            <button id="animate-btn" class="icon-btn" title="Render an animation: a sweep through the slices, a 3D turntable or a camera path">${ANIMATE_ICON}<span class="icon-btn-label">Animate</span></button>
+            <button id="animate-btn" class="icon-btn" title="Animation timeline: a camera path with clipping and transfer function changes, a 3D turntable or a slice sweep; play it or render a video">${ANIMATE_ICON}<span class="icon-btn-label">Animate</span></button>
             <button id="export-btn" class="icon-btn" title="Save the view or a slice as an image file at full resolution">${DOWNLOAD_ICON}<span class="icon-btn-label">Export</span></button>
             <button id="share-btn" class="icon-btn" title="Copy a link to this exact view">${LINK_ICON}<span class="icon-btn-label">Share</span></button>
             ${
@@ -748,6 +749,7 @@ import { insertStop, sampleStops, rgbToHex, decodeTf, encodeTf } from "/js/slice
             <button type="button" class="ctl-chip" id="panel-open" style="right:12px; top:12px" hidden>Controls</button>
           </div>
         </div>
+        <div id="anim-dock"></div>
       `;
 
       const descEl = content.querySelector(".viewer-desc");
@@ -1026,8 +1028,9 @@ import { insertStop, sampleStops, rgbToHex, decodeTf, encodeTf } from "/js/slice
         onChange: (state) => {
           if (state !== "idle") return;
           const url = new URL(window.location.href); // stopped: the link no longer starts it again
-          if (url.searchParams.has("play")) {
+          if (url.searchParams.has("play") || url.searchParams.has(ANIM_PARAM)) {
             url.searchParams.delete("play");
+            url.searchParams.delete(ANIM_PARAM);
             history.replaceState(history.state, "", url.pathname + url.search + url.hash);
           }
         },
@@ -1048,12 +1051,19 @@ import { insertStop, sampleStops, rgbToHex, decodeTf, encodeTf } from "/js/slice
       }
       async function startAutoplay() {
         const id = params.get("play");
-        if (!id || autoplayStarted) return;
+        const animText = params.get(ANIM_PARAM); // a link to an animation that was never saved: the animation is in the link
+        if ((!id && !animText) || autoplayStarted) return;
         autoplayStarted = true;
         try {
-          const entry = await pathStore.getShared(id);
-          if (entry.spec.kind === "slices") await slices.requestLayout(entry.spec.axis);
-          await player.play(entry.spec);
+          let spec;
+          if (id) spec = (await pathStore.getShared(id)).spec;
+          else {
+            spec = await decodeSpec(animText);
+            if (!spec) throw new Error("The animation in this link is damaged, too long or from a newer version");
+          }
+          if (spec.kind === "slices") await slices.requestLayout(spec.axis);
+          getTimeline().load(spec); // the timeline shows what plays (it stays hidden until Animate is pressed)
+          await player.play(spec);
         } catch (err) {
           console.error("[autoplay]", err);
           showStatus(`Could not start the saved path: ${err.message}`, { busy: false });
@@ -1143,29 +1153,38 @@ import { insertStop, sampleStops, rgbToHex, decodeTf, encodeTf } from "/js/slice
         bookmarksBtn.setAttribute("aria-pressed", String(!!open));
       });
 
+      // The animation timeline docks below the panes. It is made when first needed (a link can play an animation
+      // before Animate is pressed) and keeps its settings and views while it is hidden.
       const animateBtn = document.getElementById("animate-btn");
-      animateBtn.addEventListener("click", () => {
-        const open = openAnimatePanel({
-          anchor: animateBtn,
-          baseName: volume.slug,
-          description: volume.title,
-          getViewer: () => currentViewer,
-          getSlices: () => slices.views,
-          getCanvas: () => $("canvas"),
-          pane: $("pane-3d"),
-          player,
-          store: pathStore,
-          bookmarks: bookmarkStore,
-          access: {
-            expiresAt: dataAccessExpiresAt,
-            ttlMs: dataAccessTtlMs,
-            renew: refreshDataAccess,
-            onExpired: onDataAccessExpired,
-          },
-          onClose: () => animateBtn.setAttribute("aria-pressed", "false"),
-        });
-        animateBtn.setAttribute("aria-pressed", String(!!open));
-      });
+      let timeline = null;
+      function getTimeline() {
+        if (!timeline) {
+          timeline = createTimeline({
+            dock: $("anim-dock"),
+            baseName: volume.slug,
+            description: volume.title,
+            getViewer: () => currentViewer,
+            getSlices: () => slices.views,
+            getCanvas: () => $("canvas"),
+            pane: $("pane-3d"),
+            player,
+            store: pathStore,
+            bookmarks: bookmarkStore,
+            access: {
+              expiresAt: dataAccessExpiresAt,
+              ttlMs: dataAccessTtlMs,
+              renew: refreshDataAccess,
+              onExpired: onDataAccessExpired,
+            },
+            onToggle: (open) => {
+              animateBtn.setAttribute("aria-pressed", String(open));
+              window.dispatchEvent(new Event("resize")); // the panes gained or lost height
+            },
+          });
+        }
+        return timeline;
+      }
+      animateBtn.addEventListener("click", () => getTimeline().toggle());
 
       document.getElementById("share-btn").addEventListener("click", async () => {
         const currentViewQuery =
@@ -1369,8 +1388,11 @@ import { insertStop, sampleStops, rgbToHex, decodeTf, encodeTf } from "/js/slice
         try {
           const p = stateToParams(viewer.getState(), getMinLevel());
           for (const [k, v] of Object.entries(sliceUrlParams())) p.set(k, v);
-          const play = new URLSearchParams(window.location.search).get("play"); // a link that plays a saved path
+          const now = new URLSearchParams(window.location.search);
+          const play = now.get("play"); // a link that plays a saved path
           if (play) p.set("play", play);
+          const anim = now.get(ANIM_PARAM); // a link that carries an animation that was not saved
+          if (anim) p.set(ANIM_PARAM, anim);
           const qs = "?" + p.toString();
           if (qs !== last) {
             history.replaceState(history.state, "", window.location.pathname + qs + window.location.hash);
@@ -2149,6 +2171,29 @@ import { insertStop, sampleStops, rgbToHex, decodeTf, encodeTf } from "/js/slice
       wireClipAxis("X", dimX, (lo, hi) => { renderer.clipMin[0] = lo; renderer.clipMax[0] = hi; dirty(); });
       wireClipAxis("Y", dimY, (lo, hi) => { renderer.clipMin[1] = lo; renderer.clipMax[1] = hi; dirty(); });
       wireClipAxis("Z", dimZ, (lo, hi) => { renderer.clipMin[2] = lo; renderer.clipMax[2] = hi; dirty(); });
+
+      // An animation changes the transfer function (colours, opacity curve, window, density): the panel follows.
+      let tfFrame = 0;
+      const onTfChanged = (evt) => {
+        if (!panel.isConnected) { window.removeEventListener("vg-tf-changed", onTfChanged); return; } // the panel was rebuilt
+        cancelAnimationFrame(tfFrame);
+        tfFrame = requestAnimationFrame(() => {
+          state.tfPreset = tf.preset;
+          const presetSelect = panel.querySelector('[data-role="tf-preset"]');
+          if (presetSelect && [...presetSelect.options].some((o) => o.value === tf.preset)) presetSelect.value = tf.preset;
+          const show = (role, value) => {
+            const input = panel.querySelector(`[data-role="slider-${role}"]`);
+            const label = panel.querySelector(`[data-role="value-${role}"]`);
+            if (input && Number.isFinite(value)) { input.value = value; if (label) label.textContent = value.toFixed(2); }
+          };
+          show("center", viewer.windowCenter);
+          show("width", viewer.windowWidth);
+          show("density", renderer.densityScale);
+          if (redrawTf) redrawTf();
+          if (evt.detail?.settled && rebuildColorEditor) rebuildColorEditor(); // the colour editor follows once the animation is over
+        });
+      };
+      window.addEventListener("vg-tf-changed", onTfChanged);
 
       // --- Advanced section ---
       wireSlider(panel, "renderScale", (v) => { viewer.renderScale = v; }, (v) => v.toFixed(2));

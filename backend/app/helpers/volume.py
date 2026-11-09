@@ -176,22 +176,6 @@ def process_zip(zip_path: Path, work_dir: Path, vol_dir: Path, spacing, log) -> 
     return max_lod
 
 
-def find_tiff_dir(scratch_dir: Path) -> Optional[Path]:
-    """Breadth-first search for the shallowest directory containing at least
-    one .tif/.tiff file."""
-    queue = deque([scratch_dir])
-    while queue:
-        current = queue.popleft()
-        try:
-            entries = list(current.iterdir())
-        except OSError:
-            continue
-        if any(p.is_file() and p.suffix.lower() in (".tif", ".tiff") for p in entries):
-            return current
-        queue.extend(sorted(p for p in entries if p.is_dir()))
-    return None
-
-
 def natural_sort_key(s: str) -> List:
     """Sort strings containing numbers naturally (e.g., slice_2.tif before slice_10.tif)."""
     return [int(text) if text.isdigit() else text.lower() for text in re.split(r'(\d+)', s)]
