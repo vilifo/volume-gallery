@@ -310,7 +310,7 @@ class BookmarkSpec(BaseModel):
     @field_validator("slices")
     @classmethod
     def _slices_small(cls, v):
-        if v is not None and (len(v) > 12 or any(len(k) > 20 or len(x) > 4000 for k, x in v.items())):
+        if v is not None and (len(v) > 20 or any(len(k) > 20 or len(x) > 4000 for k, x in v.items())):
             raise ValueError("slice parameters too large")
         return v
 

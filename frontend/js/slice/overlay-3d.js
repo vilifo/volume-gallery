@@ -8,6 +8,7 @@
 // not occluded by the volume; that is intended for position indicators.
 
 import { AXIS_COLORS, voxelToNormal } from "./geometry.js";
+import { distance, formatLength, measureLabel, voxelToWorld } from "./measure.js?v=meas1";
 
 /** Multiplies a column-major 4x4 matrix with a vec4. */
 export function mulMat4Vec4(m, v) {
@@ -95,13 +96,22 @@ export class Overlay3D {
     this.svg.style.cssText = "position:absolute;inset:0;width:100%;height:100%;pointer-events:none;overflow:hidden";
     host.appendChild(this.svg);
     this._lastKey = "";
+    this.handles = []; // the measurement points as drawn, in pixels of the host: [{ id, end, x, y }] (id null: the pending point)
+    this.rubber = null; // the live end of the measurement being made, a point in voxel coordinates
     this._off = state.on("change", () => { this._lastKey = ""; });
+  }
+
+  /** The live end of a measurement in the making (null removes it). */
+  setRubber(p) {
+    this.rubber = p;
+    this._lastKey = "";
   }
 
   /** Call every frame (cheap): redraws only when the camera, cursor or size changed. */
   update(viewer) {
     const st = this.state;
-    const visible = (st.show3dPlanes || st.show3dCursor) && (st.layout === "3d" || st.layout === "quad");
+    const measuring = st.measures.length > 0 || !!st.pending;
+    const visible = (st.show3dPlanes || st.show3dCursor || measuring) && (st.layout === "3d" || st.layout === "quad");
     this.svg.style.display = visible ? "" : "none";
     if (!visible || !viewer?.camera) return;
     const w = this.host.clientWidth;
@@ -131,7 +141,47 @@ export class Overlay3D {
       const dot = projectPoint(vp, [geo.pos.x, geo.pos.y, geo.pos.z], w, h);
       if (dot) parts.push(`<circle cx="${dot[0].toFixed(1)}" cy="${dot[1].toFixed(1)}" r="4" fill="#fff" fill-opacity="0.9" stroke="#000" stroke-opacity="0.6"/>`);
     }
+    this.handles = [];
+    if (measuring) this._drawMeasures(parts, vp, w, h, viewer.engine.config.normalizedSize);
     this.svg.innerHTML = parts.join("");
+  }
+
+  /** The measurements: a line per measurement with its length, a ring on each end (the rings are what can be dragged). */
+  _drawMeasures(parts, vp, w, h, size) {
+    const st = this.state;
+    const unit = st.unit ?? "micrometer";
+    const world = (p) => voxelToWorld(p, st.dims, size);
+    const text = (x, y, s, color) => parts.push(`<text x="${x.toFixed(1)}" y="${y.toFixed(1)}" font-family="ui-monospace,Menlo,monospace" font-size="12" fill="${color}" stroke="#000" stroke-opacity="0.8" stroke-width="3.5" paint-order="stroke" text-anchor="middle">${s.replace(/&/g, "&amp;").replace(/</g, "&lt;")}</text>`);
+    const seg = (a, b, color, dashed, width) => {
+      const s = projectSegment(vp, a, b, w, h);
+      if (!s) return null;
+      const c = `x1="${s[0].toFixed(1)}" y1="${s[1].toFixed(1)}" x2="${s[2].toFixed(1)}" y2="${s[3].toFixed(1)}"`;
+      const dash = dashed ? ` stroke-dasharray="6 5"` : "";
+      parts.push(`<line ${c} stroke="#000" stroke-opacity="0.7" stroke-width="${width + 2}"${dash}/>`, `<line ${c} stroke="${color}" stroke-width="${width}"${dash}/>`);
+      return s;
+    };
+    const ring = (p, color, id, end, sel) => {
+      const px = projectPoint(vp, world(p), w, h);
+      if (!px) return;
+      this.handles.push({ id, end, x: px[0], y: px[1] });
+      parts.push(`<circle cx="${px[0].toFixed(1)}" cy="${px[1].toFixed(1)}" r="${sel ? 6 : 5}" fill="${color}" fill-opacity="0.35" stroke="#000" stroke-opacity="0.7" stroke-width="3"/>`,
+        `<circle cx="${px[0].toFixed(1)}" cy="${px[1].toFixed(1)}" r="${sel ? 6 : 5}" fill="none" stroke="${color}" stroke-width="${sel ? 2.4 : 1.8}"/>`);
+    };
+    for (const m of st.measures) {
+      const sel = m.id === st.measureSel;
+      const color = sel ? "#ffd84a" : "#47e0c6";
+      const s = seg(world(m.a), world(m.b), color, false, sel ? 2.2 : 1.5);
+      ring(m.a, color, m.id, "a", sel);
+      ring(m.b, color, m.id, "b", sel);
+      if (s) text((s[0] + s[2]) / 2, (s[1] + s[3]) / 2 - 8, `${measureLabel(m, st.spacing, unit)}${m.acc ? ` \u00b1${+m.acc.toPrecision(2)} vox` : ""}`, color);
+    }
+    if (st.pending) {
+      ring(st.pending, "#ffd84a", null, "a", true);
+      if (this.rubber) {
+        const s = seg(world(st.pending), world(this.rubber), "#ffd84a", true, 1.5);
+        if (s) text((s[0] + s[2]) / 2, (s[1] + s[3]) / 2 - 8, formatLength(distance(st.pending, this.rubber, st.spacing), unit), "#ffd84a");
+      }
+    }
   }
 
   dispose() {

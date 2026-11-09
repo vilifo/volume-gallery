@@ -10,10 +10,13 @@
 
 import { PlaneClient, prefetchIndices } from "./plane-client.js";
 import { SliceRenderer, requestSliceDevice } from "./slice-renderer.js?v=org3";
-import { SliceState } from "./cursor.js";
+import { SliceState } from "./cursor.js?v=meas1";
 import { bindTouchGestures } from "./touch-gestures.js?v=org6";
 import { buildLut, isGrayRamp } from "./transfer-function.js";
-import { Overlay3D } from "./overlay-3d.js";
+import { Overlay3D } from "./overlay-3d.js?v=meas1";
+import { hitHandle, paneMeasureSvg, pointFromPlane, roundPoint } from "./measure.js?v=meas1";
+import { Measure3D } from "./measure-3d.js?v=meas1";
+import { ensureMeasureStyles } from "./measure-ui.js?v=meas1";
 import { niceScaleLength } from "../scalebar.js";
 import {
   AXES, AXIS_INFO, AXIS_COLORS, clamp, cursorInPlane, dragWindow, panePpv, planeExtents,
@@ -84,6 +87,10 @@ export class Pane {
     this.plane = null; // last uploaded plane (for the value read-out)
     this.size = { width: 1, height: 1, dpr: 1 };
     this.drag = null;
+    this.mdrag = null;       // a mouse press that is measuring: placing a point or dragging one
+    this.tmd = null;         // the same for one finger
+    this.rubber = null;      // the live end of the measurement being made (a point)
+    this.handles = [];       // the measurement points on this slice, in pane pixels (hit testing)
     this.wheelAcc = 0;
     this.lastDir = 1;
     this.error = null;
@@ -101,6 +108,7 @@ export class Pane {
         <span class="slice-title" style="color:${AXIS_COLORS[info.normal]}" title="${info.label} plane: slices along ${info.normal.toUpperCase()}">${info.label}</span>
         <span class="slice-sub"></span>
         <span class="slice-btns">
+          <button type="button" data-act="measure" title="Measure distances (M): click two points" aria-pressed="false">\ud83d\udccf</button>
           <button type="button" data-act="flip-u" title="Flip horizontally">\u21c6</button>
           <button type="button" data-act="flip-v" title="Flip vertically">\u21c5</button>
           <button type="button" data-act="reset" title="Reset zoom and pan (double-click)">\u21ba</button>
@@ -112,6 +120,7 @@ export class Pane {
         <button type="button" data-tool="pan" title="One finger: pan">\u2725</button>
         <button type="button" data-tool="scroll" title="One finger: scroll through the slices">\u2195</button>
         <button type="button" data-tool="window" title="One finger: window / level">\u25d0</button>
+        <button type="button" data-tool="measure" title="One finger: measure (tap two points, drag a point to move it)">\ud83d\udccf</button>
       </div>
       <div class="slice-hud"></div>
       <div class="slice-busy" hidden></div>`;
@@ -128,9 +137,11 @@ export class Pane {
 
     this.ro = new ResizeObserver(() => this.resize());
     this.ro.observe(el);
+    ensureMeasureStyles();
     this.bindInput();
     this.bindTouch();
     this.showTouchTool();
+    this.syncMeasuring();
     this.resize();
   }
 
@@ -298,6 +309,12 @@ export class Pane {
       );
     }
     if (st.showScaleBar !== false) parts.push(scaleBarSvg(st.spacing[info.u] / ppv.u, width, height));
+    const meas = paneMeasureSvg({
+      axis: this.axis, index: st.cursor[info.normal], measures: st.measures, pending: st.pending, rubber: this.rubber,
+      selected: st.measureSel, spacing: st.spacing, unit: st.unit ?? "micrometer", width, height, view, ppv, flip,
+    });
+    this.handles = meas.handles;
+    parts.push(meas.svg);
     this.svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
     this.svg.innerHTML = parts.join("");
   }
@@ -346,6 +363,13 @@ export class Pane {
     el.addEventListener("pointerdown", (e) => {
       if (e.pointerType === "touch" || e.target.closest(".slice-head, .slice-tools")) return; // touch: see bindTouch()
       el.focus({ preventScroll: true });
+      if (st().measuring && e.button === 0 && !e.shiftKey && !spaceDown) { // the ruler: this press places or moves a point
+        e.preventDefault();
+        el.setPointerCapture(e.pointerId);
+        const { x, y } = this.local(e);
+        this.measureDown(x, y, e.pointerId);
+        return;
+      }
       const mode = e.button === 1 || (e.button === 0 && (e.shiftKey || spaceDown)) ? "pan" : e.button === 0 ? "cursor" : e.button === 2 ? "window" : null;
       if (!mode) return;
       e.preventDefault();
@@ -359,8 +383,13 @@ export class Pane {
     el.addEventListener("pointermove", (e) => {
       if (e.pointerType === "touch") return;
       const { x, y } = this.local(e);
+      if (this.mdrag && this.mdrag.id === e.pointerId) {
+        this.measureMove(x, y);
+        return;
+      }
       if (!this.drag) {
         this.hover(x, y);
+        if (st().measuring && st().pending) this.setRubber(this.measurePoint(x, y)); // live line to the pointer
         return;
       }
       const dx = x - this.drag.x, dy = y - this.drag.y;
@@ -378,6 +407,7 @@ export class Pane {
     });
 
     const end = (e) => {
+      if (this.mdrag && this.mdrag.id === e.pointerId) { this.measureEnd(); return; }
       if (!this.drag || this.drag.id !== e.pointerId) return;
       this.drag = null;
       st().endInteraction();
@@ -425,6 +455,9 @@ export class Pane {
       else if (k === "Home" || k === "r") s.resetView(this.axis);
       else if (k === "i") s.setInvert(!s.invert);
       else if (k === "w") s.resetWindow();
+      else if (k === "m") s.setMeasuring(!s.measuring);
+      else if (k === "Escape" && (s.pending || s.measuring)) { if (s.pending) s.setPending(null); else s.setMeasuring(false); this.rubber = null; }
+      else if ((k === "Delete" || k === "Backspace") && s.measureSel !== null) s.removeMeasure(s.measureSel);
       else handled = false;
       if (handled) e.preventDefault();
     });
@@ -441,7 +474,120 @@ export class Pane {
       else if (act === "flip-u") st().toggleFlip(this.axis, "u");
       else if (act === "flip-v") st().toggleFlip(this.axis, "v");
       else if (act === "max") st().setLayout(st().layout === this.axis ? "quad" : this.axis);
+      else if (act === "measure") st().setMeasuring(!st().measuring);
     });
+  }
+
+  // ------------------------------------------------------------ measuring
+
+  /** Shows whether the ruler is on (cursor shape, the button). */
+  syncMeasuring() {
+    const on = this.state.measuring;
+    this.el.dataset.measuring = on ? "1" : "0";
+    this.el.querySelector('[data-act="measure"]')?.setAttribute("aria-pressed", String(on));
+    if (!on) this.rubber = null;
+  }
+
+  setRubber(p) {
+    this.rubber = p;
+    this.views.requestRender();
+  }
+
+  /** The 3D point under a pixel of this pane: on the slice shown, inside the volume. */
+  measurePoint(x, y) {
+    const st = this.state;
+    const pt = this.planePoint(x, y);
+    const ext = planeExtents(this.axis, st.dims);
+    return roundPoint(pointFromPlane(this.axis, clamp(pt.u, 0, ext.u), clamp(pt.v, 0, ext.v), st.cursor[AXIS_INFO[this.axis].normal]));
+  }
+
+  /** The end of a measurement (or the pending point) near a pixel, if any. */
+  measureHandleAt(x, y, tolerance) {
+    return hitHandle(this.handles, x, y, tolerance);
+  }
+
+  /** Completes the measurement with `pt`, or says why it cannot. */
+  finishMeasure(pt) {
+    const st = this.state;
+    if (st.addMeasure(st.pending, pt, st.pendingAcc, 0) === null) this.updateHud("At most 50 measurements: delete one first");
+    this.rubber = null;
+  }
+
+  measureDown(x, y, id) {
+    const st = this.state;
+    const hit = this.measureHandleAt(x, y, 10);
+    if (hit) { // take that point
+      if (hit.id !== null) st.selectMeasure(hit.id);
+      this.mdrag = { id, kind: hit.id === null ? "pending" : "handle", mid: hit.id, end: hit.end };
+      st.beginInteraction();
+      return;
+    }
+    st.selectMeasure(null);
+    const pt = this.measurePoint(x, y);
+    if (st.pending) { // the second click
+      this.finishMeasure(pt);
+      this.mdrag = { id, kind: "none" };
+      return;
+    }
+    st.setPending(pt, 0);
+    this.mdrag = { id, kind: "rubber", sx: x, sy: y, moved: false };
+    st.beginInteraction();
+  }
+
+  measureMove(x, y) {
+    const d = this.mdrag, st = this.state;
+    if (d.kind === "handle") st.movePoint(d.mid, d.end, this.measurePoint(x, y), 0);
+    else if (d.kind === "pending") st.setPending(this.measurePoint(x, y), 0);
+    else if (d.kind === "rubber") {
+      if (!d.moved && Math.hypot(x - d.sx, y - d.sy) > 4) d.moved = true;
+      if (d.moved) this.setRubber(this.measurePoint(x, y)); // dragging from the first point: the line follows
+    }
+  }
+
+  measureEnd() {
+    const d = this.mdrag, st = this.state;
+    this.mdrag = null;
+    st.endInteraction();
+    if (d.kind === "rubber" && d.moved && st.pending && this.rubber) this.finishMeasure(this.rubber); // press, drag, release
+    else if (d.kind === "none" || d.kind === "handle") this.rubber = null;
+    this.views.requestRender();
+  }
+
+  /** A tap with the ruler tool on a touch screen: select a point, or place the next one. */
+  measureTap(x, y) {
+    const st = this.state;
+    const hit = this.measureHandleAt(x, y, 20);
+    if (hit && hit.id !== null) { st.selectMeasure(hit.id); return; }
+    const pt = this.measurePoint(x, y);
+    if (st.pending) this.finishMeasure(pt);
+    else st.setPending(pt, 0);
+  }
+
+  /** One finger dragging with the ruler tool: moves the point it started on, or draws a line from the pending point. */
+  touchMeasureDrag(x, y, dx, dy) {
+    const st = this.state;
+    if (!this.tmd) {
+      const sx = x - dx, sy = y - dy;
+      const hit = this.measureHandleAt(sx, sy, 24);
+      if (hit) {
+        if (hit.id !== null) st.selectMeasure(hit.id);
+        this.tmd = { kind: hit.id === null ? "pending" : "handle", mid: hit.id, end: hit.end };
+      } else {
+        if (!st.pending) st.setPending(this.measurePoint(sx, sy), 0);
+        this.tmd = { kind: "rubber" };
+      }
+    }
+    const pt = this.measurePoint(x, y);
+    if (this.tmd.kind === "handle") st.movePoint(this.tmd.mid, this.tmd.end, pt, 0);
+    else if (this.tmd.kind === "pending") st.setPending(pt, 0);
+    else this.setRubber(pt);
+  }
+
+  touchMeasureEnd() {
+    const d = this.tmd, st = this.state;
+    this.tmd = null;
+    if (d?.kind === "rubber" && st.pending && this.rubber) this.finishMeasure(this.rubber);
+    this.rubber = null;
   }
 
   // Touch: one finger taps and drags (what a drag does is the chosen tool), two fingers pinch and pan.
@@ -452,9 +598,10 @@ export class Pane {
       tool: () => this.views.touchTool,
       focus: () => this.el.focus({ preventScroll: true }),
       begin: () => { this.scrollAcc = 0; this.state.beginInteraction(); },
-      end: () => this.state.endInteraction(),
-      tap: (x, y) => { this.moveCursorTo(x, y); this.hover(x, y); },
-      doubleTap: () => this.state.resetView(this.axis),
+      end: () => { this.touchMeasureEnd(); this.state.endInteraction(); },
+      tap: (x, y) => { if (this.views.touchTool === "measure") this.measureTap(x, y); else { this.moveCursorTo(x, y); this.hover(x, y); } },
+      // two quick taps place two points with the ruler: they are not a double tap there
+      doubleTap: (x, y) => { if (this.views.touchTool === "measure") this.measureTap(x, y); else this.state.resetView(this.axis); },
       drag: (tool, x, y, dx, dy) => this.touchDrag(tool, x, y, dx, dy),
       pinch: (g) => this.touchPinch(g),
     });
@@ -467,6 +614,8 @@ export class Pane {
       s.setView(this.axis, { centerU: v.centerU - (flip.u * dx) / ppv.u, centerV: v.centerV - (flip.v * dy) / ppv.v });
     } else if (tool === "window") {
       s.setWindow(dragWindow(s.window, dx, dy, s.dtype));
+    } else if (tool === "measure") {
+      this.touchMeasureDrag(x, y, dx, dy);
     } else if (tool === "scroll") {
       // dragging up goes to the next slice, like scrolling a page; about one slice per 10 px
       this.scrollAcc -= dy;
@@ -539,7 +688,7 @@ export class SliceViews {
       if (!textureFormatFor(info.dtype)) throw new Error(`Slice views do not support ${info.dtype} data`);
       const device = await requestSliceDevice();
       if (!device) throw new Error("WebGPU is not available for the slice views");
-      const state = new SliceState({ dims: info.dims, spacing: info.spacing, dtype: info.dtype, window: info.window, channels: info.channels });
+      const state = new SliceState({ dims: info.dims, spacing: info.spacing, dtype: info.dtype, window: info.window, channels: info.channels, unit: info.unit ?? null });
       state.applyParams(params);
       return new SliceViews({ grid, client, info, device, state });
     } catch (err) {
@@ -558,7 +707,7 @@ export class SliceViews {
     this.touchTool = "cursor";
     try {
       const saved = localStorage.getItem("vg_slice_touch_tool");
-      if (["cursor", "pan", "scroll", "window"].includes(saved)) this.touchTool = saved;
+      if (["cursor", "pan", "scroll", "window", "measure"].includes(saved)) this.touchTool = saved;
     } catch (_) { /* storage unavailable */ }
     this.renderer = new SliceRenderer(device);
     this.renderer.setLut(buildLut(state.tf.stops));
@@ -567,6 +716,7 @@ export class SliceViews {
     this.pane3d = grid.querySelector("#pane-3d");
     this.viewer = null;
     this.overlay3d = this.pane3d ? new Overlay3D(this.pane3d, state) : null;
+    this.measure3d = this.pane3d ? new Measure3D({ views: this, host: this.pane3d }) : null;
 
     this.panes = {};
     for (const axis of AXES) this.panes[axis] = new Pane(this, axis, grid.querySelector(`[data-axis="${axis}"]`));
@@ -591,6 +741,8 @@ export class SliceViews {
       state.on("window", () => this.requestRender()),
       state.on("tf", () => { this.renderer.setLut(buildLut(state.tf.stops)); this.requestRender(); }),
       state.on("option", () => this.requestRender()),
+      state.on("measuring", () => { for (const p of Object.values(this.panes)) p.syncMeasuring(); this.requestRender(); }),
+      state.on("measure", () => { if (!state.pending) for (const p of Object.values(this.panes)) p.rubber = null; this.requestRender(); }),
     ];
     for (const axis of AXES) this.panes[axis].prevIdx = state.cursor[AXIS_INFO[axis].normal];
     device.lost.then((l) => { if (!this._disposed) this.fail(`GPU device lost: ${l.message}`); });
@@ -601,10 +753,12 @@ export class SliceViews {
   /** Connects the kiln viewer so the 3D plane overlay can follow its camera. */
   attachViewer(viewer) {
     this.viewer = viewer;
+    this.measure3d?.attachViewer(viewer);
     if (!this._loop && !this._disposed) this._loop = requestAnimationFrame(this._viewerLoop);
   }
   detachViewer() {
     this.viewer = null;
+    this.measure3d?.detachViewer();
     cancelAnimationFrame(this._loop);
     this._loop = 0;
   }
@@ -764,6 +918,7 @@ export class SliceViews {
     cancelAnimationFrame(this._raf);
     cancelAnimationFrame(this._loop);
     this._offs.forEach((off) => off());
+    this.measure3d?.dispose();
     this.overlay3d?.dispose();
     for (const p of Object.values(this.panes)) p.dispose();
     this.client.dispose();

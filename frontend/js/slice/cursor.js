@@ -2,6 +2,7 @@
 // layout. Panes, the 3D overlay and the URL sync all subscribe here.
 
 import { AXES, AXIS_INFO, clamp, defaultView, fullRangeWindow } from "./geometry.js";
+import { MAX_MEASURES, decodeMeasures, encodeMeasures, roundPoint } from "./measure.js";
 import { decodeTf, encodeTf, normalizeStops, presetStops } from "./transfer-function.js";
 
 
@@ -10,11 +11,13 @@ export const LAYOUTS = ["3d", "quad", "xy", "xz", "yz"];
 export class SliceState {
   /**
    * @param {{dims:{x:number,y:number,z:number}, spacing:{x:number,y:number,z:number}, dtype:string,
-   *          window?:{center:number,width:number}, channels?:number, layout?:string}} o
+   *          window?:{center:number,width:number}, channels?:number, layout?:string, unit?:string|null}} o
+   *   unit: what `spacing` is in (volume.json's unit); distances are measured in it
    */
-  constructor({ dims, spacing, dtype, window: win, channels = 1, layout = "3d" }) {
+  constructor({ dims, spacing, dtype, window: win, channels = 1, layout = "3d", unit = null }) {
     this.dims = dims;
     this.spacing = spacing;
+    this.unit = unit;
     this.dtype = dtype;
     this.channels = channels;
     this.cursor = { x: Math.floor(dims.x / 2), y: Math.floor(dims.y / 2), z: Math.floor(dims.z / 2) };
@@ -32,6 +35,16 @@ export class SliceState {
     this.show3dCursor = true; // the cursor (three crossing lines + dot) over the 3D view
     this.tf = { preset: "gray", stops: presetStops("gray") }; // colours over the windowed range
     this.interacting = false;
+    // Distance measuring. Points are in continuous voxel coordinates (see measure.js); a measurement is
+    // { id, a, b, label, accA, accB, acc }: how far off each end can be (a point picked in the 3D view is only
+    // as exact as the coarse volume it was found in, in voxels; 0 = exact) and the larger of the two.
+    this.measures = [];
+    this.measuring = false;       // the ruler is on: clicks place points instead of moving the cursor
+    this.pending = null;          // the first point of a measurement that is being made
+    this.pendingAcc = 0;
+    this.measureSel = null;       // id of the selected measurement
+    this.measure3dMode = "surface"; // where a click in the 3D view lands: "surface" (approximate) | "planes" (exact)
+    this._measureId = 1;
     this._listeners = new Map();
     this._interactTimer = null;
   }
@@ -165,7 +178,74 @@ export class SliceState {
     }
   }
 
-  /** Voxel value formatting helper for the HUD. */
+  // ------------------------------------------------------------------------- measuring
+
+  setMeasuring(on) {
+    on = !!on;
+    if (on === this.measuring) return;
+    this.measuring = on;
+    if (!on && this.pending) { this.pending = null; this._emit("measure", { kind: "pending" }); }
+    this._emit("measuring", { on });
+  }
+
+  /** The first point of a measurement (null cancels it). */
+  setPending(p, acc = 0) {
+    this.pending = p ? roundPoint(p) : null;
+    this.pendingAcc = p ? acc : 0;
+    this._emit("measure", { kind: "pending" });
+  }
+
+  /** Completes a measurement; returns its id, or null when there are already MAX_MEASURES. accA / accB: see the constructor. */
+  addMeasure(a, b, accA = 0, accB = 0) {
+    if (this.measures.length >= MAX_MEASURES) return null;
+    const id = this._measureId++;
+    this.measures.push({ id, a: roundPoint(a), b: roundPoint(b), label: `M${id}`, accA, accB, acc: Math.max(accA, accB) });
+    this.pending = null;
+    this.pendingAcc = 0;
+    this.measureSel = id;
+    this._emit("measure", { kind: "added", id });
+    return id;
+  }
+
+  /** Moves one end ("a" | "b") of a measurement. */
+  movePoint(id, end, p, acc = 0) {
+    const m = this.measures.find((q) => q.id === id);
+    if (!m || (end !== "a" && end !== "b")) return;
+    m[end] = roundPoint(p);
+    m[end === "a" ? "accA" : "accB"] = acc; // an end set by hand in a slice is exact
+    m.acc = Math.max(m.accA, m.accB);
+    this._emit("measure", { kind: "moved", id });
+  }
+
+  removeMeasure(id) {
+    const i = this.measures.findIndex((q) => q.id === id);
+    if (i < 0) return;
+    this.measures.splice(i, 1);
+    if (this.measureSel === id) this.measureSel = null;
+    this._emit("measure", { kind: "removed", id });
+  }
+
+  clearMeasures() {
+    if (!this.measures.length && !this.pending) return;
+    this.measures = [];
+    this.pending = null;
+    this.pendingAcc = 0;
+    this.measureSel = null;
+    this._emit("measure", { kind: "cleared" });
+  }
+
+  selectMeasure(id) {
+    if (id === this.measureSel) return;
+    this.measureSel = id;
+    this._emit("measure", { kind: "selected", id });
+  }
+
+  setMeasure3dMode(mode) {
+    if (mode !== "surface" && mode !== "planes") return;
+    this.measure3dMode = mode;
+    this._emit("measure3d", { mode });
+  }
+
   // ---------------------------------------------------------------------- URL
 
   /** Query parameters describing this state (only what differs from the defaults). */
@@ -178,6 +258,7 @@ export class SliceState {
     }
     if (this.channel) p.ch = String(this.channel);
     if (this.tf.preset !== "gray") p.stf = encodeTf(this.tf);
+    if (this.measures.length) p.meas = encodeMeasures(this.measures); // the distances travel with the link
     return p;
   }
 
@@ -197,5 +278,11 @@ export class SliceState {
     }
     const layout = get("layout");
     if (layout) this.setLayout(layout);
+    const meas = get("meas");
+    if (meas) {
+      this.measures = [];
+      for (const m of decodeMeasures(meas, this.dims)) this.measures.push({ id: this._measureId++, a: m.a, b: m.b, label: `M${this._measureId - 1}`, accA: 0, accB: 0, acc: 0 });
+      this._emit("measure", { kind: "loaded" });
+    }
   }
 }

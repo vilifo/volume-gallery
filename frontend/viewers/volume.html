@@ -470,7 +470,7 @@ import { insertStop, sampleStops, rgbToHex, decodeTf, encodeTf } from "/js/slice
       planAtlas,
       saveAtlasMB,
     } from "/js/atlas-budget.js?v=atlas3";
-    import { setupSliceIntegration } from "/js/slice/slice-integration.js?v=slice7";
+    import { setupSliceIntegration } from "/js/slice/slice-integration.js?v=meas1";
     import { niceScaleLength } from "/js/scalebar.js?v=sb1";
     import { toggleHelpPanel } from "/js/help.js?v=help7";
     import { makeDescriptionExpandable } from "/js/description.js?v=org2";
@@ -497,6 +497,7 @@ import { insertStop, sampleStops, rgbToHex, decodeTf, encodeTf } from "/js/slice
     const CUBE_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8 12 3 3 8m18 0v8l-9 5m9-13-9 5m0 8-9-5V8m9 13v-8M3 8l9 5"/></svg>`;
     const HELP_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.1 9a3 3 0 0 1 5.8 1c0 2-3 3-3 3M12 17h.01"/></svg>`;
     const DOWNLOAD_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>`;
+    const RULER_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 17 17 3l4 4L7 21z"/><path d="M7 13l2 2M10 10l2 2M13 7l2 2"/></svg>`;
     const ANIMATE_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polygon points="10 8 16 12 10 16 10 8"/></svg>`;
     const BOOKMARK_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>`;
     const LINK_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>`;
@@ -726,6 +727,7 @@ import { insertStop, sampleStops, rgbToHex, decodeTf, encodeTf } from "/js/slice
             </div>
             <button id="help-btn" class="icon-btn" aria-pressed="false" title="Show help for this viewer next to the view">${HELP_ICON}<span class="icon-btn-label">Help</span></button>
             <button id="bookmarks-btn" class="icon-btn" title="Save this view and come back to it later">${BOOKMARK_ICON}<span class="icon-btn-label">Bookmarks</span></button>
+            <button id="measure-btn" class="icon-btn" aria-pressed="false" title="Measure distances: click two points in a slice pane or in the 3D view">${RULER_ICON}<span class="icon-btn-label">Measure</span></button>
             <button id="animate-btn" class="icon-btn" title="Animation timeline: a camera path with clipping and transfer function changes, a 3D turntable or a slice sweep; play it or render a video">${ANIMATE_ICON}<span class="icon-btn-label">Animate</span></button>
             <button id="export-btn" class="icon-btn" title="Save the view or a slice as an image file at full resolution">${DOWNLOAD_ICON}<span class="icon-btn-label">Export</span></button>
             <button id="share-btn" class="icon-btn" title="Copy a link to this exact view">${LINK_ICON}<span class="icon-btn-label">Share</span></button>
@@ -1152,6 +1154,12 @@ import { insertStop, sampleStops, rgbToHex, decodeTf, encodeTf } from "/js/slice
         });
         bookmarksBtn.setAttribute("aria-pressed", String(!!open));
       });
+
+      // The ruler: measures distances in the slice panes and the 3D view. Its measurements live in the slice views'
+      // state (they are made on demand); the button follows the ruler's state, which M and the Measure section change too.
+      const measureBtn = document.getElementById("measure-btn");
+      measureBtn.addEventListener("click", () => slices.toggleMeasure());
+      slices.onMeasuring((on) => measureBtn.setAttribute("aria-pressed", String(on)));
 
       // The animation timeline docks below the panes. It is made when first needed (a link can play an animation
       // before Animate is pressed) and keeps its settings and views while it is hidden.
