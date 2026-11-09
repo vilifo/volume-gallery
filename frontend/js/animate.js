@@ -245,9 +245,39 @@ export function interpolatePose(a, b, t) {
   return pose;
 }
 
-/** The pose turned by `angle` radians about the world up axis (the camera circles the volume). */
-export function turntablePose(base, worldUp, angle) {
-  return { ...base, back: normalize(rotateAbout(base.back, worldUp, angle)), up: normalize(rotateAbout(base.up, worldUp, angle)) };
+/**
+ * The axes a turntable can turn about. The volume is centred on the origin of the viewer's coordinates and its
+ * x, y and z axes are the world axes, so every axis but "up" runs through the centre of the volume:
+ *  - "up": the up axis the viewer is set to, through the point the camera looks at (what a turntable always did),
+ *  - "x", "y", "z": the volume's axes,
+ *  - "screen-up", "screen-right": the vertical and the horizontal of the screen in the current view,
+ *  - "view": the line of sight of the current view (the picture spins like a wheel).
+ */
+export const TURN_AXES = ["up", "x", "y", "z", "screen-up", "screen-right", "view"];
+
+/** The unit vector of a turntable axis (for the view axes, taken from the pose the turn starts at). */
+export function turnAxisVector(axis, base, worldUp) {
+  switch (axis) {
+    case "x": return [1, 0, 0];
+    case "y": return [0, 1, 0];
+    case "z": return [0, 0, 1];
+    case "screen-up": return normalize(base.up);
+    case "screen-right": return normalize(cross(base.up, base.back)); // right = up x back
+    case "view": return normalize(base.back);
+    default: return normalize(worldUp);
+  }
+}
+
+/**
+ * The pose turned by `angle` radians about a turntable axis (see TURN_AXES): the camera circles the axis. A positive
+ * angle is counter-clockwise seen from the positive end of the axis looking toward the volume. About an axis through
+ * the centre of the volume the point the camera looks at circles it too, so a panned view keeps its place in the picture.
+ */
+export function turntablePose(base, worldUp, angle, axis = "up") {
+  const k = turnAxisVector(axis, base, worldUp);
+  const pose = { ...base, back: normalize(rotateAbout(base.back, k, angle)), up: normalize(rotateAbout(base.up, k, angle)) };
+  if (axis !== "up") pose.target = rotateAbout(base.target, k, angle);
+  return pose;
 }
 
 const smooth = (t) => t * t * (3 - 2 * t);
@@ -311,7 +341,7 @@ export function passFraction(spec, t) {
  */
 export function playPose(spec, base, worldUp, t) {
   const u = passFraction(spec, t);
-  if (spec.kind === "turntable") return turntablePose(base, worldUp, (spec.angle * Math.PI) / 180 * spec.direction * u);
+  if (spec.kind === "turntable") return turntablePose(base, worldUp, (spec.angle * Math.PI) / 180 * spec.direction * u, spec.turn_axis ?? "up");
   return pathPoseAt(spec.keys, u, { loop: spec.end === "return", ease: spec.ease });
 }
 

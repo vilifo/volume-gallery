@@ -8,6 +8,7 @@ export const ANIM_MAX_CHARS = 8000;        // longer links are refused by too ma
 const MAX_INFLATED = 400_000;              // bytes of JSON accepted from a link
 const PRESETS = ["coolwarm", "grayscale", "grayscale-inverted", "hot", "cool", "viridis", "plasma", "seismic", "custom"];
 const HEX = /^#[0-9a-fA-F]{6}$/;
+const TURN_AXES = ["up", "x", "y", "z", "screen-up", "screen-right", "view"];
 
 const isNum = (v) => typeof v === "number" && Number.isFinite(v);
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
@@ -60,6 +61,7 @@ export function sanitizeSpec(raw) {
     ease: raw.ease === "linear" ? "linear" : "smooth",
     angle: isNum(raw.angle) ? clamp(raw.angle, 1, 3600) : 360,
     direction: raw.direction === -1 ? -1 : 1,
+    turn_axis: TURN_AXES.includes(raw.turn_axis) ? raw.turn_axis : "up",
     keys: [],
     step: isNum(raw.step) ? clamp(Math.round(raw.step), 1, 100000) : 1,
     speed: isNum(raw.speed) ? clamp(raw.speed, 0.1, 240) : 10,

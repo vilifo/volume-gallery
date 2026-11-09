@@ -122,6 +122,14 @@ export function createTimeline({
           <label data-for="path"><span>At the end</span><select id="tl-loop"><option value="stop">Stop at the last view</option><option value="return">Return to the first</option><option value="pingpong">Back and forth</option></select></label>
           <label data-for="path"><span>Movement</span><select id="tl-ease"><option value="smooth">Ease in and out</option><option value="linear">Constant speed</option></select></label>
           <label data-for="turntable"><span>Turn (degrees)</span><input id="tl-angle" type="number" min="1" max="3600" value="360" /></label>
+          <label data-for="turntable" class="wide"><span>Rotate about</span><select id="tl-turnaxis">
+            <option value="up">The up axis (through the point you look at)</option>
+            <optgroup label="Through the centre of the volume">
+              <option value="x">X axis</option><option value="y">Y axis</option><option value="z">Z axis</option>
+              <option value="screen-up">Screen vertical (current view)</option>
+              <option value="screen-right">Screen horizontal (current view)</option>
+              <option value="view">Line of sight (current view)</option>
+            </optgroup></select></label>
           <label data-for="turntable"><span>Direction</span><select id="tl-dir"><option value="1">Counter-clockwise</option><option value="-1">Clockwise</option></select></label>
           <label data-for="turntable"><span>Each pass</span><select id="tl-tend"><option value="return">Full turn, then again</option><option value="pingpong">Back and forth</option></select></label>
           <label data-for="turntable" class="wide" id="tl-start-wrap"><span>Start from</span><select id="tl-start"><option value="">The current view</option></select></label>
@@ -135,7 +143,7 @@ export function createTimeline({
           <label class="check wide" data-for="path turntable"><input type="checkbox" id="tl-preload" checked /> <span>Load the data of the whole path first</span></label>
           <label class="check wide"><input type="checkbox" id="tl-touch" checked /> <span>Pause when I touch the view</span></label>
         </div>
-        <p class="tl-sub" data-for="turntable">Circles the volume about the up axis from the view you have now, with the clipping and transfer function it has now. A full turn ends where it began, so it loops.</p>
+        <p class="tl-sub" data-for="turntable">The camera circles the volume from the view you have now, with the clipping and transfer function it has now. The X, Y and Z axes and the axes of the current view (vertical, horizontal, line of sight) run through the centre of the volume. Counter-clockwise is seen from the positive end of the axis, so the volume seems to turn the other way. A full turn ends where it began, so it loops.</p>
         <p class="tl-sub" data-for="slices">Rendered slices are drawn at one pixel per voxel with the window and colours of the slice view. Slices are fetched one at a time while a sweep plays.</p>
       </div>
 
@@ -408,6 +416,7 @@ export function createTimeline({
       ease: $("tl-ease").value,
       angle: Math.max(1, num("tl-angle") || 360),
       direction: Number($("tl-dir").value),
+      turn_axis: k === "turntable" ? $("tl-turnaxis").value : "up",
       keys: k === "path" ? (ensureTimes(), keys.map((x) => structuredClone(x))) : [],
       step: Math.max(1, Math.round(num("tl-step") || 1)),
       speed: Math.min(240, Math.max(0.5, num("tl-speed") || 10)),
@@ -443,6 +452,7 @@ export function createTimeline({
     $("tl-ease").value = spec.ease;
     $("tl-angle").value = spec.angle;
     $("tl-dir").value = String(spec.direction);
+    $("tl-turnaxis").value = spec.turn_axis || "up";
     $("tl-step").value = spec.step;
     $("tl-speed").value = spec.speed;
     $("tl-preload").checked = spec.preload;

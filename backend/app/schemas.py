@@ -225,6 +225,9 @@ class PlaybackSpec(BaseModel):
     ease: Literal["smooth", "linear"] = "smooth"
     angle: float = Field(default=360, ge=1, le=3600)             # turntable: degrees per pass
     direction: Literal[1, -1] = 1
+    # turntable: what it turns about. "up" is the viewer's up axis through the point looked at; the others run through
+    # the centre of the volume: its x, y, z axes, the vertical / horizontal of the screen, the line of sight.
+    turn_axis: Literal["up", "x", "y", "z", "screen-up", "screen-right", "view"] = "up"
     keys: List[PoseSpec] = Field(default_factory=list, max_length=200)
     start: Optional[PoseSpec] = None                             # turntable: begin from this view (else the current one)
     axis: Optional[Literal["xy", "xz", "yz"]] = None             # slice sweep
