@@ -8,9 +8,10 @@
 // Every pane reads the same SliceState: clicking in one pane moves the cursor, and the
 // others re-request their plane and move their crosshair lines.
 
-import { PlaneClient, prefetchIndices } from "./plane-client.js";
+import { PlaneClient, prefetchIndices } from "./plane-client.js?v=ang1";
 import { SliceRenderer, requestSliceDevice } from "./slice-renderer.js?v=org3";
-import { SliceState } from "./cursor.js?v=meas1";
+import { SliceState } from "./cursor.js?v=ang1";
+import { ObliquePane } from "./oblique-pane.js?v=ang1";
 import { bindTouchGestures } from "./touch-gestures.js?v=org6";
 import { buildLut, isGrayRamp } from "./transfer-function.js";
 import { Overlay3D } from "./overlay-3d.js?v=meas1";
@@ -720,6 +721,8 @@ export class SliceViews {
 
     this.panes = {};
     for (const axis of AXES) this.panes[axis] = new Pane(this, axis, grid.querySelector(`[data-axis="${axis}"]`));
+    const angledEl = grid.querySelector('[data-axis="angled"]');
+    this.angled = angledEl ? new ObliquePane(this, angledEl, { scaleBarSvg }) : null; // the angled slice (see oblique-pane.js)
 
     this._offs = [
       state.on("cursor", ({ changed }) => {
@@ -732,9 +735,11 @@ export class SliceViews {
             pane.sync();
           }
         }
+        this.angled?.sync();
         this.requestRender();
       }),
-      state.on("channel", () => { for (const p of Object.values(this.panes)) { p.shownKey = null; p.sync(); } }),
+      state.on("angled", () => { this.angled?.sync(); this.requestRender(); }),
+      state.on("channel", () => { for (const p of Object.values(this.panes)) { p.shownKey = null; p.sync(); } if (this.angled) { this.angled.shownKey = null; this.angled.sync(); } }),
       state.on("interaction", ({ active }) => { if (!active) for (const p of Object.values(this.panes)) p.sync(); }),
       state.on("layout", () => this.applyLayout()),
       state.on("view", () => this.requestRender()),
@@ -769,7 +774,7 @@ export class SliceViews {
   }
 
   fail(message) {
-    for (const p of Object.values(this.panes)) { p.error = message; p.updateHud(); }
+    for (const p of [...Object.values(this.panes), this.angled]) if (p) { p.error = message; p.updateHud(); }
   }
 
   // ------------------------------------------------------------------ layout
@@ -781,9 +786,12 @@ export class SliceViews {
     const layout = this.state.layout;
     this.grid.dataset.layout = layout;
     if (this.pane3d) this.pane3d.dataset.visible = SliceViews.show3d(layout) ? "1" : "0";
-    for (const axis of AXES) this.panes[axis].setVisible(layout === "quad" || layout === axis);
+    // "angled": the angled slice big on the left, the three axis panes next to it
+    for (const axis of AXES) this.panes[axis].setVisible(layout === "quad" || layout === "angled" || layout === axis);
+    this.angled?.setVisible(layout === "angled");
     this.requestRender();
     for (const p of Object.values(this.panes)) if (p.visible) p.resize();
+    if (this.angled?.visible) this.angled.resize();
     this.onLayout?.(layout);
   }
 
@@ -795,6 +803,7 @@ export class SliceViews {
       this._raf = 0;
       if (this._disposed) return;
       for (const p of Object.values(this.panes)) p.draw();
+      this.angled?.draw();
       this.onRender?.();
     });
   }
@@ -921,6 +930,7 @@ export class SliceViews {
     this.measure3d?.dispose();
     this.overlay3d?.dispose();
     for (const p of Object.values(this.panes)) p.dispose();
+    this.angled?.dispose();
     this.client.dispose();
     this.renderer.dispose();
     try { this.device.destroy(); } catch { /* already lost */ }

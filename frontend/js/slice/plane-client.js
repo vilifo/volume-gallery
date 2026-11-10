@@ -242,6 +242,12 @@ export class PlaneClient {
     if (stride !== 1) qs.set("stride", String(stride));
     if (zstd) qs.set("enc", "zstd");
     const res = await this._request(`${axis}/${index}${qs.size ? `?${qs}` : ""}`, job.controller.signal);
+    return this._readPlane(res, { axis, index, channel, stride }, zstd);
+  }
+
+  /** Decodes a plane response (shared by plane and angled-plane requests). */
+  async _readPlane(res, meta, zstd) {
+    const { axis, index, channel, stride } = meta;
     const buf = await res.arrayBuffer();
     const dtype = res.headers.get("X-Plane-Dtype");
     const fmt = textureFormatFor(dtype);
@@ -263,6 +269,49 @@ export class PlaneClient {
       serverMs: parseFloat(res.headers.get("X-Plane-Server-Ms") ?? "0"),
       source: res.headers.get("X-Plane-Source") ?? "",
     };
+  }
+
+  /**
+   * An angled (oblique) slice: the XY plane through `center` rotated by `angles` (degrees about the volume's
+   * x, y, z axes), as a size x size image of `scale` x the finest voxel spacing per pixel (see
+   * GET .../slices/<token>/oblique). Not cached or shared: the caller keeps the latest one and aborts
+   * superseded requests through `signal`.
+   * @returns {Promise<{width, height, dtype, data, oblique: {u: number[], v: number[], pixel: number}, serverMs, source}>}
+   */
+  async getOblique({ center, angles, size, scale, channel = 0 }, signal) {
+    const qs = new URLSearchParams({
+      cx: String(center.x), cy: String(center.y), cz: String(center.z),
+      rx: String(angles.rx), ry: String(angles.ry), rz: String(angles.rz),
+      size: String(size), scale: String(+scale.toFixed(4)),
+    });
+    if (channel) qs.set("channel", String(channel));
+    const t0 = performance.now();
+    const fetchOnce = async (zstd) => {
+      const q = new URLSearchParams(qs);
+      if (zstd) q.set("enc", "zstd");
+      const res = await this._request(`oblique?${q}`, signal);
+      const plane = await this._readPlane(res, { axis: "angled", index: 0, channel, stride: 1 }, zstd);
+      const vec = (h) => (res.headers.get(h) ?? "").split(",").map(Number);
+      plane.oblique = { u: vec("X-Oblique-U"), v: vec("X-Oblique-V"), pixel: parseFloat(res.headers.get("X-Oblique-Pixel")) };
+      if (plane.oblique.u.length !== 3 || plane.oblique.v.length !== 3 || !(plane.oblique.pixel > 0)) {
+        throw new PlaneError("The server did not describe the angled slice's geometry");
+      }
+      return plane;
+    };
+    const zstd = await this._useZstd();
+    let plane;
+    try {
+      plane = await fetchOnce(zstd);
+    } catch (err) {
+      if (!(err?.sizeMismatch && zstd)) throw err;
+      this._disableZstd();
+      plane = await fetchOnce(false);
+    }
+    this.counters.fetches++;
+    this.counters.lastMs = performance.now() - t0;
+    this.counters.lastServerMs = plane.serverMs;
+    this.counters.lastSource = plane.source;
+    return plane;
   }
 
   async _run(job) {

@@ -344,6 +344,7 @@ class VolumeSlicesKiln:
             "channels": self.channels,
             "range": [lo, hi],
             "window": self.suggested_window(),
+            "angled": True,  # the /oblique endpoint exists (read_angled_plane)
         }
 
     def suggested_window(self) -> dict:
@@ -876,6 +877,35 @@ class VolumeSlicesKiln:
 
     # --------------------------------------------------- arbitrary oblique slices
 
+    def read_angled_plane(
+        self,
+        center_vox: Tuple[float, float, float],
+        angles_deg: Tuple[float, float, float],
+        size: int,
+        scale: float = 1.0,
+        order: int = 1,
+    ) -> Tuple[np.ndarray, dict]:
+        """A square `size` x `size` image of the plane through `center_vox` (x, y, z in voxels, as the
+        viewer's cursor) that is the XY plane rotated by `angles_deg` (see angled_basis). One image pixel
+        is `scale` times the finest voxel spacing; the centre pixel (size / 2) sits on `center_vox`.
+        Returns (image, geometry) with geometry = {u, v, pixel} for mapping image pixels back to voxels:
+        voxel = center + (col - size/2) * pixel * v / spacing + (row - size/2) * pixel * u / spacing,
+        u and v being unit vectors in physical (x, y, z) space."""
+        u, v, n = angled_basis(angles_deg)
+        sx, sy, sz = self.spacing["x"], self.spacing["y"], self.spacing["z"]
+        pixel = min(sx, sy, sz) * float(scale)
+        # the extractor works in (z, y, x) order, columns = [rows direction, columns direction, normal]
+        rot = np.column_stack([u[::-1], v[::-1], n[::-1]])
+        cx, cy, cz = center_vox
+        img = self.read_arbitrary_slice_matrix(
+            center_mm=(cz * sz, cy * sy, cx * sx),
+            rotation_matrix=rot,
+            output_shape=(size, size),
+            output_pixel_size_mm=pixel,
+            order=order,
+        )
+        return img, {"u": u.tolist(), "v": v.tolist(), "pixel": pixel}
+
     def read_arbitrary_slice_matrix(
         self,
         center_mm: Tuple[float, float, float],
@@ -939,6 +969,12 @@ class VolumeSlicesKiln:
 
         if z_min >= z_max or y_min >= y_max or x_min >= x_max:
             return np.zeros(output_shape, dtype=np.dtype(self.dtype))
+
+        box_bytes = (z_max - z_min + 32) * (y_max - y_min + 32) * (x_max - x_min + 32) * self._np_dtype.itemsize
+        if box_bytes > settings.OBLIQUE_MAX_BOX_MB * 1024 * 1024:
+            raise SliceError(
+                f"This angled slice is too large to extract ({box_bytes // (1024 * 1024)} MB of volume "
+                f"around it, limit {settings.OBLIQUE_MAX_BOX_MB} MB): zoom in", 413)
 
         # Fast path for LOD 0 (`tiled66` with 16x16x16 logical sub-blocks)
         if self._subidx is not None and self._compressed:
@@ -1114,6 +1150,14 @@ class VolumeSlicesKiln:
         )
 
 
+def angled_basis(angles_deg) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Directions (x, y, z) of an angled plane's image rows (u, pointing down), columns (v, pointing
+    right) and normal. The plane starts as the XY plane (u = +y, v = +x, normal = +z) and is rotated
+    by the Euler angles (degrees) about the volume's fixed x, then y, then z axes."""
+    r = Rotation.from_euler("xyz", [float(a) for a in angles_deg], degrees=True).as_matrix()
+    return r @ np.array([0.0, 1.0, 0.0]), r @ np.array([1.0, 0.0, 0.0]), r @ np.array([0.0, 0.0, 1.0])
+
+
 def percentile_window(plane: np.ndarray, lo: float = 1.0, hi: float = 99.0) -> dict:
     sample = np.asarray(plane).ravel()
     if sample.size > 400_000:
@@ -1198,6 +1242,45 @@ def plane_response_parts(
         "X-Plane-Raw-Bytes": str(out.nbytes),
         "X-Plane-Server-Ms": f"{(time.perf_counter() - t0) * 1000:.1f}",
         "X-Plane-Encoding": encoding,
+        "Vary": "Accept-Encoding",
+    }
+    if content_encoding:
+        headers["Content-Encoding"] = content_encoding
+    return body, headers
+
+
+def oblique_response_parts(
+    vs: VolumeSlicesKiln,
+    center: Tuple[float, float, float],
+    angles: Tuple[float, float, float],
+    size: int,
+    scale: float,
+    order: int = 1,
+    channel: int = 0,
+    encoding: str = "identity",
+) -> Tuple[bytes, dict]:
+    """(body, headers) of an angled plane, like plane_response_parts. The X-Oblique-* headers carry
+    the plane's geometry (see VolumeSlicesKiln.read_angled_plane)."""
+    if encoding not in ENCODINGS:
+        raise SliceError(f"enc must be one of {', '.join(ENCODINGS)}")
+    if not 0 <= channel < vs.channels:
+        raise SliceError(f"channel must be in 0..{vs.channels - 1}")
+    t0 = time.perf_counter()
+    img, geo = vs.read_angled_plane(center, angles, size, scale, order)
+    out = to_transport(img, vs.dtype)
+    body, content_encoding = encode_plane(out, encoding, settings.SLICE_ZSTD_LEVEL)
+    headers = {
+        "X-Plane-Width": str(out.shape[1]),
+        "X-Plane-Height": str(out.shape[0]),
+        "X-Plane-Dtype": vs.dtype,
+        "X-Plane-Stride": "1",
+        "X-Plane-Source": "angled",
+        "X-Plane-Raw-Bytes": str(out.nbytes),
+        "X-Plane-Server-Ms": f"{(time.perf_counter() - t0) * 1000:.1f}",
+        "X-Plane-Encoding": encoding,
+        "X-Oblique-U": ",".join(f"{c:.6f}" for c in geo["u"]),
+        "X-Oblique-V": ",".join(f"{c:.6f}" for c in geo["v"]),
+        "X-Oblique-Pixel": f"{geo['pixel']:.9g}",
         "Vary": "Accept-Encoding",
     }
     if content_encoding:

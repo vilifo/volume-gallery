@@ -17,7 +17,7 @@ from ..security import create_file_token, decode_token
 from ..config import settings
 from .. import workdir, jobs
 from ..organize import apply_asset_update, split_tags
-from ..helpers import SliceError, open_volume_slices, plane_response_parts
+from ..helpers import SliceError, open_volume_slices, plane_response_parts, oblique_response_parts
 from ..helpers import volume_meta_path, process_zip, decompose_tiff_stack, RANGE_RE, SHARDED_FILE_RE, decompress_gzip, detect_level_is_tiled66, unshuffle_tiled66_to_66_bytes, compress_gzip_66, ensure_legacy66_level_files, compress_gzip_66_exact_size
 from ..helpers import read_thumbnail, write_thumbnail, store_thumbnail, remove_thumbnail, thumbnail_response
 from ..helpers import histogram_path
@@ -742,6 +742,38 @@ def slice_info(
     """Dimensions, voxel spacing, data type and a suggested window for the slice views."""
     vs = _slice_store(volume_id, token, level, session)
     return JSONResponse(vs.info(), headers={"Cache-Control": "private, max-age=60"})
+
+
+@router.get("/{volume_id}/slices/{token}/oblique")
+def slice_oblique(
+    volume_id: int,
+    token: str,
+    cx: float = Query(..., allow_inf_nan=False, description="Centre of the plane: voxel X"),
+    cy: float = Query(..., allow_inf_nan=False, description="Centre of the plane: voxel Y"),
+    cz: float = Query(..., allow_inf_nan=False, description="Centre of the plane: voxel Z"),
+    rx: float = Query(0.0, ge=-360, le=360, allow_inf_nan=False, description="Rotation about the X axis, degrees"),
+    ry: float = Query(0.0, ge=-360, le=360, allow_inf_nan=False, description="Rotation about the Y axis, degrees"),
+    rz: float = Query(0.0, ge=-360, le=360, allow_inf_nan=False, description="Rotation about the Z axis, degrees"),
+    size: int = Query(768, ge=64, le=2048, description="Width and height of the image in pixels"),
+    scale: float = Query(1.0, ge=0.05, le=64, allow_inf_nan=False, description="Pixel size, in multiples of the finest voxel spacing"),
+    order: int = Query(1, ge=0, le=1, description="Interpolation: 0 nearest, 1 linear"),
+    channel: int = Query(0, ge=0),
+    enc: str = Query("identity", description="identity (raw, the default) or zstd (Content-Encoding: zstd)"),
+    level: int = Query(0, ge=0),
+    session: Session = Depends(get_session),
+):
+    """An angled slice: the XY plane through (cx, cy, cz) rotated by rx, ry, rz degrees about the
+    volume's x, y and z axes (in that order). Same body and X-Plane-* headers as a plane request;
+    X-Oblique-U / -V (unit vectors of the image rows / columns, physical x,y,z) and X-Oblique-Pixel
+    (physical size of one pixel) describe where the pixels are. 413 when the plane is too large to
+    extract at this scale (VG_OBLIQUE_MAX_BOX_MB): ask for a smaller `scale` or `size`."""
+    vs = _slice_store(volume_id, token, level, session)
+    try:
+        body, headers = oblique_response_parts(vs, (cx, cy, cz), (rx, ry, rz), size, scale, order, channel, enc)
+    except SliceError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc))
+    headers["Cache-Control"] = f"private, max-age={settings.FILE_TOKEN_EXPIRE_MINUTES * 60}"
+    return Response(content=body, media_type="application/octet-stream", headers=headers)
 
 
 @router.get("/{volume_id}/slices/{token}/{axis}/{index}")

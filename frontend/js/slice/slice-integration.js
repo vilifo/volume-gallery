@@ -2,8 +2,8 @@
 // is fetched or allocated until a slice layout is chosen), the layout switcher, URL
 // parameters, and the 3D overlay's link to the current kiln viewer.
 
-import { SliceViews } from "./slice-views.js?v=meas1";
-import { mountSliceControls, mountSlicePlaceholder } from "./slice-controls.js";
+import { SliceViews } from "./slice-views.js?v=ang1";
+import { mountSliceControls, mountSlicePlaceholder } from "./slice-controls.js?v=ang1";
 import { mountMeasureControls } from "./measure-ui.js?v=meas1";
 import { mountDebugPanel } from "./debug-panel.js";
 

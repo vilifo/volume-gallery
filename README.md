@@ -174,6 +174,11 @@ What lives where afterwards:
   taken, …) are deleted from the `.uploads` folders after
   `VG_UPLOAD_STAGING_MAX_AGE_HOURS` (default 24). An upload that is aborted
   half-way is removed by nginx immediately.
+- **Angled slices.** The slice views can show a plane at any angle through the cursor
+  (layout *Angled*, angles in the *Slice views* panel), served by
+  `GET /api/volumes/<id>/slices/<token>/oblique`. The server reads only the bricks the plane touches, but
+  needs a dense box around the plane in memory: `VG_OBLIQUE_MAX_BOX_MB` (default 4096) caps it, and
+  the viewer then asks the user to zoom in.
 - **Job queue.** Conversions (volumes, meshes, point clouds) run in a separate worker
   container (`volume-gallery-worker`) fed through Redis ([RQ](https://python-rq.org)), so
   restarting or redeploying the web app no longer kills a running conversion. Set

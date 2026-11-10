@@ -6,7 +6,11 @@ import { MAX_MEASURES, decodeMeasures, encodeMeasures, roundPoint } from "./meas
 import { decodeTf, encodeTf, normalizeStops, presetStops } from "./transfer-function.js";
 
 
-export const LAYOUTS = ["3d", "quad", "xy", "xz", "yz"];
+export const LAYOUTS = ["3d", "quad", "xy", "xz", "yz", "angled"];
+
+// Angled slice: rotation about the volume's x, y, z axes (degrees) and the field-of-view factor (see oblique-pane.js)
+export const ANGLE_LIMIT = 180;
+export const FOV_RANGE = [0.05, 4];
 
 export class SliceState {
   /**
@@ -28,6 +32,7 @@ export class SliceState {
     this.invert = false;
     this.channel = 0;
     this.layout = LAYOUTS.includes(layout) ? layout : "3d";
+    this.angled = { rx: 0, ry: 0, rz: 0, fov: 1 }; // the angled slice: XY plane rotated about x, then y, then z; fov: 1 = default, < 1 zoomed in
     this.linkZoom = false;
     this.showCrosshair = true;
     this.showScaleBar = true; // length reference in each slice pane
@@ -151,6 +156,25 @@ export class SliceState {
     this._emit("tf");
   }
 
+  /** Changes the angled slice: any of { rx, ry, rz } (degrees, -180..180) and fov (field-of-view factor). */
+  setAngled(patch, source = null) {
+    const next = { ...this.angled };
+    for (const k of ["rx", "ry", "rz"]) {
+      if (patch[k] === undefined || !Number.isFinite(patch[k])) continue;
+      next[k] = Math.round(clamp(patch[k], -ANGLE_LIMIT, ANGLE_LIMIT) * 10) / 10;
+    }
+    if (patch.fov !== undefined && Number.isFinite(patch.fov)) next.fov = +clamp(patch.fov, FOV_RANGE[0], FOV_RANGE[1]).toPrecision(4);
+    if (["rx", "ry", "rz", "fov"].every((k) => next[k] === this.angled[k])) return false;
+    this.angled = next;
+    this._emit("angled", { angled: { ...next }, source });
+    return true;
+  }
+
+  /** Back to the XY plane at the default field of view. */
+  resetAngled(source = null) {
+    return this.setAngled({ rx: 0, ry: 0, rz: 0, fov: 1 }, source);
+  }
+
   setLayout(layout) {
     if (!LAYOUTS.includes(layout) || layout === this.layout) return;
     this.layout = layout;
@@ -257,6 +281,8 @@ export class SliceState {
       p.win = `${+this.window.center.toPrecision(7)},${+this.window.width.toPrecision(7)}`;
     }
     if (this.channel) p.ch = String(this.channel);
+    const a = this.angled;
+    if (a.rx || a.ry || a.rz || a.fov !== 1) p.ang = `${a.rx},${a.ry},${a.rz}${a.fov !== 1 ? `,${a.fov}` : ""}`;
     if (this.tf.preset !== "gray") p.stf = encodeTf(this.tf);
     if (this.measures.length) p.meas = encodeMeasures(this.measures); // the distances travel with the link
     return p;
@@ -271,6 +297,10 @@ export class SliceState {
     if (win.length === 2 && win.every(Number.isFinite) && win[1] > 0) this.setWindow({ center: win[0], width: win[1] });
     const ch = Number(get("ch"));
     if (Number.isFinite(ch) && get("ch") !== null) this.setChannel(ch);
+    const ang = (get("ang") ?? "").split(",").map(Number);
+    if (ang.length >= 3 && ang.length <= 4 && ang.every(Number.isFinite)) {
+      this.setAngled({ rx: ang[0], ry: ang[1], rz: ang[2], ...(ang.length === 4 && ang[3] > 0 ? { fov: ang[3] } : {}) }, "url");
+    }
     const tf = decodeTf(get("stf") ?? "");
     if (tf) {
       this.tf = tf;
