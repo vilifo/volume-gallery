@@ -41,6 +41,14 @@ class Settings:
     HISTOGRAM_THREADS: int = int(os.environ.get("VG_HISTOGRAM_THREADS", str(min(4, os.cpu_count() or 2))))
     HISTOGRAM_BACKFILL: bool = os.environ.get("VG_HISTOGRAM_BACKFILL", "1").lower() not in ("0", "false", "no", "off")
 
+    # --- Job queue (Redis + RQ) ---
+    # When set (e.g. redis://redis:6379/0), uploads are converted by a separate worker process
+    # (python -m app.worker) instead of inside the web process. Unset = the old in-process behaviour.
+    REDIS_URL: str = os.environ.get("VG_REDIS_URL", "")
+    QUEUE_NAME: str = os.environ.get("VG_QUEUE_NAME", "volume-gallery")
+    # Longest a queued conversion may run before RQ kills it (hours; 0 = RQ's no-limit)
+    JOB_TIMEOUT_SECONDS: float = float(os.environ.get("VG_JOB_TIMEOUT_HOURS", "72")) * 3600
+
     # Folder with branding.toml and the logo files (see branding/branding.toml). The default is
     # <repo>/branding, which is /branding inside the Docker image.
     BRANDING_DIR: Path = Path(os.environ.get("VG_BRANDING_DIR") or Path(__file__).resolve().parents[2] / "branding")
@@ -115,4 +123,4 @@ _tmp.mkdir(parents=True, exist_ok=True)
 (settings.PROCESSING_DIR / ".uploads").mkdir(parents=True, exist_ok=True)
 (settings.DATA_DIR / ".uploads").mkdir(parents=True, exist_ok=True)
 tempfile.tempdir = str(_tmp)
-os.environ["TMPDIR"] = str(_tmp)
+os.environ["TMPDIR"] = str(_tmp)

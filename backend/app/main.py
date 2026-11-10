@@ -11,7 +11,7 @@ from .database import init_db, engine
 from .models import User, Role, Volume, Mesh, PointCloud, AssetStatus
 from .security import hash_password
 from .config import settings, check_secret_key
-from . import workdir
+from . import workdir, jobs
 from .utils import _now
 from .routers import auth, users, volumes, meshes, pointclouds, branding, shares, uploads, folders, paths, bookmarks, admin
 
@@ -39,18 +39,23 @@ def _bootstrap_admin():
 
 
 def _recover_interrupted_jobs():
-    """Uploads are processed by background tasks inside this process, so a
+    """Without a job queue, uploads are processed by background tasks inside this process, so a
     restart (routine under Docker: redeploys, `docker compose up --build`,
     host reboots) kills any job in flight. Nothing is processing at startup,
     so mark such assets failed — the gallery would otherwise show them as
-    "processing" forever — and clear the scratch space they left behind."""
-    keep = set()  # scratch folders still in use: assets waiting for their TIFF slices
+    "processing" forever — and clear the scratch space they left behind.
+
+    With a queue (VG_REDIS_URL) the jobs live in the worker and survive a restart of this
+    process, so this is the worker's job instead (app/worker.py), and only when it starts.
+    `live` are (kind, slug) pairs whose job is still queued/running; they are left alone."""
+    live = jobs.live_assets() if jobs.enabled() else set()
+    keep = set(live)  # scratch folders still in use: assets waiting for their TIFF slices, or with a live job
     with Session(engine) as session:
         for model, kind, label in (
             (Volume, "volumes", "volume"), (Mesh, "meshes", "mesh"), (PointCloud, "pointclouds", "point cloud"),
         ):
             for asset in session.exec(select(model)).all():
-                if asset.status == AssetStatus.processing:
+                if asset.status == AssetStatus.processing and (kind, asset.slug) not in live:
                     asset.status = AssetStatus.failed
                     asset.status_log = (asset.status_log or "") + (
                         f"{_now()}  Failed: processing was interrupted by a server restart — "
@@ -61,7 +66,7 @@ def _recover_interrupted_jobs():
                 elif asset.status == AssetStatus.uploaded:
                     keep.add((kind, asset.slug))
         session.commit()
-    workdir.clear_stale(keep)
+    workdir.clear_stale(keep, clear_tmp=not jobs.enabled())  # the web process spools uploads in .tmp
     workdir.sweep_staging()  # staged uploads (see routers/uploads.py) that nobody claimed
 
 
@@ -70,7 +75,10 @@ async def lifespan(app: FastAPI):
     check_secret_key()
     init_db()
     _bootstrap_admin()
-    _recover_interrupted_jobs()
+    if not jobs.enabled():  # with a queue the worker does this at its start (app/worker.py)
+        _recover_interrupted_jobs()
+    else:
+        workdir.sweep_staging()
     if settings.HISTOGRAM_BACKFILL:  # not on the startup path: a big volume can take minutes
         threading.Thread(target=volumes.backfill_missing_histograms, name="histogram-backfill", daemon=True).start()
     print(f"[volume-gallery] Processing uploads in {settings.PROCESSING_DIR}; results are stored in {settings.DATA_DIR}.")
@@ -104,4 +112,4 @@ def service_worker():
     )
 
 
-app.mount("/", StaticFiles(directory=settings.FRONTEND_DIR, html=True), name="frontend")
+app.mount("/", StaticFiles(directory=settings.FRONTEND_DIR, html=True), name="frontend")

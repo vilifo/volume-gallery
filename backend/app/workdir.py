@@ -194,14 +194,20 @@ def claim_upload(upload_id: str, kind: str, user_id: int) -> StagedUpload:
     return StagedUpload(path, m["name"])
 
 
-def accept_upload(upload, staged, dst: Path):
+def accept_upload(upload, staged, dst: Path, save_now: bool = False):
     """Puts an upload where it belongs. `staged` (a claimed upload id) is renamed to `dst`
     right away and None is returned; otherwise `upload` is a multipart UploadFile and its
-    detached descriptor is returned, to be copied to `dst` later by save_detached()."""
+    detached descriptor is returned, to be copied to `dst` later by save_detached().
+    `save_now`: copy it to `dst` inside the request instead and return None. Needed when the job
+    runs in another process (the job queue), which cannot inherit the descriptor."""
     if staged is not None:
         move_file(staged.path, dst)
         return None
-    return detach_upload(upload)
+    fd = detach_upload(upload)
+    if save_now:
+        save_detached(fd, dst)
+        return None
+    return fd
 
 
 # Staged uploads a create request has claimed but whose move into the scratch folder has not
@@ -282,11 +288,12 @@ def _remove(path: Path) -> None:
         path.unlink(missing_ok=True)
 
 
-def clear_stale(keep: set) -> None:
+def clear_stale(keep: set, clear_tmp: bool = True) -> None:
     """Startup housekeeping. Deletes every scratch folder except those in
-    `keep` ((kind, slug) pairs — assets still waiting for their TIFF slices),
-    plus the temp files of any previous run. Nothing is processing at startup,
-    so everything else is left over from a crash or restart."""
+    `keep` ((kind, slug) pairs — assets still waiting for their TIFF slices, or
+    with a job in the queue), plus the temp files of any previous run (`clear_tmp`).
+    Without a job queue nothing is processing at startup, so everything else is left
+    over from a crash or restart."""
     for kind in KINDS:
         base = settings.PROCESSING_DIR / kind
         if not base.is_dir():
@@ -295,6 +302,6 @@ def clear_stale(keep: set) -> None:
             if (kind, child.name) not in keep:
                 _remove(child)
     tmp = settings.PROCESSING_DIR / ".tmp"
-    if tmp.is_dir():
+    if clear_tmp and tmp.is_dir():
         for child in tmp.iterdir():
             _remove(child)

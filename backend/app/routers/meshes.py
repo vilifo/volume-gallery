@@ -13,7 +13,7 @@ from ..schemas import MeshRead, AssetStatusRead, AssetUpdate, AccessGrant, Grant
 from ..deps import file_token_revoked, get_current_user, require_editor
 from ..security import create_file_token, decode_token
 from ..config import settings
-from .. import workdir
+from .. import workdir, jobs
 from ..organize import apply_asset_update, split_tags
 from ..helpers import read_thumbnail, write_thumbnail, store_thumbnail, remove_thumbnail, thumbnail_response
 from ..utils import SLUG_RE, _now  # shared slug validation + timestamp helper
@@ -129,7 +129,7 @@ def attach_mesh_to_volume(session: Session, volume, mesh_file: Optional[UploadFi
     try:
         workdir.prepare_work_dir("meshes", slug, mesh_dir)  # scratch for the conversion's temp files
         # multipart: copied into the data folder by the background task; staged: renamed there now
-        upload_fd = workdir.accept_upload(mesh_file, mesh_staged, mesh_dir / f"_upload.{source_ext}")
+        upload_fd = workdir.accept_upload(mesh_file, mesh_staged, mesh_dir / f"_upload.{source_ext}", jobs.enabled())
     except Exception as exc:  # noqa: BLE001
         shutil.rmtree(mesh_dir, ignore_errors=True)
         workdir.discard_job("meshes", slug)
@@ -146,7 +146,7 @@ def attach_mesh_to_volume(session: Session, volume, mesh_file: Optional[UploadFi
     session.add(volume)
     session.commit()
     session.refresh(mesh)
-    background_tasks.add_task(_process_mesh_upload, mesh.id, str(mesh_dir), upload_fd)
+    jobs.dispatch(background_tasks, session, "mesh", mesh, _process_mesh_upload, mesh.id, str(mesh_dir), upload_fd)
     return mesh
 
 
@@ -220,7 +220,7 @@ def create_mesh(
         workdir.prepare_work_dir("meshes", slug, mesh_dir)  # scratch for the conversion's temp files
         thumbnail_name = write_thumbnail(mesh_dir, *thumbnail) if thumbnail else None
         # multipart: copied into the data folder by the background task; staged: renamed there now
-        upload_fd = workdir.accept_upload(mesh_file, staged, mesh_dir / f"_upload.{source_ext}")
+        upload_fd = workdir.accept_upload(mesh_file, staged, mesh_dir / f"_upload.{source_ext}", jobs.enabled())
     except Exception as exc:  # noqa: BLE001
         shutil.rmtree(mesh_dir, ignore_errors=True)
         workdir.discard_job("meshes", slug)
@@ -235,7 +235,7 @@ def create_mesh(
     session.commit()
     session.refresh(mesh)
 
-    background_tasks.add_task(_process_mesh_upload, mesh.id, str(mesh_dir), upload_fd)
+    jobs.dispatch(background_tasks, session, "mesh", mesh, _process_mesh_upload, mesh.id, str(mesh_dir), upload_fd)
 
     return _mesh_read(mesh, can_download=True)
 
@@ -549,4 +549,4 @@ def serve_mesh_subfile(
         return FileResponse(nxz_path, media_type="application/octet-stream", headers=cache_headers)
 
     tex_path = _resolve_safe_mesh_asset(m_dir, filename)
-    return FileResponse(tex_path, headers=cache_headers)
+    return FileResponse(tex_path, headers=cache_headers)

@@ -13,7 +13,7 @@ from ..schemas import PointCloudRead, AssetStatusRead, AssetUpdate, AccessGrant,
 from ..deps import file_token_revoked, get_current_user, require_editor
 from ..security import create_file_token, decode_token
 from ..config import settings
-from .. import workdir
+from .. import workdir, jobs
 from ..organize import apply_asset_update, split_tags
 from ..helpers import convert_pointcloud, read_thumbnail, write_thumbnail, store_thumbnail, remove_thumbnail, thumbnail_response
 from .volumes import SLUG_RE, _now
@@ -122,7 +122,7 @@ def create_pointcloud(
         thumbnail_name = write_thumbnail(pc_dir, *thumbnail) if thumbnail else None
         upload_path = work_dir / f"_upload{source_ext}"  # upload stays in scratch; never copied into data
         # multipart: copied to upload_path by the background task; staged: renamed there now
-        upload_fd = workdir.accept_upload(pointcloud_file, staged, upload_path)
+        upload_fd = workdir.accept_upload(pointcloud_file, staged, upload_path, jobs.enabled())
     except Exception as exc:  # noqa: BLE001
         shutil.rmtree(pc_dir, ignore_errors=True)
         workdir.discard_job("pointclouds", slug)
@@ -137,7 +137,8 @@ def create_pointcloud(
     session.commit()
     session.refresh(pc)
 
-    background_tasks.add_task(_process_pointcloud_upload, pc.id, str(pc_dir), str(upload_path), upload_fd)
+    jobs.dispatch(background_tasks, session, "pointcloud", pc, _process_pointcloud_upload,
+                  pc.id, str(pc_dir), str(upload_path), upload_fd)
 
     return _pointcloud_read(pc)
 
@@ -396,4 +397,4 @@ def serve_pointcloud_download(pc_id: int, token: str, session: Session = Depends
         zip_path,
         filename=f"{pc.slug}.zip",
         headers={"Cache-Control": f"public, max-age={settings.FILE_TOKEN_EXPIRE_MINUTES * 60}, immutable"},
-    )
+    )

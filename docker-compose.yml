@@ -25,6 +25,21 @@ services:
       - ${VG_HOST_DATA_DIR:-./data}:/data
       - ${VG_HOST_PROCESSING_DIR:-./processing}:/processing
 
+  # Job queue for the conversions (volume / mesh / point cloud). AOF keeps queued jobs across a
+  # restart of this container. Not published: only the app and the worker talk to it.
+  redis:
+    image: redis:7-alpine
+    container_name: volume-gallery-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--save", ""]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
   volume-gallery:
     build:
       context: .
@@ -47,7 +62,11 @@ services:
     depends_on:
       volume-gallery-init:
         condition: service_completed_successfully
+      redis:
+        condition: service_healthy
     environment:
+      VG_REDIS_URL: ${VG_REDIS_URL:-redis://redis:6379/0}
+      VG_JOB_TIMEOUT_HOURS: ${VG_JOB_TIMEOUT_HOURS:-72}
       VG_SECRET_KEY: ${VG_SECRET_KEY:?set VG_SECRET_KEY in .env (at least 32 characters, e.g. openssl rand -hex 32)}
       VG_ADMIN_USER: ${VG_ADMIN_USER:-admin}
       VG_ADMIN_PASSWORD: ${VG_ADMIN_PASSWORD}
@@ -61,6 +80,42 @@ services:
       - ${VG_HOST_DATA_DIR:-./data}:/data
       - ${VG_HOST_PROCESSING_DIR:-./processing}:/processing
       - ${VG_HOST_BRANDING_DIR:-./branding}:/branding:ro
+
+  # Runs the conversions queued by the web app (same image, other command). It needs the same
+  # data / processing folders, uid and settings as the app. One job at a time per container:
+  #   docker compose up -d --scale volume-gallery-worker=2   for more parallelism (mind the RAM).
+  volume-gallery-worker:
+    image: ${VG_IMAGE:-volume-gallery:latest}
+    shm_size: '1gb'
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 2m
+    user: ${VG_UID:-0}:${VG_GID:-0}
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+    command: ["python", "-m", "app.worker"]
+    healthcheck:
+      disable: true  # the image's check probes the web server on :8000
+    depends_on:
+      volume-gallery-init:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      volume-gallery:
+        condition: service_healthy
+    environment:
+      VG_REDIS_URL: ${VG_REDIS_URL:-redis://redis:6379/0}
+      VG_SECRET_KEY: ${VG_SECRET_KEY:?set VG_SECRET_KEY in .env (at least 32 characters, e.g. openssl rand -hex 32)}
+      VG_CONVERTER_TIMEOUT_HOURS: ${VG_CONVERTER_TIMEOUT_HOURS:-24}
+      VG_PROCESSING_DIR: ${VG_PROCESSING_DIR:-}
+    volumes:
+      - ${VG_HOST_DATA_DIR:-./data}:/data
+      - ${VG_HOST_PROCESSING_DIR:-./processing}:/processing
 
   nginx:
     build:
@@ -97,3 +152,6 @@ services:
       # Where mesh uploads land (the mesh original is kept in the data folder). Only this one
       # subdirectory of the data folder is writable for nginx.
       - ${VG_HOST_DATA_DIR:-./data}/.uploads:/data/.uploads
+
+volumes:
+  redis-data:

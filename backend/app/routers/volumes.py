@@ -15,7 +15,7 @@ from ..schemas import VolumeRead, AssetStatusRead, AssetUpdate, AccessGrant, Fil
 from ..deps import file_token_revoked, get_current_user, require_editor
 from ..security import create_file_token, decode_token
 from ..config import settings
-from .. import workdir
+from .. import workdir, jobs
 from ..organize import apply_asset_update, split_tags
 from ..helpers import SliceError, open_volume_slices, plane_response_parts
 from ..helpers import volume_meta_path, process_zip, decompose_tiff_stack, RANGE_RE, SHARDED_FILE_RE, decompress_gzip, detect_level_is_tiled66, unshuffle_tiled66_to_66_bytes, compress_gzip_66, ensure_legacy66_level_files, compress_gzip_66_exact_size
@@ -266,13 +266,19 @@ def create_volume(
         thumbnail_name = write_thumbnail(vol_dir, *thumbnail) if thumbnail else None
         # A multipart upload is copied into the scratch folder by the background task, so
         # the response isn't held up by it (see workdir.detach_upload).
+        # With a job queue the worker is another process and cannot inherit the descriptors, so
+        # multipart uploads are copied into the scratch folder here (the response waits for it).
+        save_now = jobs.enabled()
         if has_zip:
             if staged_zip is not None:
                 moves = [(staged_zip.path, work_dir / ZIP_NAME)]
             else:
-                upload_fd = workdir.detach_upload(tiff_zip)
+                upload_fd = workdir.accept_upload(tiff_zip, None, work_dir / ZIP_NAME, save_now)
         elif staged_files:
             moves = [(staged.path, work_dir / f"flice_{i:05d}.tiff") for i, staged in enumerate(staged_files)]
+        elif save_now:
+            for i, f in enumerate(tiff_files):
+                workdir.accept_upload(f, None, work_dir / f"flice_{i:05d}.tiff", True)
         else:
             upload_fds = [workdir.detach_upload(f) for f in tiff_files]
         workdir.reserve_uploads([src for src, _dst in moves])
@@ -317,8 +323,8 @@ def create_volume(
             session.commit()
             raise
 
-    background_tasks.add_task(
-        _process_upload,
+    jobs.dispatch(
+        background_tasks, session, "volume", volume, _process_upload,
         volume.id,
         str(vol_dir),
         source_kind,

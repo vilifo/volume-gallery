@@ -174,7 +174,16 @@ What lives where afterwards:
   taken, …) are deleted from the `.uploads` folders after
   `VG_UPLOAD_STAGING_MAX_AGE_HOURS` (default 24). An upload that is aborted
   half-way is removed by nginx immediately.
-- On startup, scratch folders left behind by a crash or restart are removed.
+- **Job queue.** Conversions (volumes, meshes, point clouds) run in a separate worker
+  container (`volume-gallery-worker`) fed through Redis ([RQ](https://python-rq.org)), so
+  restarting or redeploying the web app no longer kills a running conversion. Set
+  `VG_REDIS_URL` (compose sets it to the bundled `redis` service) to enable it; without it the
+  app converts inside the web process as before. The worker runs one job at a time; scale with
+  `docker compose up -d --scale volume-gallery-worker=2`. Because the worker is another
+  process, a multipart upload (no nginx hand-over) is copied into the scratch folder before the
+  response is sent. `VG_JOB_TIMEOUT_HOURS` (default 72) caps one job.
+- On startup, scratch folders left behind by a crash or restart are removed (with the queue:
+  when a worker starts, and only for assets whose job is no longer queued or running).
   Assets that were still processing at that point (a restart kills the
   background job) are marked `failed` with an explanatory log line — delete
   and re-upload them. Volumes still waiting for their TIFF slices keep theirs.

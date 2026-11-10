@@ -1,7 +1,7 @@
 from sqlmodel import SQLModel, create_engine, Session
 from .config import settings
 
-engine = create_engine(f"sqlite:///{settings.DB_PATH}", connect_args={"check_same_thread": False})
+engine = create_engine(f"sqlite:///{settings.DB_PATH}", connect_args={"check_same_thread": False, "timeout": 30})
 
 
 # Columns added after the first release. create_all() only creates missing tables, it never
@@ -29,4 +29,4 @@ def init_db():
 
 def get_session():
     with Session(engine) as session:
-        yield session
+        yield session
