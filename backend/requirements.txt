@@ -15,4 +15,4 @@ isal==1.8.0
 zstandard==0.25.0
 scipy==1.18.1
 # --- Mesh processing ---
-pymeshlab==2025.7
+pymeshlab==2025.7.post1
