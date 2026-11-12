@@ -132,7 +132,7 @@ def extract_zip_parallel(zip_path, extract_to):
             raise
 
 
-def _find_tiff_dir(scratch_dir: Path) -> Optional[Path]:
+def find_tiff_dir(scratch_dir: Path) -> Optional[Path]:
     """Breadth-first search for the shallowest directory containing at least
     one .tif/.tiff file."""
     queue = deque([scratch_dir])

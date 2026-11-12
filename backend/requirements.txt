@@ -11,11 +11,11 @@ tifffile==2026.10.15
 numpy==2.5.4
 dask==2026.8.0
 # --- Slice views: zstd-compressed planes ---
-isal==1.8.0
+isal==1.9.1
 zstandard==0.25.0
 scipy==1.18.1
 # --- Mesh processing ---
-pymeshlab==2025.7
+pymeshlab==2025.7.post1
 pillow==13.0.0
 # --- Job queue ---
 redis==6.4.0
