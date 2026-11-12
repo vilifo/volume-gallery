@@ -4,7 +4,7 @@
 // GPU feature are needed: r8/r16 uint/sint and r32float all work everywhere.
 
 import { textureFormatFor, minifyTaps } from "./geometry.js";
-import { TF_SIZE, buildLut, presetStops } from "./transfer-function.js";
+import { TF_SIZE, buildLutTable, presetStops } from "./transfer-function.js";
 
 const WGSL = (sampleType, toF32) => /* wgsl */ `
 struct U {
@@ -16,7 +16,7 @@ struct U {
 };
 @group(0) @binding(0) var<uniform> u: U;
 @group(0) @binding(1) var plane: texture_2d<${sampleType}>;
-@group(0) @binding(2) var lut: texture_2d<f32>;   // transfer function: N x 1 RGBA, indexed by the windowed value
+@group(0) @binding(2) var lut: texture_2d<f32>;   // transfer function: N x 2; row 0 colours (indexed by the colour-scale position), row 1 opacity (red; indexed by the windowed value)
 
 
 fn texel(p: vec2i) -> f32 {
@@ -75,7 +75,8 @@ fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
     v = acc / f32(taps * taps);
   }
 
-  var g = clamp((v - (u.c.z - u.c.w * 0.5)) / u.c.w, 0.0, 1.0);
+  let g0 = clamp((v - (u.c.z - u.c.w * 0.5)) / u.c.w, 0.0, 1.0);   // the windowed value
+  var g = g0;
   if (u.d.z > 0.5) { g = 1.0 - g; }
   if (u.e.x > 0.5) {
     let n = u.e.y;
@@ -84,7 +85,12 @@ fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
     let i1 = min(i0 + 1, i32(n) - 1);
     let c0 = textureLoad(lut, vec2i(i0, 0), 0).rgb;
     let c1 = textureLoad(lut, vec2i(i1, 0), 0).rgb;
-    return vec4f(mix(c0, c1, f - floor(f)), 1.0);
+    // opacity follows the data value, not the (possibly inverted) colour scale
+    let fa = g0 * (n - 1.0);
+    let j0 = i32(floor(fa));
+    let j1 = min(j0 + 1, i32(n) - 1);
+    let alpha = mix(textureLoad(lut, vec2i(j0, 1), 0).r, textureLoad(lut, vec2i(j1, 1), 0).r, fa - floor(fa));
+    return vec4f(mix(vec3f(bg), mix(c0, c1, f - floor(f)), alpha), 1.0);
   }
   return vec4f(g, g, g, 1.0);
 }
@@ -122,16 +128,16 @@ export class SliceRenderer {
     this.uploadBytes = 0;
     // One transfer function (colour lookup table) shared by every pane
     this.lutTexture = device.createTexture({
-      size: [TF_SIZE, 1],
+      size: [TF_SIZE, 2],
       format: "rgba8unorm",
       usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
     });
-    this.setLut(buildLut(presetStops("gray")));
+    this.setLut(buildLutTable(presetStops("gray"), null));
   }
 
-  /** Uploads the transfer function: TF_SIZE RGBA entries (see transfer-function.js). */
+  /** Uploads the transfer function: the TF_SIZE x 2 table of buildLutTable (see transfer-function.js). */
   setLut(rgba) {
-    this.device.queue.writeTexture({ texture: this.lutTexture }, rgba, { bytesPerRow: TF_SIZE * 4 }, [TF_SIZE, 1]);
+    this.device.queue.writeTexture({ texture: this.lutTexture }, rgba, { bytesPerRow: TF_SIZE * 4 }, [TF_SIZE, 2]);
 
   }
 
