@@ -2,9 +2,9 @@
 // is fetched or allocated until a slice layout is chosen), the layout switcher, URL
 // parameters, and the 3D overlay's link to the current kiln viewer.
 
-import { SliceViews } from "./slice-views.js?v=mpr1";
-import { mountSliceControls, mountSlicePlaceholder } from "./slice-controls.js?v=mpr1";
-import { mountMeasureControls } from "./measure-ui.js?v=mpr1";
+import { SliceViews } from "./slice-views.js?v=mpr2";
+import { mountSliceControls, mountSlicePlaceholder } from "./slice-controls.js?v=mpr2";
+import { mountMeasureControls } from "./measure-ui.js?v=mpr2";
 import { mountDebugPanel } from "./debug-panel.js";
 
 /**
@@ -26,6 +26,7 @@ export function setupSliceIntegration({ grid, seg, getAccessUrl, params, onError
   let unsubMeasuring = null;
   let unmountDebug = null;
   let controlsHost = null;
+  let histogram = null; // the volume's intensity histogram: drawn behind the opacity curve of the controls
   const buttons = [...seg.querySelectorAll("button[data-layout]")];
 
   const highlight = (layout) => {
@@ -43,7 +44,7 @@ export function setupSliceIntegration({ grid, seg, getAccessUrl, params, onError
         if (viewer) v.attachViewer(viewer);
         if (controlsHost) {
           unmountControls?.(); // the placeholder, if that is what is mounted
-          unmountControls = mountSliceControls(controlsHost, v);
+          unmountControls = mountSliceControls(controlsHost, v, { getHistogram: () => histogram });
           unmountMeasure?.();
           unmountMeasure = mountMeasureControls(controlsHost, { views: v, onEnable: enableMeasure });
         }
@@ -111,13 +112,15 @@ export function setupSliceIntegration({ grid, seg, getAccessUrl, params, onError
     /** fn(on) whenever the ruler is switched on or off; returns an unsubscribe function. */
     onMeasuring(fn) { measuringListeners.add(fn); return () => measuringListeners.delete(fn); },
     get measuring() { return !!views?.state.measuring; },
+    /** The volume's intensity histogram as the server stores it ({counts, min, max}); null if it has none. */
+    setHistogram(h) { histogram = h ?? null; },
     attachViewer(v) { viewer = v; views?.attachViewer(v); },
     detachViewer() { viewer = null; views?.detachViewer(); },
     /** (Re)builds the panel section; call after every control panel build. */
     mountControls(panelBody) {
       controlsHost = panelBody;
       unmountControls?.();
-      unmountControls = views ? mountSliceControls(panelBody, views) : mountSlicePlaceholder(panelBody, enableCursor);
+      unmountControls = views ? mountSliceControls(panelBody, views, { getHistogram: () => histogram }) : mountSlicePlaceholder(panelBody, enableCursor);
       unmountMeasure?.();
       unmountMeasure = mountMeasureControls(panelBody, { views, onEnable: enableMeasure });
     },

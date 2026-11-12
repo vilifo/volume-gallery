@@ -188,13 +188,14 @@ function managing(role) {
 function userAdmin() {
   return `<p>Open <strong>Users</strong> in the side menu to:</p>
     <ul>
-      <li>create accounts and choose a role: <em>reader</em> (views what is shared with them), <em>editor</em> (uploads and manages items) or <em>admin</em> (also manages users);</li>
+      <li><strong>Add user</strong>: enter a username and choose a role: <em>reader</em> (views what is shared with them), <em>editor</em> (uploads and manages items) or <em>admin</em> (also manages users). The account is created without a password and you get a one-time link to give to the person, who opens it and chooses their own password. Until then the user is shown as <em>waiting for password</em>; <strong>New setup link</strong> makes a fresh link if it expired or got lost;</li>
       <li>change a role from the drop-down in the user\u2019s row;</li>
       <li><strong>Disable</strong> an account (it can no longer sign in) or enable it again;</li>
-      <li><strong>Reset password</strong>: set a new password for someone who has forgotten theirs. They are signed out everywhere and must use the new one;</li>
+      <li><strong>Reset password</strong>: makes a one-time link for someone who has forgotten their password. They open it and choose a new one, which signs them out everywhere else. Their old password keeps working until they do, and a link you made earlier stops working. Links expire after 72 hours (<code>VG_PASSWORD_LINK_HOURS</code>) and show only once;</li>
       <li><strong>Delete</strong> an account.</li>
     </ul>
-    <p>You cannot change your own role or delete yourself. Change your own password on the Account page.</p>`;
+    <p>You cannot change your own role or delete yourself. Change your own password on the Account page.</p>
+    <p>Everything done here is written to the <strong>Audit log</strong> (side menu): who created, changed or deleted accounts, made password links, signed in or failed to, uploaded or deleted items, gave or removed access and made share links. It is kept until you delete rows by setting <code>VG_AUDIT_RETENTION_DAYS</code> (days; 0 keeps everything).</p>`;
 }
 
 function account() {
@@ -320,7 +321,7 @@ const PAGE_HINTS = {
   },
   admin: {
     topic: "users",
-    text: () => "Create accounts and choose reader, editor or admin. You can also disable an account, reset a forgotten password or delete it.",
+    text: () => "Create accounts and choose reader, editor or admin: you get a one-time link for the new user to set their password. You can also disable an account, make a reset link for a forgotten password or delete it.",
   },
   account: {
     topic: "account",

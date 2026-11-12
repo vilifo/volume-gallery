@@ -8,7 +8,7 @@
 // not occluded by the volume; that is intended for position indicators.
 
 import { AXIS_COLORS, lineInBox, planeBoxPolygon } from "./geometry.js";
-import { distance, formatLength, measureLabel, voxelToWorld } from "./measure.js?v=mpr1";
+import { distance, formatLength, measureLabel, voxelToWorld } from "./measure.js?v=mpr2";
 
 /** Multiplies a column-major 4x4 matrix with a vec4. */
 export function mulMat4Vec4(m, v) {

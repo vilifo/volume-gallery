@@ -78,6 +78,7 @@ const NAV_ICONS = {
   gallery: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/></svg>`,
   upload: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>`,
   admin: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>`,
+  audit: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>`,
   help: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M9.1 9a3 3 0 0 1 5.8 1c0 2-3 3-3 3M12 17h.01"/></svg>`,
   shares: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>`,
   account: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>`,
@@ -562,6 +563,13 @@ export const api = {
     adminShares() {
         return request("/api/admin/shares");
     },
+    // the audit log, newest first: filters { action, actor, target, ip }, before = the previous page's next_before
+    adminAudit({limit = 100, before = null, action = "", actor = "", target = "", ip = ""} = {}) {
+        const q = new URLSearchParams({limit});
+        if (before) q.set("before", before);
+        for (const [k, v] of Object.entries({action, actor, target, ip})) if (v && v.trim()) q.set(k, v.trim());
+        return request(`/api/admin/audit?${q}`);
+    },
     adminStorage(refresh = false) {
         return request(`/api/admin/storage${refresh ? "?refresh=true" : ""}`);
     },
@@ -697,6 +705,8 @@ export const api = {
     listUsers() {
         return request("/api/users");
     },
+    // Creates an account without a password: resolves with { user, token, purpose, expires_at }; the user
+    // sets the password with the link passwordLinkUrl(token) (one use).
     createUser(payload) {
         return request("/api/users", {
             method: "POST",
@@ -711,10 +721,44 @@ export const api = {
             body: JSON.stringify(payload),
         });
     },
+    // A new one-time link to set the password of a user (a new account that has none, or a reset); the
+    // earlier links of the user stop working. Resolves like createUser.
+    createPasswordLink(id) {
+        return request(`/api/users/${id}/password-link`, {method: "POST"});
+    },
     deleteUser(id) {
         return request(`/api/users/${id}`, {method: "DELETE"});
     },
+
+    // setting a password from a link (no sign-in: the link is the credential)
+    checkPasswordLink(token) {
+        return publicPost("/api/auth/set-password/check", {token});
+    },
+    // Sets the password, uses the link up and resolves with a session like login() does.
+    setPasswordWithLink(token, password) {
+        return publicPost("/api/auth/set-password", {token, password});
+    },
 };
+
+// The link to hand to a user (the token is in the fragment: it is not sent to the server by the browser,
+// so it stays out of access logs and referrers).
+export function passwordLinkUrl(token) {
+    return `${window.location.origin}/set-password.html#token=${encodeURIComponent(token)}`;
+}
+
+async function publicPost(path, body) {
+    const res = await fetch(path, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
+    if (!res.ok) {
+        let detail = `Request failed (${res.status})`;
+        try {
+            const d = (await res.json()).detail;
+            detail = typeof d === "string" ? d : Array.isArray(d) ? d.map((e) => e.msg).join("; ") : detail;
+        } catch (_) {
+        }
+        throw new Error(detail);
+    }
+    return res.json();
+}
 
 // Theme preference: "light" | "dark" | absent (= follow the OS setting).
 // Keep THEME_KEY in sync with js/theme-init.js, which applies it before first paint.
@@ -782,6 +826,7 @@ export function renderShell(activePage, role, username) {
         if (role === "admin") {
             navItems.push({href: "/admin.html", label: "Users", key: "admin"});
             navItems.push({href: "/shares.html", label: "Shares", key: "shares"});
+            navItems.push({href: "/audit.html", label: "Audit log", key: "audit"});
         }
         // In a viewer the full Help opens in a new tab, so the viewer keeps its state (the viewer's own
         // Help button shows a small panel next to the view).

@@ -11,14 +11,14 @@
 // (a PaneGeometry), fetches the blocks that plan reads from (the ones most pixels need first) and shows the image
 // as it fills in.
 
-import { PlaneClient } from "./plane-client.js?v=mpr1";
-import { SliceRenderer, requestSliceDevice } from "./slice-renderer.js?v=mpr1";
-import { SliceState } from "./cursor.js?v=mpr1";
+import { createPlaneClient } from "./worker-plane-client.js?v=mpr2";
+import { SliceRenderer, requestSliceDevice } from "./slice-renderer.js?v=mpr2";
+import { SliceState } from "./cursor.js?v=mpr2";
 import { bindTouchGestures } from "./touch-gestures.js?v=org6";
-import { buildLut, isGrayRamp } from "./transfer-function.js";
-import { Overlay3D } from "./overlay-3d.js?v=mpr1";
-import { hitHandle, paneMeasureSvg, pointFromPane, roundPoint } from "./measure.js?v=mpr1";
-import { Measure3D } from "./measure-3d.js?v=mpr1";
+import { lutFor, needsLut } from "./transfer-function.js";
+import { Overlay3D } from "./overlay-3d.js?v=mpr2";
+import { hitHandle, paneMeasureSvg, pointFromPane, roundPoint } from "./measure.js?v=mpr2";
+import { Measure3D } from "./measure-3d.js?v=mpr2";
 import { ensureMeasureStyles } from "./measure-ui.js?v=meas1";
 import { niceScaleLength } from "../scalebar.js";
 import {
@@ -228,7 +228,7 @@ export class Pane {
     // while scrolling, the slice that was shown fills the picture until the blocks of the new one arrive
     const underlay = this.shown && sameFrame(this.shown.geom, geom) ? this.shown.plane : null;
     this.views.client
-      .loadPlane(geom.spec(), { channel: st.channel, priority: 2, signal: ac.signal, underlay, onUpdate: (asm) => this.onLoadUpdate(load, asm) })
+      .loadPlane(geom.spec(), { axis: this.axis, channel: st.channel, priority: 2, signal: ac.signal, underlay, onUpdate: (asm) => this.onLoadUpdate(load, asm) })
       .then(({ assembler }) => this.onLoadDone(load, assembler))
       .catch((err) => {
         if (err?.name === "AbortError" || this.load !== load) return;
@@ -276,6 +276,7 @@ export class Pane {
     load.swapped = true;
     this.error = null;
     this.shown = { geom: load.geom, key: load.key, plane: asm.plane, complete: asm.complete };
+    this.views.client.setShown?.(this.axis, asm.plane); // (a worker starts the next image from this one)
     this.views.requestRender();
   }
 
@@ -308,7 +309,7 @@ export class Pane {
     if (near > 6) return;
     const target = dir > 0 ? idx + near + 1 : idx - near - 1;
     if (target < 0 || target >= st.dims[normal]) return;
-    this.views.client.prefetchPlane(st.paneGeomAt(this.axis, { ...st.pos, [normal]: target + 0.5 }).spec(), { channel: st.channel });
+    this.views.client.prefetchPlane(st.paneGeomAt(this.axis, { ...st.pos, [normal]: target + 0.5 }).spec(), { axis: this.axis, channel: st.channel });
   }
 
   setBusy(on) {
@@ -345,7 +346,7 @@ export class Pane {
       flip: st.flips[this.axis],
       window: st.window,
       invert: st.invert,
-      lut: !isGrayRamp(st.tf.stops), // the plain grey ramp skips the colour table
+      lut: needsLut(st.tf), // the plain opaque grey ramp skips the colour table
     });
     this.drawOverlay(ppv);
     this.updateHeader();
@@ -845,7 +846,7 @@ export class SliceViews {
    */
   static async create({ grid, getAccessUrl, params = {}, fetchFn }) {
     const baseUrl = await getAccessUrl();
-    const client = new PlaneClient({ baseUrl, refreshUrl: getAccessUrl, fetchFn });
+    const client = await createPlaneClient({ baseUrl, refreshUrl: getAccessUrl, fetchFn }); // (workers sharing one cache where the page can have them)
     try {
       const info = await client.info();
       if (!textureFormatFor(info.dtype)) throw new Error(`Slice views do not support ${info.dtype} data`);
@@ -874,7 +875,7 @@ export class SliceViews {
       if (["cursor", "pan", "scroll", "window", "measure"].includes(saved)) this.touchTool = saved;
     } catch (_) { /* storage unavailable */ }
     this.renderer = new SliceRenderer(device);
-    this.renderer.setLut(buildLut(state.tf.stops));
+    this.renderer.setLut(lutFor(state.tf));
     this._raf = 0;
     this._disposed = false;
     this.pane3d = grid.querySelector("#pane-3d");
@@ -901,7 +902,7 @@ export class SliceViews {
       state.on("layout", () => this.applyLayout()),
       state.on("view", () => this.requestRender()),
       state.on("window", () => this.requestRender()),
-      state.on("tf", () => { this.renderer.setLut(buildLut(state.tf.stops)); this.requestRender(); }),
+      state.on("tf", () => { this.renderer.setLut(lutFor(state.tf)); this.requestRender(); }),
       state.on("option", () => this.requestRender()),
       state.on("measuring", () => { for (const p of Object.values(this.panes)) p.syncMeasuring(); this.requestRender(); }),
       state.on("measure", () => { if (!state.pending) for (const p of Object.values(this.panes)) p.rubber = null; this.requestRender(); }),
@@ -1065,7 +1066,7 @@ export class SliceViews {
     const geom = st.paneGeomAt(axis, pos, Math.min(this.device.limits.maxTextureDimension2D, 16384));
     const k = shownGeom.pixel / geom.pixel; // (the pane's image can be coarser than the full-resolution one)
     const full = { u0: Math.round(region.u0 * k), v0: Math.round(region.v0 * k), width: Math.min(geom.width, Math.round(region.width * k)), height: Math.min(geom.height, Math.round(region.height * k)) };
-    const { assembler } = await this.client.loadPlane(geom.spec(), { channel: st.channel, priority: 2 });
+    const { assembler } = await this.client.loadPlane(geom.spec(), { axis, channel: st.channel, priority: 2 });
     const plane = assembler.plane;
     const { width, height } = full;
     const flip = st.flips[axis];
@@ -1088,7 +1089,7 @@ export class SliceViews {
     const gpu = this.renderer.createPane();
     try {
       this.renderer.upload(gpu, plane);
-      const gray = isGrayRamp(st.tf.stops);
+      const gray = !needsLut(st.tf);
       const rgba = await this.renderer.renderToPixels(gpu, {
         width,
         height,

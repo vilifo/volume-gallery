@@ -80,6 +80,79 @@ export function insertStop(stops, pos) {
   return normalizeStops([...stops, { pos: p, color: rgbToHex(sampleStops(stops, p)) }]);
 }
 
+// ------------------------------------------------------------------------------------------ opacity
+// The opacity curve: points {x, y} over the windowed value (x: 0 = bottom of the window, 1 = top; y: 0 = the
+// background shows, 1 = the colour). Linear between points. Unlike the colour stops it does not follow "Invert":
+// it belongs to the data values, so it lines up with the histogram.
+
+export const defaultAlpha = () => [{ x: 0, y: 1 }, { x: 1, y: 1 }];
+
+/** Sorted, clamped points that start at x = 0 and end at x = 1 (missing end points are added at the nearest
+ *  opacity). Returns null if no valid point remains. */
+export function normalizeAlpha(points) {
+  const ok = (points ?? [])
+    .filter((p) => p && Number.isFinite(p.x) && Number.isFinite(p.y))
+    .map((p) => ({ x: Math.min(1, Math.max(0, p.x)), y: Math.min(1, Math.max(0, p.y)) }))
+    .sort((a, b) => a.x - b.x);
+  if (!ok.length) return null;
+  const out = [];
+  for (const p of ok) {
+    if (out.length && p.x - out[out.length - 1].x < 1e-6) out[out.length - 1] = p; // same position: last wins
+    else out.push(p);
+  }
+  if (out[0].x > 0) out.unshift({ x: 0, y: out[0].y });
+  if (out[out.length - 1].x < 1) out.push({ x: 1, y: out[out.length - 1].y });
+  if (out.length < 2) out.push({ x: 1, y: out[0].y });
+  return out;
+}
+
+/** Opacity 0..1 at position t in 0..1. */
+export function sampleAlpha(points, t) {
+  const x = Math.min(1, Math.max(0, t));
+  let i = 1;
+  while (i < points.length - 1 && points[i].x < x) i++;
+  const a = points[i - 1], b = points[i];
+  const span = b.x - a.x;
+  return a.y + (b.y - a.y) * (span > 0 ? Math.min(1, Math.max(0, (x - a.x) / span)) : 0);
+}
+
+/** True when nothing is see-through (the colour table's opacity row can be skipped). */
+export const isOpaque = (points) => !points || points.every((p) => p.y >= 1);
+
+/** URL form of the opacity curve: "x:y,x:y,...". */
+export const encodeAlpha = (points) => points.map((p) => `${+p.x.toFixed(4)}:${+p.y.toFixed(4)}`).join(",");
+
+/** Inverse of encodeAlpha, or null for malformed input (strict: one bad entry rejects the whole value). */
+export function decodeAlpha(text) {
+  if (!text || !text.includes(":")) return null;
+  const pts = text.split(",").map((part) => {
+    const [x, y] = part.split(":");
+    return { x: x === "" ? NaN : Number(x), y: y === "" || y === undefined ? NaN : Number(y) };
+  });
+  if (pts.length < 2 || pts.some((p) => !Number.isFinite(p.x) || !Number.isFinite(p.y))) return null;
+  return normalizeAlpha(pts);
+}
+
+/**
+ * The 2-row table the slice shader reads (TF_SIZE x 2 RGBA): row 0 is the colour table (see buildLut), row 1
+ * holds the opacity in its red channel. `alpha` may be null (opaque).
+ */
+export function buildLutTable(stops, alpha, size = TF_SIZE) {
+  const out = new Uint8Array(size * 8);
+  out.set(buildLut(stops, size), 0);
+  for (let i = 0; i < size; i++) {
+    const a = Math.round(255 * (alpha ? sampleAlpha(alpha, i / (size - 1)) : 1));
+    out.set([a, a, a, 255], size * 4 + i * 4);
+  }
+  return out;
+}
+
+/** The table for a slice state's transfer function ({ stops, alpha }). */
+export const lutFor = (tf) => buildLutTable(tf.stops, tf.alpha);
+
+/** Whether the shader needs the table at all: not for the plain opaque grey ramp. */
+export const needsLut = (tf) => !isGrayRamp(tf.stops) || !isOpaque(tf.alpha);
+
 /** RGBA lookup table (opaque), `size` entries. */
 export function buildLut(stops, size = TF_SIZE) {
   const lut = new Uint8Array(size * 4);

@@ -1,5 +1,6 @@
 from typing import Literal, Optional, List
-from pydantic import BaseModel, Field, field_validator, model_validator
+from datetime import datetime
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from .models import Role, AssetStatus
 
 
@@ -11,16 +12,50 @@ class Token(BaseModel):
 
 
 class UserCreate(BaseModel):
-    username: str
-    password: str
+    """A new account has no password: the response carries the link with which its user sets one."""
+    username: str = Field(min_length=1, max_length=150)
     role: Role = Role.reader
+
+    @field_validator("username")
+    @classmethod
+    def _strip_username(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("Username must not be empty")
+        return v
 
 
 class UserRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
     id: int
     username: str
     role: Role
     disabled: bool
+    pending: bool = False  # created by an admin, no password set yet
+
+
+class UserLink(BaseModel):
+    """What an admin gets after creating an account or asking for a password reset: the one-time token (the
+    page builds the link /set-password.html#token=<token> from it). It is shown once; only its hash is kept."""
+    user: UserRead
+    token: str
+    purpose: Literal["setup", "reset"]
+    expires_at: datetime
+
+
+class SetPasswordCheck(BaseModel):
+    token: str
+
+
+class SetPasswordInfo(BaseModel):
+    username: str
+    purpose: Literal["setup", "reset"]
+    expires_at: datetime
+
+
+class SetPassword(BaseModel):
+    token: str
+    password: str
 
 
 class PasswordChange(BaseModel):
@@ -28,10 +63,28 @@ class PasswordChange(BaseModel):
     new_password: str
 
 
+class AuditEventRead(BaseModel):
+    id: int
+    at: datetime
+    actor_id: Optional[int] = None
+    actor_name: str = ""
+    action: str
+    target_type: str = ""
+    target_id: Optional[int] = None
+    target_name: str = ""
+    detail: dict = {}
+    ip: str = ""
+
+
+class AuditPage(BaseModel):
+    events: List[AuditEventRead]
+    next_before: Optional[int] = None  # pass as `before` for the next (older) page; None at the end
+
+
 class UserUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")  # (an admin no longer sets other people's passwords: they use a link)
     role: Optional[Role] = None
     disabled: Optional[bool] = None
-    password: Optional[str] = None
 
 
 class AssetRead(BaseModel):

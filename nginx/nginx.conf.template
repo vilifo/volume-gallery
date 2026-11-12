@@ -98,6 +98,13 @@ http {
 		add_header Permissions-Policy "camera=(), microphone=(), geolocation=()" always;
 		add_header Content-Security-Policy "frame-ancestors 'self'; base-uri 'self'; object-src 'none'" always;
 
+		# Cross-origin isolation: the slice views share one block cache between their three workers in a
+		# SharedArrayBuffer, which a browser only hands to an isolated page. Everything the pages load comes
+		# from this origin, so require-corp costs nothing. Where these headers are missing (the backend run
+		# without nginx) the slice views load their planes on the main thread, as they did before.
+		add_header Cross-Origin-Opener-Policy "same-origin" always;
+		add_header Cross-Origin-Embedder-Policy "require-corp" always;
+
 		# Internal location used by serve_sharded_file's X-Accel-Redirect response.
 		# Marked `internal;` so direct client requests to /_internal_volumes/... return 404.
 		location /_internal_volumes/ {
@@ -200,6 +207,19 @@ http {
 		}
 
 		location = /api/auth/login {
+			limit_req zone=vg_login burst=10 nodelay;
+			proxy_pass http://volume_gallery_backend;
+			proxy_http_version 1.1;
+			proxy_set_header Connection "";
+			proxy_set_header Host $host:${VG_HTTPS_PORT};
+			proxy_set_header X-Real-IP $remote_addr;
+			proxy_set_header X-Forwarded-For $remote_addr;
+			proxy_set_header X-Forwarded-Proto https;
+			proxy_set_header X-Forwarded-Port ${VG_HTTPS_PORT};
+		}
+
+		# Setting a password from an admin's link (the token is unguessable; the limit keeps hashing requests in check).
+		location ^~ /api/auth/set-password {
 			limit_req zone=vg_login burst=10 nodelay;
 			proxy_pass http://volume_gallery_backend;
 			proxy_http_version 1.1;

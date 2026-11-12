@@ -124,13 +124,6 @@
   .layout-seg[data-busy] button { pointer-events: none; opacity: 0.5; }
   .slice-num { width: 7.5em; text-align: right; }
   .slice-angle-num { width: 4.5em; }
-  .slice-tf-bar { position: relative; height: 22px; margin: 8px 6px 18px; border-radius: 4px; border: 1px solid rgba(128,128,128,0.45); cursor: copy; }
-  .slice-tf-stop { position: absolute; top: -4px; width: 12px; height: 28px; margin-left: -6px; padding: 0; border: 2px solid #fff; border-radius: 3px; box-shadow: 0 0 0 1px rgba(0,0,0,0.55); cursor: ew-resize; }
-  .slice-tf-stop.end { cursor: pointer; }
-  .slice-tf-stop.selected { border-color: #7aa2ff; z-index: 1; }
-  .slice-tf-edit { display: flex; align-items: center; gap: 0.5em; margin: 2px 0 8px; font-size: 0.85em; }
-  .slice-tf-edit input[type="color"] { width: 34px; height: 24px; padding: 0; border: 1px solid rgba(128,128,128,0.45); border-radius: 4px; background: none; }
-  .slice-tf-edit .slice-num { width: 4.5em; }
   [hidden] { display: none !important; }
   /* When the canvas wrap itself is the fullscreen element, it should still
      behave like a normal fill-the-box layout rather than picking up any
@@ -307,6 +300,7 @@
     user-select: none;
     -webkit-user-select: none;
   }
+  .ctl-tf-axis { display: flex; justify-content: space-between; margin: 0 2px 2px; font-family: var(--mono); font-size: 10px; color: var(--text-dim); }
   .ctl-tf-help { font-size: 10px; line-height: 1.4; color: var(--text-dim); text-align: center; margin: 0 0 1em; }
 
   /* Colour-stop editor under the TF canvas (preset "Custom"). It uses the panel's own surface (the
@@ -350,6 +344,8 @@
   .ctl-cs-stop.end { cursor: pointer; }
   .ctl-cs-stop:hover { transform: scaleY(1.08); }
   .ctl-cs-stop.sel { border-color: var(--accent); box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.75), 0 0 0 3px color-mix(in srgb, var(--accent) 35%, transparent); z-index: 1; }
+  .ctl-cs-bar.static { cursor: default; }
+  .ctl-tf-canvas-container > .ctl-tf-colors:first-child { border-top: 0; }
   .ctl-cs-row { display: flex; align-items: center; gap: 6px; }
   .ctl-cs-row .ctl-cs-spacer { flex: 1; }
   /* css/style.css gives every <input> width: 100% and a roomy padding; these two are compact fields. */
@@ -367,7 +363,8 @@
   .ctl-cs-row input[type="color"]::-webkit-color-swatch { border: 0; border-radius: 2px; }
   .ctl-cs-row input[type="color"]::-moz-color-swatch { border: 0; border-radius: 2px; }
   .ctl-cs-pos { display: inline-flex; align-items: center; gap: 4px; margin: 0; color: var(--text-dim); font-size: 11px; }
-  .ctl-cs-row input[type="number"] {
+  .ctl-cs-row input[type="number"],
+  .ctl-num {
     flex: none;
     width: 5em;
     height: 24px;
@@ -382,8 +379,11 @@
     border-radius: 4px;
     color: var(--text);
   }
+  .ctl-num { width: 6.5em; }
   .ctl-cs-row input[type="number"]::-webkit-inner-spin-button,
-  .ctl-cs-row input[type="number"]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+  .ctl-cs-row input[type="number"]::-webkit-outer-spin-button,
+  .ctl-num::-webkit-inner-spin-button,
+  .ctl-num::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
   .ctl-cs-row input:disabled { opacity: 0.4; cursor: default; }
   /* Small in-panel buttons. (.ctl-chip is the floating, absolutely positioned chip over the viewer, so it
      cannot be used inside the panel flow.) */
@@ -554,7 +554,7 @@ import { insertStop, sampleStops, rgbToHex, decodeTf, encodeTf } from "/js/slice
       planAtlas,
       saveAtlasMB,
     } from "/js/atlas-budget.js?v=atlas3";
-    import { setupSliceIntegration } from "/js/slice/slice-integration.js?v=mpr1";
+    import { setupSliceIntegration } from "/js/slice/slice-integration.js?v=mpr2";
     import { niceScaleLength } from "/js/scalebar.js?v=sb1";
     import { toggleHelpPanel } from "/js/help.js?v=help7";
     import { makeDescriptionExpandable } from "/js/description.js?v=org2";
@@ -992,6 +992,7 @@ import { insertStop, sampleStops, rgbToHex, decodeTf, encodeTf } from "/js/slice
             return;
           }
           syncHistogram(viewer, histogramData);
+          slices.setHistogram(histogramData); // the slice controls draw it behind their opacity curve
           buildControlPanel(viewer, canvasWrap, {
             numLodLevels: numLevels,
             minLevel,

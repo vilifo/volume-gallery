@@ -13,7 +13,7 @@ from ..schemas import PointCloudRead, AssetStatusRead, AssetUpdate, AccessGrant,
 from ..deps import file_token_revoked, get_current_user, require_editor
 from ..security import create_file_token, decode_token
 from ..config import settings
-from .. import workdir, jobs
+from .. import audit, workdir, jobs
 from ..organize import apply_asset_update, split_tags
 from ..helpers import convert_pointcloud, read_thumbnail, write_thumbnail, store_thumbnail, remove_thumbnail, thumbnail_response
 from .volumes import SLUG_RE, _now
@@ -84,6 +84,7 @@ def get_pointcloud_status(pc_id: int, session: Session = Depends(get_session), u
 
 @router.post("", response_model=PointCloudRead)
 def create_pointcloud(
+    request: Request,
     background_tasks: BackgroundTasks,
     slug: str = Form(...),
     title: str = Form(...),
@@ -134,6 +135,8 @@ def create_pointcloud(
         status_log=f"{_now()}  Upload received, queued for processing\n",
     )
     session.add(pc)
+    session.flush()  # (the id for the audit line; both are committed together)
+    audit.record(session, request, editor, "pointcloud.create", "pointcloud", pc.id, pc.slug, title=title)
     session.commit()
     session.refresh(pc)
 
@@ -233,7 +236,7 @@ def delete_thumbnail(pc_id: int, session: Session = Depends(get_session), _edito
 
 
 @router.delete("/{pc_id}")
-def delete_pointcloud(pc_id: int, session: Session = Depends(get_session), _editor: User = Depends(require_editor)):
+def delete_pointcloud(pc_id: int, request: Request, session: Session = Depends(get_session), editor: User = Depends(require_editor)):
     pc = session.get(PointCloud, pc_id)
     if not pc:
         raise HTTPException(status_code=404, detail="Point cloud not found")
@@ -241,6 +244,7 @@ def delete_pointcloud(pc_id: int, session: Session = Depends(get_session), _edit
     workdir.discard_job("pointclouds", pc.slug)
     for grant in session.exec(select(PointCloudAccess).where(PointCloudAccess.pointcloud_id == pc_id)).all():
         session.delete(grant)
+    audit.record(session, request, editor, "pointcloud.delete", "pointcloud", pc.id, pc.slug, title=pc.title)
     session.delete(pc)
     session.commit()
     return {"ok": True}
@@ -261,7 +265,7 @@ def list_access(pc_id: int, session: Session = Depends(get_session), _editor: Us
 
 @router.post("/{pc_id}/access")
 def grant_access(
-    pc_id: int, payload: AccessGrant, session: Session = Depends(get_session), editor: User = Depends(require_editor)
+    pc_id: int, payload: AccessGrant, request: Request, session: Session = Depends(get_session), editor: User = Depends(require_editor)
 ):
     pc = session.get(PointCloud, pc_id)
     target = session.get(User, payload.user_id)
@@ -277,18 +281,22 @@ def grant_access(
     session.add(PointCloudAccess(
         user_id=payload.user_id, pointcloud_id=pc_id, granted_by=editor.id
     ))
+    audit.record(session, request, editor, "access.grant", "pointcloud", pc.id, pc.slug, user=target.username, user_id=target.id)
     session.commit()
     return {"ok": True}
 
 
 @router.delete("/{pc_id}/access/{user_id}")
 def revoke_access(
-    pc_id: int, user_id: int, session: Session = Depends(get_session), _editor: User = Depends(require_editor)
+    pc_id: int, user_id: int, request: Request, session: Session = Depends(get_session), editor: User = Depends(require_editor)
 ):
     grant = session.exec(
         select(PointCloudAccess).where(PointCloudAccess.pointcloud_id == pc_id, PointCloudAccess.user_id == user_id)
     ).first()
     if grant:
+        pc, target = session.get(PointCloud, pc_id), session.get(User, user_id)
+        audit.record(session, request, editor, "access.revoke", "pointcloud", pc_id, pc.slug if pc else "",
+                     user=target.username if target else "", user_id=user_id)
         session.delete(grant)
         session.commit()
     return {"ok": True}

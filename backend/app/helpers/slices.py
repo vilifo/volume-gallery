@@ -1017,6 +1017,7 @@ class VolumeSlicesKiln:
             "du": du.tolist(),
             "dv": dv.tolist(),
             "blocks": blocks,
+            "maxBlocksPerRequest": MAX_BLOCKS_PER_REQUEST,  # POST .../blocks takes at most this many; the browser splits
             "totalWeight": total,
             "planMs": round((time.perf_counter() - t0) * 1000, 1),
         }

@@ -11,7 +11,7 @@
   <div class="app-shell" id="shell"></div>
 
   <script type="module">
-    import { api, requireLogin, getRole, getUsername, renderShell, wireLogout } from "/js/api.js?v=share1";
+    import { api, requireLogin, getRole, getUsername, renderShell, wireLogout, passwordLinkUrl } from "/js/api.js?v=inv1";
     import { pageHint } from "/js/help.js?v=help6";
 
     requireLogin();
@@ -53,7 +53,7 @@
         <tr>
           <td>${escapeHtml(u.username)}</td>
           <td><span class="pill ${u.role}">${u.role}</span></td>
-          <td>${u.disabled ? '<span class="dim">disabled</span>' : '<span style="color:var(--ok)">active</span>'}</td>
+          <td>${u.disabled ? '<span class="dim">disabled</span>' : u.pending ? '<span class="dim" title="No password yet: the user has to open the link they were given">waiting for password</span>' : '<span style="color:var(--ok)">active</span>'}</td>
           <td class="row-actions">
             ${
               u.username === me
@@ -65,7 +65,7 @@
                   .join("")}
               </select>
               <button data-toggle="${u.id}" data-disabled="${u.disabled}">${u.disabled ? "Enable" : "Disable"}</button>
-              <button data-reset="${u.id}">Reset password</button>
+              ${u.disabled ? "" : `<button data-reset="${u.id}">${u.pending ? "New setup link" : "Reset password"}</button>`}
               <button class="danger" data-delete="${u.id}">Delete</button>
               `
             }
@@ -88,9 +88,19 @@
         });
       });
       document.querySelectorAll("[data-reset]").forEach((btn) => {
-        btn.addEventListener("click", () => {
+        btn.addEventListener("click", async () => {
           const target = users.find((u) => String(u.id) === btn.dataset.reset);
-          openResetModal(btn.dataset.reset, target ? target.username : "this user");
+          const name = target ? target.username : "this user";
+          if (!confirm(target?.pending
+            ? `Make a new setup link for ${name}? The earlier link stops working.`
+            : `Make a password reset link for ${name}? Their current password keeps working until they use the link. Any earlier link stops working.`)) return;
+          try {
+            showLink(await api.createPasswordLink(btn.dataset.reset), "Password link");
+            load();
+          } catch (err) {
+            document.getElementById("error").textContent = err.message;
+            document.getElementById("error").style.display = "block";
+          }
         });
       });
       document.querySelectorAll("[data-delete]").forEach((btn) => {
@@ -112,10 +122,7 @@
               <label for="nu-username">Username</label>
               <input id="nu-username" required />
             </div>
-            <div class="field">
-              <label for="nu-password">Password</label>
-              <input id="nu-password" type="password" required />
-            </div>
+            <p class="dim">The account is created without a password. You get a one-time link to give to the user, who sets the password themselves.</p>
             <div class="field">
               <label for="nu-role">Role</label>
               <select id="nu-role">
@@ -136,12 +143,11 @@
       });
       document.getElementById("nu-save").addEventListener("click", async () => {
         const username = document.getElementById("nu-username").value.trim();
-        const password = document.getElementById("nu-password").value;
         const userRole = document.getElementById("nu-role").value;
         try {
-          await api.createUser({ username, password, role: userRole });
-          document.getElementById("modal-root").innerHTML = "";
+          const made = await api.createUser({ username, role: userRole });
           load();
+          showLink(made, "User created");
         } catch (err) {
           const box = document.getElementById("modal-error");
           box.textContent = err.message;
@@ -150,47 +156,38 @@
       });
     });
 
-    // Admin password reset: the user's existing sessions are signed out by the server.
-    function openResetModal(userId, username) {
+    // The one-time link for a new account or a password reset. It is shown only now: the server keeps just a hash.
+    function showLink(made, title) {
+      const url = passwordLinkUrl(made.token);
+      const until = new Date(made.expires_at).toLocaleString();
+      const what = made.purpose === "setup" ? "set their password and sign in" : "choose a new password";
       document.getElementById("modal-root").innerHTML = `
         <div class="modal-backdrop" id="backdrop">
           <div class="modal">
-            <h2>Reset password</h2>
-            <p class="dim">Set a new password for <strong>${escapeHtml(username)}</strong>. They will be signed out everywhere.</p>
-            <div id="modal-error" style="display:none" class="error-box"></div>
+            <h2>${escapeHtml(title)}</h2>
+            <p class="dim">Give this link to <strong>${escapeHtml(made.user.username)}</strong>. They open it to ${what}.
+              It can be used once and works until ${escapeHtml(until)}. It is not shown again: make a new one if it gets lost.</p>
             <div class="field">
-              <label for="rp-password">New password</label>
-              <input id="rp-password" type="password" autocomplete="new-password" required />
-            </div>
-            <div class="field">
-              <label for="rp-confirm">Repeat new password</label>
-              <input id="rp-confirm" type="password" autocomplete="new-password" required />
+              <input id="pl-url" readonly value="${escapeHtml(url)}" aria-label="Link" />
             </div>
             <div class="modal-actions">
-              <button id="rp-cancel">Cancel</button>
-              <button class="primary" id="rp-save">Reset password</button>
+              <button id="pl-copy">Copy link</button>
+              <button class="primary" id="pl-close">Done</button>
             </div>
           </div>
         </div>
       `;
-      const close = () => { document.getElementById("modal-root").innerHTML = ""; };
-      document.getElementById("rp-cancel").addEventListener("click", close);
-      document.getElementById("rp-save").addEventListener("click", async () => {
-        const box = document.getElementById("modal-error");
-        const password = document.getElementById("rp-password").value;
-        if (password !== document.getElementById("rp-confirm").value) {
-          box.textContent = "The passwords do not match.";
-          box.style.display = "block";
-          return;
-        }
+      const input = document.getElementById("pl-url");
+      input.addEventListener("focus", () => input.select());
+      document.getElementById("pl-copy").addEventListener("click", async (e) => {
         try {
-          await api.updateUser(userId, { password });
-          close();
-        } catch (err) {
-          box.textContent = err.message;
-          box.style.display = "block";
+          await navigator.clipboard.writeText(url);
+          e.target.textContent = "Copied";
+        } catch (_) {
+          input.select(); // no clipboard access (plain HTTP): the link is selected, Ctrl+C does the rest
         }
       });
+      document.getElementById("pl-close").addEventListener("click", () => { document.getElementById("modal-root").innerHTML = ""; });
     }
 
     function escapeHtml(s) {

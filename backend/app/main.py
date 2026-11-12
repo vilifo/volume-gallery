@@ -11,7 +11,7 @@ from .database import init_db, engine
 from .models import User, Role, Volume, Mesh, PointCloud, AssetStatus
 from .security import hash_password
 from .config import settings, check_secret_key
-from . import workdir, jobs
+from . import audit, workdir, jobs
 from .utils import _now
 from .routers import auth, users, volumes, meshes, pointclouds, branding, shares, uploads, folders, paths, bookmarks, admin
 
@@ -74,6 +74,8 @@ def _recover_interrupted_jobs():
 async def lifespan(app: FastAPI):
     check_secret_key()
     init_db()
+    with Session(engine) as session:
+        audit.prune(session)  # (VG_AUDIT_RETENTION_DAYS; the default keeps everything)
     _bootstrap_admin()
     if not jobs.enabled():  # with a queue the worker does this at its start (app/worker.py)
         _recover_interrupted_jobs()

@@ -11,7 +11,7 @@ from typing import Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy import case, func
-from sqlmodel import Session, select
+from sqlmodel import Session, col, select
 
 from ..config import settings
 from ..database import get_session
@@ -19,11 +19,12 @@ from ..deps import require_admin, require_editor
 from ..helpers.storage import (
     asset_root, cached_scan, disk_usage, kind_dir, raw_voxel_bytes, scan_dir, Scan,
 )
+from .. import audit
 from ..models import (
-    AnimationPath, Mesh, PointCloud, ShareLink, ShareView, User, ViewBookmark, Volume,
+    AnimationPath, AuditEvent, Mesh, PointCloud, ShareLink, ShareView, User, ViewBookmark, Volume,
 )
 from ..schemas import (
-    AssetStorageRead, DiskRead, RelatedAssetRead, ShareAdminOverview, ShareAdminRead,
+    AuditEventRead, AuditPage, AssetStorageRead, DiskRead, RelatedAssetRead, ShareAdminOverview, ShareAdminRead,
     ShareAdminSummary, ShareAssetRead, ShareStatsRead, StorageAssetRow, StorageEntryRead,
     StorageLeftover, StorageOverviewRead,
 )
@@ -318,4 +319,45 @@ def admin_storage(
         processing_disk=DiskRead(**proc_disk) if proc_disk else None,
         kind_bytes=kind_bytes, database_bytes=db, staging_bytes=staging, processing_bytes=processing,
         assets=rows, leftovers=leftovers, missing=missing, scanned_at=get_utc_now().isoformat(),
+    )
+
+
+# ----------------------------------------------------------------------------------------------- audit log
+
+@router.get("/api/admin/audit", response_model=AuditPage)
+def audit_log(
+    limit: int = Query(100, ge=1, le=500),
+    before: Optional[int] = Query(None, description="Only events older than this id (the previous page's next_before)"),
+    action: str = Query("", description='An action ("user.create") or a group ending in a dot ("user.")'),
+    actor: str = Query("", description="Part of the acting user's name"),
+    target: str = Query("", description="Part of the name of what the action was done to (user name, slug, share code)"),
+    ip: str = Query("", description="Part of the client address"),
+    session: Session = Depends(get_session),
+    _admin: User = Depends(require_admin),
+):
+    """The audit log (see audit.py), newest first, in pages."""
+    query = select(AuditEvent)
+    if before is not None:
+        query = query.where(AuditEvent.id < before)
+    action = action.strip()
+    if action:
+        query = query.where(col(AuditEvent.action).startswith(action, autoescape=True) if action.endswith(".") else AuditEvent.action == action)
+    if actor.strip():
+        query = query.where(col(AuditEvent.actor_name).contains(actor.strip(), autoescape=True))
+    if target.strip():
+        query = query.where(col(AuditEvent.target_name).contains(target.strip(), autoescape=True))
+    if ip.strip():
+        query = query.where(col(AuditEvent.ip).contains(ip.strip(), autoescape=True))
+    rows = session.exec(query.order_by(col(AuditEvent.id).desc()).limit(limit + 1)).all()
+    page = rows[:limit]
+    return AuditPage(
+        events=[
+            AuditEventRead(
+                id=e.id, at=_utc(e.at), actor_id=e.actor_id, actor_name=e.actor_name, action=e.action,
+                target_type=e.target_type, target_id=e.target_id, target_name=e.target_name,
+                detail=audit.parse_detail(e), ip=e.ip,
+            )
+            for e in page
+        ],
+        next_before=page[-1].id if len(rows) > limit and page else None,
     )

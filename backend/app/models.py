@@ -32,6 +32,42 @@ class User(SQLModel, table=True):
     )
     disabled: bool = Field(default=False)
 
+    @property
+    def pending(self) -> bool:
+        """An account an admin created that its user has not set a password for yet (it cannot sign in)."""
+        return not self.password_hash
+
+
+class UserToken(SQLModel, table=True):
+    """A one-time link for setting a password (see invites.py). Only the hash of the token is kept."""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="user.id", index=True)
+    purpose: str  # invites.PURPOSE_SETUP | PURPOSE_RESET
+    token_hash: str = Field(index=True, unique=True)
+    created_by: Optional[int] = Field(default=None, foreign_key="user.id")
+    created_at: datetime = Field(
+        default_factory=get_utc_now,
+        sa_type=DateTime(timezone=True)
+    )
+    expires_at: datetime = Field(sa_type=DateTime(timezone=True))
+    used_at: Optional[datetime] = Field(default=None, sa_type=DateTime(timezone=True))
+
+
+class AuditEvent(SQLModel, table=True):
+    """One line of the audit log (see audit.py): who did what to what, when, from where. Append-only. Names are
+    copied in and there are no foreign keys, so a line stays readable after the user or the item it mentions is
+    deleted."""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    at: datetime = Field(default_factory=get_utc_now, sa_type=DateTime(timezone=True), index=True)
+    actor_id: Optional[int] = Field(default=None, index=True)
+    actor_name: str = ""          # "" when nobody was signed in (a failed login)
+    action: str = Field(index=True)   # "user.create", "volume.delete", ... (audit.py lists them)
+    target_type: str = ""         # "user", "volume", "mesh", "pointcloud", "share"
+    target_id: Optional[int] = None
+    target_name: str = ""
+    detail: str = ""              # JSON object with what else is worth knowing (old and new role, ...)
+    ip: str = ""
+
 
 class AssetBase(SQLModel):
     slug: str = Field(index=True, unique=True)

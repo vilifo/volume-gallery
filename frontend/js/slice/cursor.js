@@ -6,7 +6,7 @@ import {
   isAligned, matMul, matrixToEuler, nearestInPolygon, orthonormalize, rotAxis,
 } from "./geometry.js";
 import { MAX_MEASURES, decodeMeasures, encodeMeasures, roundPoint } from "./measure.js";
-import { decodeTf, encodeTf, normalizeStops, presetStops } from "./transfer-function.js";
+import { decodeAlpha, decodeTf, defaultAlpha, encodeAlpha, encodeTf, isOpaque, normalizeAlpha, normalizeStops, presetStops } from "./transfer-function.js";
 
 
 export const LAYOUTS = ["3d", "quad", "xy", "xz", "yz"];
@@ -49,7 +49,7 @@ export class SliceState {
     this.showScaleBar = true; // length reference in each slice pane
     this.show3dPlanes = true; // outlines of the three planes over the 3D view
     this.show3dCursor = true; // the cursor (three crossing lines + dot) over the 3D view
-    this.tf = { preset: "gray", stops: presetStops("gray") }; // colours over the windowed range
+    this.tf = { preset: "gray", stops: presetStops("gray"), alpha: defaultAlpha() }; // colours and opacity over the windowed range
     this.interacting = false;
     // Distance measuring. Points are in continuous voxel coordinates (see measure.js); a measurement is
     // { id, a, b, label, accA, accB, acc }: how far off each end can be (a point picked in the 3D view is only
@@ -255,7 +255,7 @@ export class SliceState {
   setTfPreset(name) {
     const stops = presetStops(name);
     if (!stops) return;
-    this.tf = { preset: name, stops };
+    this.tf = { ...this.tf, preset: name, stops };
     this._emit("tf");
   }
 
@@ -263,7 +263,15 @@ export class SliceState {
   setTfStops(stops) {
     const norm = normalizeStops(stops);
     if (!norm || norm.length < 2) return;
-    this.tf = { preset: "custom", stops: norm };
+    this.tf = { ...this.tf, preset: "custom", stops: norm };
+    this._emit("tf");
+  }
+
+  /** Replaces the opacity curve: points {x, y} over the windowed value, both 0..1 (see transfer-function.js). */
+  setTfAlpha(points) {
+    const norm = normalizeAlpha(points);
+    if (!norm || norm.length < 2) return;
+    this.tf = { ...this.tf, alpha: norm };
     this._emit("tf");
   }
 
@@ -377,7 +385,7 @@ export class SliceState {
     const e = this.euler();
     if (e.rx || e.ry || e.rz) p.ang = `${e.rx},${e.ry},${e.rz}`;
     if (AXES.some((a) => Math.abs(this.psi[a]) > 1e-9)) p.roll = AXES.map((a) => +((this.psi[a] * 180) / Math.PI).toFixed(2)).join(",");
-    if (this.tf.preset !== "gray") p.stf = encodeTf(this.tf);
+    if (!isOpaque(this.tf.alpha)) p.sal = encodeAlpha(this.tf.alpha);
     if (this.measures.length) p.meas = encodeMeasures(this.measures); // the distances travel with the link
     return p;
   }
@@ -405,8 +413,9 @@ export class SliceState {
       }
     }
     const tf = decodeTf(get("stf") ?? "");
-    if (tf) {
-      this.tf = tf;
+    const alpha = decodeAlpha(get("sal") ?? "");
+    if (tf || alpha) {
+      this.tf = { ...(tf ?? this.tf), alpha: alpha ?? this.tf.alpha };
       this._emit("tf");
     }
     const layout = get("layout");
