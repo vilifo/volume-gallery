@@ -3,7 +3,7 @@
 // reload, so this section keeps no state of its own: everything lives in SliceState.
 
 import { textureFormatFor } from "./geometry.js";
-import { ANGLE_LIMITS } from "./cursor.js?v=mpr1";
+import { ANGLE_LIMITS } from "./cursor.js?v=mpr2";
 import { TF_LABELS, TF_PRESET_NAMES, hexToRgb, insertStop } from "./transfer-function.js";
 
 const toggle = (role, label, checked, title = "") => `

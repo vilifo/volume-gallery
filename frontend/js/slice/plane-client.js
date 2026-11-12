@@ -13,6 +13,7 @@
 // prefetches, at most `maxInflight` at a time.
 
 import { PlaneAssembler, BlockStreamParser } from "./plane-assembler.js";
+import { PrivateBlockCache } from "./block-cache.js";
 import { textureFormatFor } from "./geometry.js";
 
 export class PlaneError extends Error {
@@ -30,16 +31,18 @@ export class PlaneClient {
    * @param {object} o
    * @param {string} o.baseUrl   ".../slices/<token>/" (ends with "/")
    * @param {Function} [o.fetchFn]
-   * @param {() => Promise<string>} [o.refreshUrl]  returns a new baseUrl when the token expired (403)
+   * @param {(refused: string) => Promise<string>} [o.refreshUrl]  returns a new baseUrl when the token expired (403);
+   *   `refused` is the baseUrl that was refused
+   * @param {object} [o.cache]  where the blocks are kept (block-cache.js): a PrivateBlockCache of `maxCacheBytes`
+   *   by default; the pane workers pass the SharedBlockCache they share
    */
-  constructor({ baseUrl, fetchFn = (...a) => fetch(...a), refreshUrl = null, maxCacheBytes = 512e6, maxInflight = 3 }) {
+  constructor({ baseUrl, fetchFn = (...a) => fetch(...a), refreshUrl = null, maxCacheBytes = 512e6, maxInflight = 3, cache = null }) {
     this.baseUrl = baseUrl;
     this.fetchFn = fetchFn;
     this.refreshUrl = refreshUrl;
     this.maxCacheBytes = maxCacheBytes;
     this.maxInflight = maxInflight;
-    this._blocks = new Map(); // "channel/key" -> typed array | null (an empty block), least recently used first
-    this._blockBytes = 0;
+    this.cache = cache ?? new PrivateBlockCache({ maxBytes: maxCacheBytes });
     this._queue = [];
     this._running = 0;
     this._seq = 0;
@@ -91,8 +94,7 @@ export class PlaneClient {
 
   stats() {
     return {
-      blocks: this._blocks.size,
-      cacheMB: +(this._blockBytes / 1e6).toFixed(1),
+      ...this.cache.stats(),
       inflight: this._running,
       queued: this._queue.length,
       ...this.counters,
@@ -102,8 +104,7 @@ export class PlaneClient {
   dispose() {
     this._disposed = true;
     for (const job of this._queue.splice(0)) job.reject(abortError());
-    this._blocks.clear();
-    this._blockBytes = 0;
+    if (!this.cache.shared) this.cache.clear(); // (a shared cache belongs to whoever made it)
   }
 
   // ------------------------------------------------------------------ internals
@@ -131,44 +132,35 @@ export class PlaneClient {
     const init = () => (json === undefined
       ? { signal }
       : { signal, method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(json) });
-    let res = await this.fetchFn(this.baseUrl + path, init());
+    const base = this.baseUrl;
+    let res = await this.fetchFn(base + path, init());
     if (res.status === 403 && this.refreshUrl) {
-      this.baseUrl = await this.refreshUrl();
+      if (this.baseUrl === base) this.baseUrl = await this.refreshUrl(base); // (else a request of ours has renewed it meanwhile)
       res = await this.fetchFn(this.baseUrl + path, init());
     }
     if (!res.ok) {
       let detail = "";
-      try { detail = (await res.json()).detail ?? ""; } catch (_) { /* not JSON */ }
+      try {
+        detail = (await res.json()).detail ?? "";
+        // FastAPI validation errors (422) are a list of objects, not a string
+        if (Array.isArray(detail)) detail = detail.map((d) => `${(d.loc ?? []).slice(1).join(".")}: ${d.msg}`).join("; ");
+        else if (typeof detail === "object") detail = JSON.stringify(detail);
+      } catch (_) { /* not JSON */ }
       throw new PlaneError(`${path.split("?")[0]}: ${detail || res.status}`, res.status);
     }
     return res;
   }
 
-  _getBlock(channel, key) {
-    const k = `${channel}/${key}`;
-    const v = this._blocks.get(k);
-    if (v !== undefined) {
-      this._blocks.delete(k);
-      this._blocks.set(k, v); // LRU touch
-    }
-    return v;
-  }
-
-  _putBlock(channel, key, data) {
-    const k = `${channel}/${key}`;
-    const bytes = data ? data.byteLength : 64;
-    const old = this._blocks.get(k);
-    if (old !== undefined) this._blockBytes -= old ? old.byteLength : 64;
-    this._blocks.set(k, data);
-    this._blockBytes += bytes;
-    for (const [kk, v] of this._blocks) {
-      if (this._blockBytes <= this.maxCacheBytes || kk === k) break;
-      this._blocks.delete(kk);
-      this._blockBytes -= v ? v.byteLength : 64;
-    }
-  }
-
   async _run(job) {
+    const pins = []; // the blocks of a shared cache that this image reads from: not replaced until it is done
+    try {
+      return await this._load(job, pins);
+    } finally {
+      this.cache.release(pins);
+    }
+  }
+
+  async _load(job, pins) {
     const { spec, channel, prefetch } = job;
     const signal = job.controller.signal;
     const t0 = performance.now();
@@ -180,15 +172,21 @@ export class PlaneClient {
     const fmt = textureFormatFor(plan.dtype);
     if (!fmt) throw new PlaneError(`Unsupported data type ${plan.dtype}`);
     const asm = prefetch ? null : new PlaneAssembler(plan, { underlay: job.underlay });
-    const keyOf = (gx, gy, gz) => `${gx},${gy},${gz}`;
+    const cache = this.cache;
+    const mine = asm ? pins : null; // (a prefetch only fills the cache: it keeps nothing)
 
     // what the cache has goes in now; the rest is requested
     const missing = [];
     let cached = 0;
     for (let i = 0; i < plan.blocks.length; i += 4) {
       const gx = plan.blocks[i], gy = plan.blocks[i + 1], gz = plan.blocks[i + 2];
-      const data = this._getBlock(channel, keyOf(gx, gy, gz));
-      if (data !== undefined) { asm?.add(gx, gy, gz, data); cached++; }
+      if (!asm) {
+        if (cache.has(channel, gx, gy, gz)) cached++;
+        else missing.push(gx, gy, gz, plan.blocks[i + 3]);
+        continue;
+      }
+      const data = cache.get(channel, gx, gy, gz, mine);
+      if (data !== undefined) { asm.add(gx, gy, gz, data); cached++; }
       else missing.push(gx, gy, gz, plan.blocks[i + 3]);
     }
     this.counters.cached += cached;
@@ -196,41 +194,48 @@ export class PlaneClient {
     let first = performance.now() - t0;
 
     if (missing.length) {
-      const res = await this._request("blocks", { signal, json: { blocks: missing, prefetch } });
+      // The server takes a limited number of blocks per request; a tilted plane can need more than that, so the
+      // list (best blocks first) goes out in consecutive requests of at most that size.
+      const perRequest = Math.max(1, plan.maxBlocksPerRequest ?? 40000) * 4;
       let got = 0;
-      const parser = new BlockStreamParser({
-        Array: fmt.array,
-        blockBytes: plan.blockSize ** 3 * fmt.array.BYTES_PER_ELEMENT,
-        onBlock: (gx, gy, gz, data) => {
-          this._putBlock(channel, keyOf(gx, gy, gz), data);
-          asm?.add(gx, gy, gz, data);
-          if (!got++) first = performance.now() - t0;
-        },
-      });
-      if (res.body?.getReader) {
-        const reader = res.body.getReader();
-        try {
-          for (;;) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            signal.throwIfAborted();
-            this.counters.bytes += value.length;
-            parser.push(value);
-            job.onUpdate?.(asm);
+      for (let from = 0; from < missing.length; from += perRequest) {
+        signal.throwIfAborted();
+        const res = await this._request("blocks", { signal, json: { blocks: missing.slice(from, from + perRequest), prefetch } });
+        const parser = new BlockStreamParser({
+          Array: fmt.array,
+          blockBytes: plan.blockSize ** 3 * fmt.array.BYTES_PER_ELEMENT,
+          onBlock: (gx, gy, gz, data) => {
+            const stored = cache.put(channel, gx, gy, gz, data, mine); // (the cache's copy, when it keeps one)
+            asm?.add(gx, gy, gz, stored);
+            if (!got++) first = performance.now() - t0;
+          },
+        });
+        if (res.body?.getReader) {
+          const reader = res.body.getReader();
+          try {
+            for (;;) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              signal.throwIfAborted();
+              this.counters.bytes += value.length;
+              parser.push(value);
+              job.onUpdate?.(asm);
+            }
+          } finally {
+            reader.cancel().catch(() => {}); // a no-op once the stream has ended; frees the connection when we stop early
           }
-        } finally {
-          reader.cancel().catch(() => {}); // a no-op once the stream has ended; frees the connection when we stop early
+        } else {
+          const buf = new Uint8Array(await res.arrayBuffer());
+          this.counters.bytes += buf.length;
+          parser.push(buf);
+          job.onUpdate?.(asm);
         }
-      } else {
-        const buf = new Uint8Array(await res.arrayBuffer());
-        this.counters.bytes += buf.length;
-        parser.push(buf);
-        job.onUpdate?.(asm);
+        if (!parser.complete) throw new PlaneError("The block stream ended early");
       }
-      if (!parser.complete) throw new PlaneError("The block stream ended early");
       this.counters.fetched += got;
     }
     if (asm && !asm.complete) throw new PlaneError(`The image is incomplete: ${asm.pending} blocks missing`);
+    if (asm && cache.shared) asm.loaded.clear(); // the blocks it read are views of the shared memory, which is free to go on now
     this.counters.loads++;
     this.counters.lastMs = performance.now() - t0;
     this.counters.lastFirstMs = first;
