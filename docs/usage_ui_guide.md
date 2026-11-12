@@ -13,6 +13,9 @@ endpoints `POST /api/users`, `POST /api/users/<id>/password-link` (admin) and
 `POST /api/auth/set-password[/check]` (public, rate-limited by nginx) carry the flow. `PATCH /api/users/<id>`
 no longer accepts a `password`.
 
+## Audit log
+Security-relevant actions are written to the `auditevent` table in the same transaction as the
+action, and admins read them on the **Audit log** page (`GET /api/admin/audit`, filterable by kind, user, target and address; *Export CSV* saves the loaded rows). Logged: sign-ins and failed sign-ins, setting passwords, creating, changing, deleting accounts and making password links, uploading and deleting volumes / meshes / point clouds, access grants and revocations, and share links. Viewing is not logged (share links count their own views), and secrets never are: no passwords, no tokens. A failed sign-in for a name that is not an account is logged without that name, because people paste passwords into the username box. Addresses come from the `X-Real-IP` header nginx sets, so they are only reliable behind it. Lines are kept for ever unless `VG_AUDIT_RETENTION_DAYS` is set (older ones are deleted at startup); names are copied into each line, so it stays readable after an account or item is deleted.
 
 ## Preparing Volumes to Upload
 

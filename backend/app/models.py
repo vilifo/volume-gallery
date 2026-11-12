@@ -53,6 +53,22 @@ class UserToken(SQLModel, table=True):
     used_at: Optional[datetime] = Field(default=None, sa_type=DateTime(timezone=True))
 
 
+class AuditEvent(SQLModel, table=True):
+    """One line of the audit log (see audit.py): who did what to what, when, from where. Append-only. Names are
+    copied in and there are no foreign keys, so a line stays readable after the user or the item it mentions is
+    deleted."""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    at: datetime = Field(default_factory=get_utc_now, sa_type=DateTime(timezone=True), index=True)
+    actor_id: Optional[int] = Field(default=None, index=True)
+    actor_name: str = ""          # "" when nobody was signed in (a failed login)
+    action: str = Field(index=True)   # "user.create", "volume.delete", ... (audit.py lists them)
+    target_type: str = ""         # "user", "volume", "mesh", "pointcloud", "share"
+    target_id: Optional[int] = None
+    target_name: str = ""
+    detail: str = ""              # JSON object with what else is worth knowing (old and new role, ...)
+    ip: str = ""
+
+
 class AssetBase(SQLModel):
     slug: str = Field(index=True, unique=True)
     title: str

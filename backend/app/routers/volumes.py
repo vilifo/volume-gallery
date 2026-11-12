@@ -17,7 +17,7 @@ from ..schemas import VolumeRead, AssetStatusRead, AssetUpdate, AccessGrant, Fil
 from ..deps import file_token_revoked, get_current_user, require_editor
 from ..security import create_file_token, decode_token
 from ..config import settings
-from .. import workdir, jobs
+from .. import audit, workdir, jobs
 from ..organize import apply_asset_update, split_tags
 from ..helpers import SliceError, open_volume_slices, plane_response_parts, stream_blocks, MAX_BLOCKS_PER_REQUEST
 from ..helpers import volume_meta_path, process_zip, decompose_tiff_stack, RANGE_RE, SHARDED_FILE_RE, decompress_gzip, detect_level_is_tiled66, unshuffle_tiled66_to_66_bytes, compress_gzip_66, ensure_legacy66_level_files, compress_gzip_66_exact_size
@@ -200,6 +200,7 @@ def _slice_upload_ids(manifest: Optional[List[str]], legacy: Optional[List[str]]
 
 @router.post("", response_model=VolumeRead)
 def create_volume(
+    request: Request,
     background_tasks: BackgroundTasks,
     slug: str = Form(...),
     title: str = Form(...),
@@ -305,6 +306,8 @@ def create_volume(
         status_log=f"{_now()}  Upload received, queued for processing\n",
     )
     session.add(volume)
+    session.flush()  # (the id for the audit line; both are committed together)
+    audit.record(session, request, editor, "volume.create", "volume", volume.id, volume.slug, title=title)
     session.commit()
     session.refresh(volume)
 
@@ -504,7 +507,7 @@ def delete_thumbnail(
 
 @router.delete("/{volume_id}")
 def delete_volume(
-    volume_id: int, session: Session = Depends(get_session), _editor: User = Depends(require_editor)
+    volume_id: int, request: Request, session: Session = Depends(get_session), editor: User = Depends(require_editor)
 ):
     volume = session.get(Volume, volume_id)
     if not volume:
@@ -519,6 +522,7 @@ def delete_volume(
         session.delete(saved)
     for saved in session.exec(select(ViewBookmark).where(ViewBookmark.volume_id == volume_id)).all():
         session.delete(saved)
+    audit.record(session, request, editor, "volume.delete", "volume", volume.id, volume.slug, title=volume.title)
     session.delete(volume)
     session.commit()
     return {"ok": True}
@@ -539,6 +543,7 @@ def list_access(
 def grant_access(
     volume_id: int,
     payload: AccessGrant,
+    request: Request,
     session: Session = Depends(get_session),
     editor: User = Depends(require_editor),
 ):
@@ -554,6 +559,7 @@ def grant_access(
     if existing:
         return {"ok": True}
     session.add(VolumeAccess(user_id=payload.user_id, volume_id=volume_id, granted_by=editor.id))
+    audit.record(session, request, editor, "access.grant", "volume", volume.id, volume.slug, user=target.username, user_id=target.id)
     session.commit()
     return {"ok": True}
 
@@ -562,8 +568,9 @@ def grant_access(
 def revoke_access(
     volume_id: int,
     user_id: int,
+    request: Request,
     session: Session = Depends(get_session),
-    _editor: User = Depends(require_editor),
+    editor: User = Depends(require_editor),
 ):
     grant = session.exec(
         select(VolumeAccess).where(
@@ -571,6 +578,9 @@ def revoke_access(
         )
     ).first()
     if grant:
+        volume, target = session.get(Volume, volume_id), session.get(User, user_id)
+        audit.record(session, request, editor, "access.revoke", "volume", volume_id, volume.slug if volume else "",
+                     user=target.username if target else "", user_id=user_id)
         session.delete(grant)
         session.commit()
     return {"ok": True}

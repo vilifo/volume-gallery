@@ -194,7 +194,8 @@ function userAdmin() {
       <li><strong>Reset password</strong>: makes a one-time link for someone who has forgotten their password. They open it and choose a new one, which signs them out everywhere else. Their old password keeps working until they do, and a link you made earlier stops working. Links expire after 72 hours (<code>VG_PASSWORD_LINK_HOURS</code>) and show only once;</li>
       <li><strong>Delete</strong> an account.</li>
     </ul>
-    <p>You cannot change your own role or delete yourself. Change your own password on the Account page.</p>`;
+    <p>You cannot change your own role or delete yourself. Change your own password on the Account page.</p>
+    <p>Everything done here is written to the <strong>Audit log</strong> (side menu): who created, changed or deleted accounts, made password links, signed in or failed to, uploaded or deleted items, gave or removed access and made share links. It is kept until you delete rows by setting <code>VG_AUDIT_RETENTION_DAYS</code> (days; 0 keeps everything).</p>`;
 }
 
 function account() {

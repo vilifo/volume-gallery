@@ -1,5 +1,5 @@
 from typing import List
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlmodel import Session, delete, select, update
 
 from ..database import get_session
@@ -10,6 +10,7 @@ from ..schemas import UserCreate, UserRead, UserUpdate, UserLink, PasswordChange
 from ..security import (
     hash_password, verify_password, validate_new_password, create_access_token, password_fingerprint,
 )
+from .. import audit
 from ..invites import PURPOSE_RESET, PURPOSE_SETUP, aware, hash_token, link_expiry, new_token
 from ..deps import require_admin, get_current_user
 
@@ -28,7 +29,7 @@ def list_users(session: Session = Depends(get_session), _admin: User = Depends(r
     return session.exec(select(User)).all()
 
 
-def _issue_link(session: Session, user: User, admin: User) -> UserLink:
+def _issue_link(session: Session, request: Request, user: User, admin: User, action: str, **detail) -> UserLink:
     """Makes a new one-time link for `user` (the ones issued before stop working) and commits it. The token is
     in the result only: the database keeps its hash."""
     session.exec(delete(UserToken).where(UserToken.user_id == user.id))
@@ -38,6 +39,7 @@ def _issue_link(session: Session, user: User, admin: User) -> UserLink:
         user_id=user.id, purpose=purpose, token_hash=hash_token(token), created_by=admin.id, expires_at=link_expiry(),
     )
     session.add(row)
+    audit.record(session, request, admin, action, "user", user.id, user.username, purpose=purpose, expires=row.expires_at.isoformat(), **detail)
     session.commit()
     session.refresh(user)
     return UserLink(user=UserRead.model_validate(user), token=token, purpose=purpose, expires_at=aware(row.expires_at))
@@ -46,6 +48,7 @@ def _issue_link(session: Session, user: User, admin: User) -> UserLink:
 @router.post("", response_model=UserLink)
 def create_user(
     payload: UserCreate,
+    request: Request,
     session: Session = Depends(get_session),
     admin: User = Depends(require_admin),
 ):
@@ -56,12 +59,13 @@ def create_user(
     user = User(username=payload.username, password_hash="", role=payload.role)
     session.add(user)
     session.flush()  # (the id; committed together with the link)
-    return _issue_link(session, user, admin)
+    return _issue_link(session, request, user, admin, "user.create", role=payload.role.value)
 
 
 @router.post("/{user_id}/password-link", response_model=UserLink)
 def create_password_link(
     user_id: int,
+    request: Request,
     session: Session = Depends(get_session),
     admin: User = Depends(require_admin),
 ):
@@ -75,13 +79,14 @@ def create_password_link(
         raise HTTPException(status_code=400, detail="Change your own password on the Account page")
     if user.disabled:
         raise HTTPException(status_code=400, detail="Enable the account first")
-    return _issue_link(session, user, admin)
+    return _issue_link(session, request, user, admin, "user.password_link")
 
 
 @router.patch("/{user_id}", response_model=UserRead)
 def update_user(
     user_id: int,
     payload: UserUpdate,
+    request: Request,
     session: Session = Depends(get_session),
     admin: User = Depends(require_admin),
 ):
@@ -92,11 +97,16 @@ def update_user(
         raise HTTPException(status_code=400, detail="Admins cannot demote themselves")
     if user.id == admin.id and payload.disabled:
         raise HTTPException(status_code=400, detail="Admins cannot disable themselves")
-    if payload.role is not None:
+    changes = {}
+    if payload.role is not None and payload.role != user.role:
+        changes["role"] = [user.role.value, payload.role.value]
         user.role = payload.role
-    if payload.disabled is not None:
+    if payload.disabled is not None and payload.disabled != user.disabled:
+        changes["disabled"] = [user.disabled, payload.disabled]
         user.disabled = payload.disabled
     session.add(user)
+    if changes:
+        audit.record(session, request, admin, "user.update", "user", user.id, user.username, **changes)
     session.commit()
     session.refresh(user)
     return user
@@ -105,6 +115,7 @@ def update_user(
 @router.delete("/{user_id}")
 def delete_user(
     user_id: int,
+    request: Request,
     session: Session = Depends(get_session),
     admin: User = Depends(require_admin),
 ):
@@ -124,6 +135,7 @@ def delete_user(
     session.exec(update(ShareLink).where(ShareLink.created_by == user_id).values(created_by=None))
     session.exec(delete(UserToken).where(UserToken.user_id == user_id))
     session.exec(update(UserToken).where(UserToken.created_by == user_id).values(created_by=None))
+    audit.record(session, request, admin, "user.delete", "user", user.id, user.username, role=user.role.value)
     session.delete(user)
     session.commit()
     return {"ok": True}
@@ -137,6 +149,7 @@ def me(user: User = Depends(get_current_user)):
 @router.post("/me/password", response_model=Token)
 def change_own_password(
     payload: PasswordChange,
+    request: Request,
     session: Session = Depends(get_session),
     user: User = Depends(get_current_user),
 ):
@@ -149,6 +162,7 @@ def change_own_password(
     _check_password(payload.new_password)
     user.password_hash = hash_password(payload.new_password)
     session.add(user)
+    audit.record(session, request, user, "user.password_set", "user", user.id, user.username, via="account")
     session.commit()
     session.refresh(user)
     token = create_access_token(

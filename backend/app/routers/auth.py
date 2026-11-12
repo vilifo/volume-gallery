@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlmodel import Session, col, delete, select, update
 
@@ -9,6 +9,7 @@ from ..security import (
     _DUMMY_HASH,
 )
 from ..schemas import Token, SetPassword, SetPasswordCheck, SetPasswordInfo
+from .. import audit
 from ..invites import aware, hash_token
 from ..utils import get_utc_now
 
@@ -16,7 +17,7 @@ router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 
 @router.post("/login", response_model=Token)
-def login(form: OAuth2PasswordRequestForm = Depends(), session: Session = Depends(get_session)):
+def login(request: Request, form: OAuth2PasswordRequestForm = Depends(), session: Session = Depends(get_session)):
     user = session.exec(select(User).where(User.username == form.username)).first()
 
     # Always run password verification to prevent username/status enumeration via timing
@@ -25,6 +26,8 @@ def login(form: OAuth2PasswordRequestForm = Depends(), session: Session = Depend
     password_valid = verify_password(form.password, target_hash)
 
     if not user or user.disabled or not password_valid:
+        reason = "unknown user" if not user else "disabled" if user.disabled else "bad password"
+        audit.record_now(session, request, None, "auth.login_failed", "user", user.id if user else None, user.username if user else "", reason=reason)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid credentials",
@@ -37,6 +40,7 @@ def login(form: OAuth2PasswordRequestForm = Depends(), session: Session = Depend
         session.commit()
         session.refresh(user)
 
+    audit.record_now(session, request, user, "auth.login", "user", user.id, user.username)
     token = create_access_token(
         subject=user.username,
         role=user.role.value,
@@ -73,7 +77,7 @@ def check_password_link(payload: SetPasswordCheck, session: Session = Depends(ge
 
 
 @router.post("/set-password", response_model=Token)
-def set_password_from_link(payload: SetPassword, session: Session = Depends(get_session)):
+def set_password_from_link(payload: SetPassword, request: Request, session: Session = Depends(get_session)):
     """Sets the password with a one-time link, uses the link up and signs the user in. Sessions that were
     open before (a reset) stop working: the tokens carry a fingerprint of the old password."""
     row, user = _link_user(session, payload.token)
@@ -91,6 +95,7 @@ def set_password_from_link(payload: SetPassword, session: Session = Depends(get_
     user.password_hash = hash_password(payload.password)
     session.add(user)
     session.exec(delete(UserToken).where(UserToken.user_id == user.id, UserToken.id != row.id))  # any other link of the user
+    audit.record(session, request, user, "user.password_set", "user", user.id, user.username, via="link", purpose=row.purpose)
     session.commit()
     session.refresh(user)
     token = create_access_token(subject=user.username, role=user.role.value, pwv=password_fingerprint(user.password_hash))

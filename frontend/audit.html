@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Audit log — Volume Gallery</title>
+<script src="/js/theme-init.js?v=hist1"></script>
+<link rel="stylesheet" href="/css/style.css?v=help2" />
+<style>
+  .filters { display: flex; flex-wrap: wrap; gap: 0.5em; align-items: center; margin: 0.8em 0; }
+  .filters input, .filters select { min-width: 0; }
+  .filters input[type="search"] { flex: 1 1 150px; }
+  .sub { color: var(--text-dim); font-size: 0.85em; }
+  td.when { white-space: nowrap; font-family: var(--mono); font-size: 0.85em; }
+  td.ip { font-family: var(--mono); font-size: 0.85em; }
+  .detail { color: var(--text-dim); font-size: 0.85em; word-break: break-word; }
+  .act { font-family: var(--mono); font-size: 0.9em; }
+  .act.bad { color: var(--danger); }
+  .more { margin: 1em 0; }
+</style>
+</head>
+<body>
+  <div class="app-shell" id="shell"></div>
+
+  <script type="module">
+    import { api, requireLogin, getRole, getUsername, renderShell, wireLogout, escapeHtml } from "/js/api.js?v=inv1";
+
+    requireLogin();
+    const role = getRole();
+    if (role !== "admin") window.location.href = "/index.html";
+
+    document.getElementById("shell").innerHTML = `
+      ${renderShell("audit", role, getUsername())}
+      <main>
+        <div class="toolbar">
+          <h1>Audit log</h1>
+          <button type="button" id="export-btn" title="Download the rows that are loaded as a CSV file">Export CSV</button>
+        </div>
+        <p class="sub">Who did what, newest first: sign-ins, accounts and passwords, uploads and deletions, access grants and share links. Viewing is not logged.</p>
+        <div id="error" style="display:none" class="error-box"></div>
+        <form class="filters" id="filters">
+          <select id="f-action" aria-label="Kind of event">
+            <option value="">All events</option>
+            <option value="auth.">Sign-ins</option>
+            <option value="auth.login_failed">Failed sign-ins</option>
+            <option value="user.">Accounts and passwords</option>
+            <option value="volume.">Volumes</option>
+            <option value="mesh.">Meshes</option>
+            <option value="pointcloud.">Point clouds</option>
+            <option value="access.">Access grants</option>
+            <option value="share.">Share links</option>
+          </select>
+          <input type="search" id="f-actor" placeholder="Done by (user)" aria-label="Done by" />
+          <input type="search" id="f-target" placeholder="Done to (name, slug, code)" aria-label="Done to" />
+          <input type="search" id="f-ip" placeholder="Address" aria-label="Address" />
+          <button type="submit" class="primary">Filter</button>
+        </form>
+        <table class="responsive">
+          <thead><tr><th>When</th><th>Who</th><th>What</th><th>To</th><th>Address</th></tr></thead>
+          <tbody id="rows"></tbody>
+        </table>
+        <p id="empty" class="dim" hidden>Nothing recorded for this filter.</p>
+        <div class="more"><button type="button" id="more-btn" hidden>Load older events</button></div>
+      </main>
+    `;
+    wireLogout();
+
+    const LABELS = {
+      "auth.login": "signed in",
+      "auth.login_failed": "failed sign-in",
+      "user.create": "created user",
+      "user.password_link": "made a password link for",
+      "user.password_set": "set password of",
+      "user.update": "changed user",
+      "user.delete": "deleted user",
+      "volume.create": "uploaded volume",
+      "volume.delete": "deleted volume",
+      "mesh.create": "uploaded mesh",
+      "mesh.delete": "deleted mesh",
+      "pointcloud.create": "uploaded point cloud",
+      "pointcloud.delete": "deleted point cloud",
+      "access.grant": "gave access to",
+      "access.revoke": "removed access to",
+      "share.create": "created share link",
+      "share.delete": "deleted share link",
+    };
+
+    let events = [];
+    let next = null;
+    const body = document.getElementById("rows");
+
+    // "role: reader -> editor", "disabled: false -> true", "user: alice" ...
+    function detailText(e) {
+      return Object.entries(e.detail || {})
+        .map(([k, v]) => (Array.isArray(v) ? `${k}: ${v.join(" \u2192 ")}` : `${k}: ${v}`))
+        .join(", ");
+    }
+
+    function rowHtml(e) {
+      const bad = e.action === "auth.login_failed";
+      const when = new Date(e.at);
+      const target = e.target_name ? escapeHtml(e.target_name) : "";
+      return `<tr>
+        <td class="when" title="${escapeHtml(when.toISOString())}">${escapeHtml(when.toLocaleString())}</td>
+        <td>${e.actor_name ? escapeHtml(e.actor_name) : '<span class="dim">\u2014</span>'}</td>
+        <td><span class="act${bad ? " bad" : ""}">${escapeHtml(LABELS[e.action] || e.action)}</span>
+            <div class="detail">${escapeHtml(detailText(e))}</div></td>
+        <td>${target}${e.target_type && e.target_type !== "user" ? ` <span class="dim">(${escapeHtml(e.target_type)})</span>` : ""}</td>
+        <td class="ip">${escapeHtml(e.ip || "")}</td>
+      </tr>`;
+    }
+
+    function filters() {
+      return {
+        action: document.getElementById("f-action").value,
+        actor: document.getElementById("f-actor").value,
+        target: document.getElementById("f-target").value,
+        ip: document.getElementById("f-ip").value,
+      };
+    }
+
+    async function load(more = false) {
+      const err = document.getElementById("error");
+      err.style.display = "none";
+      try {
+        const page = await api.adminAudit({ ...filters(), before: more ? next : null });
+        events = more ? events.concat(page.events) : page.events;
+        next = page.next_before;
+      } catch (e) {
+        err.textContent = e.message;
+        err.style.display = "block";
+        return;
+      }
+      body.innerHTML = events.map(rowHtml).join("");
+      document.getElementById("empty").hidden = events.length > 0;
+      document.getElementById("more-btn").hidden = !next;
+    }
+
+    document.getElementById("filters").addEventListener("submit", (e) => { e.preventDefault(); load(false); });
+    document.getElementById("f-action").addEventListener("change", () => load(false));
+    document.getElementById("more-btn").addEventListener("click", () => load(true));
+
+    document.getElementById("export-btn").addEventListener("click", () => {
+      const cell = (v) => `"${String(v ?? "").replace(/"/g, '""').replace(/^([=+\-@])/, "'$1")}"`; // (no formulas in a spreadsheet)
+      const lines = [["time (UTC)", "user", "action", "target type", "target", "details", "address"].map(cell).join(",")];
+      for (const e of events) lines.push([e.at, e.actor_name, e.action, e.target_type, e.target_name, detailText(e), e.ip].map(cell).join(","));
+      const url = URL.createObjectURL(new Blob([lines.join("\r\n")], { type: "text/csv" }));
+      const a = Object.assign(document.createElement("a"), { href: url, download: "audit-log.csv" });
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    });
+
+    load();
+  </script>
+</body>
+</html>

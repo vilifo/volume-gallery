@@ -15,6 +15,8 @@ class Settings:
     # Shortest password accepted when a password is set or changed
     MIN_PASSWORD_LENGTH: int = int(os.environ.get("VG_MIN_PASSWORD_LENGTH", "8"))
     # How long the link an admin generates (to set a new user's password or to reset one) works, in hours.
+    # The audit log (who did what: see audit.py) is kept this many days; 0 keeps it for ever.
+    AUDIT_RETENTION_DAYS: int = int(os.environ.get("VG_AUDIT_RETENTION_DAYS", "0"))
     PASSWORD_LINK_HOURS: int = int(os.environ.get("VG_PASSWORD_LINK_HOURS", "72"))
 
     # --- Share links (/s/<code>) ---

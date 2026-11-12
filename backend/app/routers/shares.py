@@ -13,6 +13,7 @@ from sqlmodel import Session, select
 from ..config import settings
 from ..database import get_session
 from ..deps import require_editor
+from .. import audit
 from ..models import Mesh, PointCloud, ShareLink, ShareView, User, Volume
 from ..schemas import ShareConfigRead, ShareLinkCreate, ShareLinkRead
 from ..security import create_share_session_token
@@ -172,6 +173,10 @@ def create_share_link(
         expires_at=NEVER_EXPIRES if never else now + timedelta(minutes=payload.expires_in_minutes),
     )
     session.add(share)
+    session.flush()  # (the id for the audit line; both are committed together)
+    audit.record(session, request, editor, "share.create", "share", share.id, share.code, asset_type=share.asset_type,
+                 asset_id=share.asset_id, can_download=share.can_download,
+                 expires=None if never else share.expires_at.isoformat())
     session.commit()
     session.refresh(share)
     return _share_read(share, request)
@@ -180,13 +185,15 @@ def create_share_link(
 @router.delete("/api/shares/{share_id}")
 def delete_or_revoke_share_link(
     share_id: int,
+    request: Request,
     session: Session = Depends(get_session),
-    _editor: User = Depends(require_editor),
+    editor: User = Depends(require_editor),
 ):
     share = session.get(ShareLink, share_id)
     if not share:
         raise HTTPException(status_code=404, detail="Share link not found")
     session.exec(delete(ShareView).where(ShareView.share_id == share.id))
+    audit.record(session, request, editor, "share.delete", "share", share.id, share.code, asset_type=share.asset_type, asset_id=share.asset_id)
     session.delete(share)
     session.commit()
     return {"ok": True}

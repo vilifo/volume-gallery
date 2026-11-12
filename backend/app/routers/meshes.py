@@ -17,7 +17,7 @@ from ..schemas import MeshRead, AssetStatusRead, AssetUpdate, AccessGrant, Grant
 from ..deps import file_token_revoked, get_current_user, require_editor
 from ..security import create_file_token, decode_token
 from ..config import settings
-from .. import workdir, jobs
+from .. import audit, workdir, jobs
 from ..organize import apply_asset_update, split_tags
 from ..helpers.mesh import EXTRA_DIR, MAX_EXTRA_FILES, convert_mesh_to_nxz, download_files, extra_name, extra_suffixes, list_extras
 from ..utils import SLUG_RE, _now  # shared slug validation + timestamp helper
@@ -252,6 +252,7 @@ def get_mesh_status(mesh_id: int, session: Session = Depends(get_session), user:
 
 @router.post("", response_model=MeshRead)
 def create_mesh(
+    request: Request,
     background_tasks: BackgroundTasks,
     slug: str = Form(...),
     title: str = Form(...),
@@ -297,6 +298,8 @@ def create_mesh(
         status_log=f"{_now()}  Upload received, queued for processing\n",
     )
     session.add(mesh)
+    session.flush()  # (the id for the audit line; both are committed together)
+    audit.record(session, request, editor, "mesh.create", "mesh", mesh.id, mesh.slug, title=title)
     session.commit()
     session.refresh(mesh)
 
@@ -401,7 +404,7 @@ def delete_thumbnail(mesh_id: int, session: Session = Depends(get_session), _edi
 
 
 @router.delete("/{mesh_id}")
-def delete_mesh(mesh_id: int, session: Session = Depends(get_session), _editor: User = Depends(require_editor)):
+def delete_mesh(mesh_id: int, request: Request, session: Session = Depends(get_session), editor: User = Depends(require_editor)):
     mesh = session.get(Mesh, mesh_id)
     if not mesh:
         raise HTTPException(status_code=404, detail="Mesh not found")
@@ -410,6 +413,7 @@ def delete_mesh(mesh_id: int, session: Session = Depends(get_session), _editor: 
     workdir.discard_job("meshes", mesh.slug)
     for grant in session.exec(select(MeshAccess).where(MeshAccess.mesh_id == mesh_id)).all():
         session.delete(grant)
+    audit.record(session, request, editor, "mesh.delete", "mesh", mesh.id, mesh.slug, title=mesh.title)
     session.delete(mesh)
     session.commit()
     return {"ok": True}
@@ -431,7 +435,7 @@ def list_access(mesh_id: int, session: Session = Depends(get_session), _editor: 
 
 @router.post("/{mesh_id}/access")
 def grant_access(
-    mesh_id: int, payload: AccessGrant, session: Session = Depends(get_session), editor: User = Depends(require_editor)
+    mesh_id: int, payload: AccessGrant, request: Request, session: Session = Depends(get_session), editor: User = Depends(require_editor)
 ):
     mesh = session.get(Mesh, mesh_id)
     target = session.get(User, payload.user_id)
@@ -444,24 +448,31 @@ def grant_access(
     if existing:
         existing.can_download = payload.can_download
         session.add(existing)
+        audit.record(session, request, editor, "access.grant", "mesh", mesh.id, mesh.slug, user=target.username,
+                     user_id=target.id, can_download=payload.can_download)
         session.commit()
         return {"ok": True}
     session.add(MeshAccess(
         user_id=payload.user_id, mesh_id=mesh_id, granted_by=editor.id, can_download=payload.can_download
     ))
+    audit.record(session, request, editor, "access.grant", "mesh", mesh.id, mesh.slug, user=target.username,
+                 user_id=target.id, can_download=payload.can_download)
     session.commit()
     return {"ok": True}
 
 
 @router.delete("/{mesh_id}/access/{user_id}")
 def revoke_access(
-    mesh_id: int, user_id: int, session: Session = Depends(get_session), _editor: User = Depends(require_editor)
+    mesh_id: int, user_id: int, request: Request, session: Session = Depends(get_session), editor: User = Depends(require_editor)
 ):
     _require_standalone(session.get(Mesh, mesh_id), "Access follows the volume it belongs to")
     grant = session.exec(
         select(MeshAccess).where(MeshAccess.mesh_id == mesh_id, MeshAccess.user_id == user_id)
     ).first()
     if grant:
+        mesh, target = session.get(Mesh, mesh_id), session.get(User, user_id)
+        audit.record(session, request, editor, "access.revoke", "mesh", mesh_id, mesh.slug if mesh else "",
+                     user=target.username if target else "", user_id=user_id)
         session.delete(grant)
         session.commit()
     return {"ok": True}

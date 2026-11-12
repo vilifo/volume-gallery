@@ -63,6 +63,24 @@ class PasswordChange(BaseModel):
     new_password: str
 
 
+class AuditEventRead(BaseModel):
+    id: int
+    at: datetime
+    actor_id: Optional[int] = None
+    actor_name: str = ""
+    action: str
+    target_type: str = ""
+    target_id: Optional[int] = None
+    target_name: str = ""
+    detail: dict = {}
+    ip: str = ""
+
+
+class AuditPage(BaseModel):
+    events: List[AuditEventRead]
+    next_before: Optional[int] = None  # pass as `before` for the next (older) page; None at the end
+
+
 class UserUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")  # (an admin no longer sets other people's passwords: they use a link)
     role: Optional[Role] = None
