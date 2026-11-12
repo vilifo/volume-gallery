@@ -32,6 +32,26 @@ class User(SQLModel, table=True):
     )
     disabled: bool = Field(default=False)
 
+    @property
+    def pending(self) -> bool:
+        """An account an admin created that its user has not set a password for yet (it cannot sign in)."""
+        return not self.password_hash
+
+
+class UserToken(SQLModel, table=True):
+    """A one-time link for setting a password (see invites.py). Only the hash of the token is kept."""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="user.id", index=True)
+    purpose: str  # invites.PURPOSE_SETUP | PURPOSE_RESET
+    token_hash: str = Field(index=True, unique=True)
+    created_by: Optional[int] = Field(default=None, foreign_key="user.id")
+    created_at: datetime = Field(
+        default_factory=get_utc_now,
+        sa_type=DateTime(timezone=True)
+    )
+    expires_at: datetime = Field(sa_type=DateTime(timezone=True))
+    used_at: Optional[datetime] = Field(default=None, sa_type=DateTime(timezone=True))
+
 
 class AssetBase(SQLModel):
     slug: str = Field(index=True, unique=True)

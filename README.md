@@ -7,7 +7,7 @@ A small self-hosted gallery for CT volumes, viewed in-browser with [kiln-render]
 Volumes, meshes, and point clouds are managed through a web UI. The gallery can be searched, filtered, sorted, and laid out by folder, flat, or by type. Share links last from 1 hour up to 1 year, or never expire.
 
 Three user roles manage the system:
-*   **Admin:** Add/remove/disable users, change roles, reset users' passwords.
+*   **Admin:** Add/remove/disable users, change roles, make password links for new users and resets.
 *   **Editor:** Upload/delete volumes, grant or revoke reader access to them. (Editors can also manage metadata, folders, and thumbnails).
 *   **Reader:** View the volumes they've been given access to, download meshes.
 
@@ -38,7 +38,7 @@ Then open `http://localhost:8000`, sign in as `admin` with the password you set.
 
 Detailed documentation has been split into the following guides:
 
-*   **[Usage & UI Guide](docs/usage.md)**: Uploading volumes, UI features (bookmarks, animations, slice sweeps), branding, and histograms.
-*   **[Deployment Guide](docs/deployment.md)**: TrueNAS SCALE deployment, HTTPS/TLS requirements, Docker Hub publishing, and backups.
-*   **[Architecture & Internals](docs/architecture.md)**: Backend/frontend design, job queues (Redis), background processing, and permissions.
+*   **[Usage & UI Guide](docs/usage_ui_guide.md)**: Uploading volumes, UI features (bookmarks, animations, slice sweeps), branding, and histograms.
+*   **[Deployment Guide](docs/deployment_guide.md)**: TrueNAS SCALE deployment, HTTPS/TLS requirements, Docker Hub publishing, and backups.
+*   **[Architecture & Internals](docs/architecture_internals.md)**: Backend/frontend design, job queues (Redis), background processing, and permissions.
 *   **[Kiln Volume Format](docs/kiln_volume_format.md)**: Deep dive into the sharded volume format specification.

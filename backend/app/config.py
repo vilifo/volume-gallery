@@ -14,6 +14,8 @@ class Settings:
     FILE_TOKEN_EXPIRE_MINUTES: int = int(os.environ.get("VG_FILE_TOKEN_MINUTES", "30"))
     # Shortest password accepted when a password is set or changed
     MIN_PASSWORD_LENGTH: int = int(os.environ.get("VG_MIN_PASSWORD_LENGTH", "8"))
+    # How long the link an admin generates (to set a new user's password or to reset one) works, in hours.
+    PASSWORD_LINK_HOURS: int = int(os.environ.get("VG_PASSWORD_LINK_HOURS", "72"))
 
     # --- Share links (/s/<code>) ---
     SHARE_CODE_MIN_LENGTH: int = max(4, int(os.environ.get("VG_SHARE_CODE_MIN_LENGTH", "8")))

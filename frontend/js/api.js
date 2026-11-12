@@ -697,6 +697,8 @@ export const api = {
     listUsers() {
         return request("/api/users");
     },
+    // Creates an account without a password: resolves with { user, token, purpose, expires_at }; the user
+    // sets the password with the link passwordLinkUrl(token) (one use).
     createUser(payload) {
         return request("/api/users", {
             method: "POST",
@@ -711,10 +713,44 @@ export const api = {
             body: JSON.stringify(payload),
         });
     },
+    // A new one-time link to set the password of a user (a new account that has none, or a reset); the
+    // earlier links of the user stop working. Resolves like createUser.
+    createPasswordLink(id) {
+        return request(`/api/users/${id}/password-link`, {method: "POST"});
+    },
     deleteUser(id) {
         return request(`/api/users/${id}`, {method: "DELETE"});
     },
+
+    // setting a password from a link (no sign-in: the link is the credential)
+    checkPasswordLink(token) {
+        return publicPost("/api/auth/set-password/check", {token});
+    },
+    // Sets the password, uses the link up and resolves with a session like login() does.
+    setPasswordWithLink(token, password) {
+        return publicPost("/api/auth/set-password", {token, password});
+    },
 };
+
+// The link to hand to a user (the token is in the fragment: it is not sent to the server by the browser,
+// so it stays out of access logs and referrers).
+export function passwordLinkUrl(token) {
+    return `${window.location.origin}/set-password.html#token=${encodeURIComponent(token)}`;
+}
+
+async function publicPost(path, body) {
+    const res = await fetch(path, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
+    if (!res.ok) {
+        let detail = `Request failed (${res.status})`;
+        try {
+            const d = (await res.json()).detail;
+            detail = typeof d === "string" ? d : Array.isArray(d) ? d.map((e) => e.msg).join("; ") : detail;
+        } catch (_) {
+        }
+        throw new Error(detail);
+    }
+    return res.json();
+}
 
 // Theme preference: "light" | "dark" | absent (= follow the OS setting).
 // Keep THEME_KEY in sync with js/theme-init.js, which applies it before first paint.

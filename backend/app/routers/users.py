@@ -4,12 +4,13 @@ from sqlmodel import Session, delete, select, update
 
 from ..database import get_session
 from ..models import (
-    User, Role, Volume, VolumeAccess, Mesh, MeshAccess, PointCloud, PointCloudAccess, ShareLink,
+    User, UserToken, Role, Volume, VolumeAccess, Mesh, MeshAccess, PointCloud, PointCloudAccess, ShareLink,
 )
-from ..schemas import UserCreate, UserRead, UserUpdate, PasswordChange, Token
+from ..schemas import UserCreate, UserRead, UserUpdate, UserLink, PasswordChange, Token
 from ..security import (
     hash_password, verify_password, validate_new_password, create_access_token, password_fingerprint,
 )
+from ..invites import PURPOSE_RESET, PURPOSE_SETUP, aware, hash_token, link_expiry, new_token
 from ..deps import require_admin, get_current_user
 
 router = APIRouter(prefix="/api/users", tags=["users"])
@@ -27,25 +28,54 @@ def list_users(session: Session = Depends(get_session), _admin: User = Depends(r
     return session.exec(select(User)).all()
 
 
-@router.post("", response_model=UserRead)
+def _issue_link(session: Session, user: User, admin: User) -> UserLink:
+    """Makes a new one-time link for `user` (the ones issued before stop working) and commits it. The token is
+    in the result only: the database keeps its hash."""
+    session.exec(delete(UserToken).where(UserToken.user_id == user.id))
+    token = new_token()
+    purpose = PURPOSE_SETUP if user.pending else PURPOSE_RESET
+    row = UserToken(
+        user_id=user.id, purpose=purpose, token_hash=hash_token(token), created_by=admin.id, expires_at=link_expiry(),
+    )
+    session.add(row)
+    session.commit()
+    session.refresh(user)
+    return UserLink(user=UserRead.model_validate(user), token=token, purpose=purpose, expires_at=aware(row.expires_at))
+
+
+@router.post("", response_model=UserLink)
 def create_user(
     payload: UserCreate,
     session: Session = Depends(get_session),
-    _admin: User = Depends(require_admin),
+    admin: User = Depends(require_admin),
 ):
+    """Creates an account without a password and returns the one-time link with which its user sets one."""
     existing = session.exec(select(User).where(User.username == payload.username)).first()
     if existing:
         raise HTTPException(status_code=409, detail="Username already exists")
-    _check_password(payload.password)
-    user = User(
-        username=payload.username,
-        password_hash=hash_password(payload.password),
-        role=payload.role,
-    )
+    user = User(username=payload.username, password_hash="", role=payload.role)
     session.add(user)
-    session.commit()
-    session.refresh(user)
-    return user
+    session.flush()  # (the id; committed together with the link)
+    return _issue_link(session, user, admin)
+
+
+@router.post("/{user_id}/password-link", response_model=UserLink)
+def create_password_link(
+    user_id: int,
+    session: Session = Depends(get_session),
+    admin: User = Depends(require_admin),
+):
+    """A new link for a user: to set the password of an account that has none yet (the earlier link may have
+    expired or got lost) or to reset a forgotten one. The user's current password and sessions stay valid until
+    the link is used; any link issued before this one stops working."""
+    user = session.get(User, user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    if user.id == admin.id:
+        raise HTTPException(status_code=400, detail="Change your own password on the Account page")
+    if user.disabled:
+        raise HTTPException(status_code=400, detail="Enable the account first")
+    return _issue_link(session, user, admin)
 
 
 @router.patch("/{user_id}", response_model=UserRead)
@@ -66,10 +96,6 @@ def update_user(
         user.role = payload.role
     if payload.disabled is not None:
         user.disabled = payload.disabled
-    if payload.password is not None:
-        # Admin password reset. The user's existing sessions stop working (see deps.get_current_user).
-        _check_password(payload.password)
-        user.password_hash = hash_password(payload.password)
     session.add(user)
     session.commit()
     session.refresh(user)
@@ -96,6 +122,8 @@ def delete_user(
     for asset in (Volume, Mesh, PointCloud):
         session.exec(update(asset).where(asset.created_by == user_id).values(created_by=None))
     session.exec(update(ShareLink).where(ShareLink.created_by == user_id).values(created_by=None))
+    session.exec(delete(UserToken).where(UserToken.user_id == user_id))
+    session.exec(update(UserToken).where(UserToken.created_by == user_id).values(created_by=None))
     session.delete(user)
     session.commit()
     return {"ok": True}
