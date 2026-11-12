@@ -338,7 +338,7 @@ export function createTimeline({
     scrub = null;
     $("tl-back").hidden = true;
     try {
-      if (s.slices) s.slices.views.state.setCursor({ [s.slices.normal]: s.slices.index }, "play");
+      if (s.slices) s.slices.views.setSlice(s.slices.axis, s.slices.index, "play");
       else {
         const v = getViewer();
         if (v) {
@@ -369,9 +369,9 @@ export function createTimeline({
       const views = getSlices();
       const info = sliceInfo();
       if (!views || !info) return;
-      if (!scrub) { scrub = { slices: { views, normal: info.normal, index: info.index } }; $("tl-back").hidden = false; }
+      if (!scrub) { scrub = { slices: { views, axis: info.axis, index: info.index } }; $("tl-back").hidden = false; }
       const idx = sweepIndices(Math.min(info.count - 1, spec.from_index), Math.min(info.count - 1, spec.to_index), spec.step, spec.end === "pingpong");
-      views.state.setCursor({ [info.normal]: idx[Math.min(idx.length - 1, Math.floor(Math.min(0.9999, u) * idx.length))] }, "play");
+      views.setSlice(info.axis, idx[Math.min(idx.length - 1, Math.floor(Math.min(0.9999, u) * idx.length))], "play");
       return;
     }
     const v = getViewer();

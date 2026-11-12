@@ -1,8 +1,16 @@
-"""Plane extraction for orthogonal (XY / XZ / YZ) and arbitrary oblique slice views."""
+"""Slice views: plans of arbitrarily oriented planes and the blocks they are assembled from.
+
+The browser asks for the plan of a plane (plan_plane), then for the blocks it lacks (stream_blocks); it
+assembles the image itself. Whole axis-aligned planes can still be fetched with get_plane."""
 from __future__ import annotations
 
+import asyncio
+import itertools
 import json
+import logging
 import os
+import queue
+import struct
 import threading
 import time
 import zlib
@@ -12,10 +20,10 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
-from scipy.ndimage import map_coordinates
-from scipy.spatial.transform import Rotation
 
 from ..config import settings
+
+log = logging.getLogger(__name__)
 
 # Use Intel ISA-L SIMD decompression if installed (4x-6x faster than stdlib zlib)
 try:
@@ -185,8 +193,7 @@ def _decompress_raw_deflate_prefix(data: bytes | memoryview, max_length: int) ->
 
 class VolumeSlicesKiln:
     """
-    Read access to orthogonal (XY/XZ/YZ) and arbitrary oblique planes of one
-    binary-sharded Kiln volume level.
+    Read access to the planes and blocks of one binary-sharded Kiln volume level.
     - On LOD 0 (`tiled66` with `lod0_subindex.npy`), uses 64 (17/16/16/17)^3
       independently-decompressible sub-blocks per brick.
     - On LOD > 0 (`z_sync` with `lod{N}_zindex.npy`), uses 66 Z-plane blocks.
@@ -269,6 +276,10 @@ class VolumeSlicesKiln:
         self._subidx = np.load(npy_subindex_file, mmap_mode="r") if npy_subindex_file.exists() else None
         if self._subidx is not None:
             self.brick_layout = "tiled66"
+        # blocks (see read_block): 16^3 sub-blocks on LOD 0, whole bricks on the coarser levels
+        self.block_size = 16 if (self._subidx is not None and self._compressed) else self.brick_size
+        self._blocks_per_brick = max(1, self.brick_size // self.block_size)
+        self.block_grid = {a: -(-self.dims[a] // self.block_size) for a in "xyz"}
 
         # Persistent file descriptor (os.pread is thread-safe across _IO_POOL)
         self._fd = os.open(self.bin_file, os.O_RDONLY)
@@ -344,7 +355,7 @@ class VolumeSlicesKiln:
             "channels": self.channels,
             "range": [lo, hi],
             "window": self.suggested_window(),
-            "angled": True,  # the /oblique endpoint exists (read_angled_plane)
+            "blockSize": self.block_size,
         }
 
     def suggested_window(self) -> dict:
@@ -875,287 +886,152 @@ class VolumeSlicesKiln:
 
         return self._read_direct(axis, index, channel), "direct"
 
-    # --------------------------------------------------- arbitrary oblique slices
+    # ------------------------------------------------- blocks: the unit the browser is fed with
+    #
+    # A slice is no longer cut out here. The browser asks for a *plan* (which blocks a plane touches and how
+    # many of its pixels read from each, see plan_plane) and then for the blocks themselves (read_block,
+    # streamed by stream_blocks), and assembles the image from them. A block is a 16^3 sub-block on LOD 0
+    # (`tiled66`) and a whole brick core (brick_size^3) on the coarser levels; blocks are addressed by their
+    # block coordinates (gx, gy, gz) and hold their voxels in (z, y, x) order, as the transport dtype.
 
-    def read_angled_plane(
-        self,
-        center_vox: Tuple[float, float, float],
-        angles_deg: Tuple[float, float, float],
-        size: int,
-        scale: float = 1.0,
-        order: int = 1,
-    ) -> Tuple[np.ndarray, dict]:
-        """A square `size` x `size` image of the plane through `center_vox` (x, y, z in voxels, as the
-        viewer's cursor) that is the XY plane rotated by `angles_deg` (see angled_basis). One image pixel
-        is `scale` times the finest voxel spacing; the centre pixel (size / 2) sits on `center_vox`.
-        Returns (image, geometry) with geometry = {u, v, pixel} for mapping image pixels back to voxels:
-        voxel = center + (col - size/2) * pixel * v / spacing + (row - size/2) * pixel * u / spacing,
-        u and v being unit vectors in physical (x, y, z) space."""
-        u, v, n = angled_basis(angles_deg)
-        sx, sy, sz = self.spacing["x"], self.spacing["y"], self.spacing["z"]
-        pixel = min(sx, sy, sz) * float(scale)
-        # the extractor works in (z, y, x) order, columns = [rows direction, columns direction, normal]
-        rot = np.column_stack([u[::-1], v[::-1], n[::-1]])
-        cx, cy, cz = center_vox
-        img = self.read_arbitrary_slice_matrix(
-            center_mm=(cz * sz, cy * sy, cx * sx),
-            rotation_matrix=rot,
-            output_shape=(size, size),
-            output_pixel_size_mm=pixel,
-            order=order,
-        )
-        return img, {"u": u.tolist(), "v": v.tolist(), "pixel": pixel}
-
-    def read_arbitrary_slice_matrix(
-        self,
-        center_mm: Tuple[float, float, float],
-        rotation_matrix: np.ndarray,
-        output_shape: Tuple[int, int],
-        output_pixel_size_mm: float = 1.0,
-        order: int = 1,
-    ) -> np.ndarray:
-        """
-        Extract an arbitrary 2D oblique slice defined by `center_mm` (c_z, c_y, c_x)
-        and `rotation_matrix` (3x3, where column 0 is vertical axis u and column 1
-        is horizontal axis v in (z, y, x) physical coordinates).
-
-        On LOD 0 (`tiled66`), determines the exact sparse set of 16x16x16 sub-blocks
-        touched by the oblique plane (plus `order` interpolation halo) and only reads
-        and decompresses those specific sub-blocks in parallel across `_IO_POOL`.
-        """
-        rotation_matrix = np.asarray(rotation_matrix, dtype=np.float64)
-        if rotation_matrix.shape != (3, 3):
-            raise ValueError(f"Expected 3x3 rotation_matrix, got {rotation_matrix.shape}")
-
-        u = rotation_matrix[:, 0]
-        v = rotation_matrix[:, 1]
-
-        h, w = int(output_shape[0]), int(output_shape[1])
-        y_indices = (np.arange(h, dtype=np.float64) - h / 2.0) * output_pixel_size_mm
-        x_indices = (np.arange(w, dtype=np.float64) - w / 2.0) * output_pixel_size_mm
-        yy, xx = np.meshgrid(y_indices, x_indices, indexing="ij")
-
-        c_z, c_y, c_x = (float(center_mm[0]), float(center_mm[1]), float(center_mm[2]))
-        pts_z_mm = c_z + yy * u[0] + xx * v[0]
-        pts_y_mm = c_y + yy * u[1] + xx * v[1]
-        pts_x_mm = c_x + yy * u[2] + xx * v[2]
-
-        pts_z = pts_z_mm / self.voxel_spacing[0]
-        pts_y = pts_y_mm / self.voxel_spacing[1]
-        pts_x = pts_x_mm / self.voxel_spacing[2]
-
-        dz_dim, dy_dim, dx_dim = self.orig_shape
-        margin = max(1, int(order))
-
-        # Mask of sample points that actually land inside the volume
-        in_bounds = (
-            (pts_z >= 0) & (pts_z < dz_dim) &
-            (pts_y >= 0) & (pts_y < dy_dim) &
-            (pts_x >= 0) & (pts_x < dx_dim)
-        )
-        if not np.any(in_bounds):
-            return np.zeros(output_shape, dtype=np.dtype(self.dtype))
-
-        valid_z = pts_z[in_bounds]
-        valid_y = pts_y[in_bounds]
-        valid_x = pts_x[in_bounds]
-
-        z_min = max(0, int(np.floor(valid_z.min())) - margin)
-        z_max = min(dz_dim, int(np.ceil(valid_z.max())) + margin + 1)
-        y_min = max(0, int(np.floor(valid_y.min())) - margin)
-        y_max = min(dy_dim, int(np.ceil(valid_y.max())) + margin + 1)
-        x_min = max(0, int(np.floor(valid_x.min())) - margin)
-        x_max = min(dx_dim, int(np.ceil(valid_x.max())) + margin + 1)
-
-        if z_min >= z_max or y_min >= y_max or x_min >= x_max:
-            return np.zeros(output_shape, dtype=np.dtype(self.dtype))
-
-        box_bytes = (z_max - z_min + 32) * (y_max - y_min + 32) * (x_max - x_min + 32) * self._np_dtype.itemsize
-        if box_bytes > settings.OBLIQUE_MAX_BOX_MB * 1024 * 1024:
-            raise SliceError(
-                f"This angled slice is too large to extract ({box_bytes // (1024 * 1024)} MB of volume "
-                f"around it, limit {settings.OBLIQUE_MAX_BOX_MB} MB): zoom in", 413)
-
-        # Fast path for LOD 0 (`tiled66` with 16x16x16 logical sub-blocks)
-        if self._subidx is not None and self._compressed:
-            b_z1, b_z2 = z_min >> 4, (z_max + 15) >> 4
-            b_y1, b_y2 = y_min >> 4, (y_max + 15) >> 4
-            b_x1, b_x2 = x_min >> 4, (x_max + 15) >> 4
-
-            nz_b = b_z2 - b_z1
-            ny_b = b_y2 - b_y1
-            nx_b = b_x2 - b_x1
-
-            # Allocate bounding sub-volume (at 16-voxel granularity)
-            sub_volume = np.zeros((nz_b * 16, ny_b * 16, nx_b * 16), dtype=self._np_dtype)
-
-            # Find ONLY the 16x16x16 sub-blocks actually touched by the oblique plane (+/- margin)
-            # instead of decoding the entire 3D bounding box!
-            qz0 = np.clip((np.floor(valid_z).astype(np.int32) - margin) >> 4, b_z1, b_z2 - 1) - b_z1
-            qz1 = np.clip((np.ceil(valid_z).astype(np.int32) + margin) >> 4, b_z1, b_z2 - 1) - b_z1
-            qy0 = np.clip((np.floor(valid_y).astype(np.int32) - margin) >> 4, b_y1, b_y2 - 1) - b_y1
-            qy1 = np.clip((np.ceil(valid_y).astype(np.int32) + margin) >> 4, b_y1, b_y2 - 1) - b_y1
-            qx0 = np.clip((np.floor(valid_x).astype(np.int32) - margin) >> 4, b_x1, b_x2 - 1) - b_x1
-            qx1 = np.clip((np.ceil(valid_x).astype(np.int32) + margin) >> 4, b_x1, b_x2 - 1) - b_x1
-
-            touched = np.zeros((nz_b, ny_b, nx_b), dtype=np.bool_)
-            for dz_s in (qz0, qz1):
-                for dy_s in (qy0, qy1):
-                    for dx_s in (qx0, qx1):
-                        touched[dz_s, dy_s, dx_s] = True
-
-            # Group touched 16^3 sub-blocks by parent 64^3 brick (bx, by, bz)
-            brick_requests: Dict[Tuple[int, int, int], List[Tuple[int, int, int, int]]] = {}
-            tz, ty, tx = np.nonzero(touched)
-            for l_bz, l_by, l_bx in zip(tz.tolist(), ty.tolist(), tx.tolist()):
-                g_bz = b_z1 + l_bz
-                g_by = b_y1 + l_by
-                g_bx = b_x1 + l_bx
-
-                brick_z, sz = g_bz >> 2, g_bz & 3
-                brick_y, sy = g_by >> 2, g_by & 3
-                brick_x, sx = g_bx >> 2, g_bx & 3
-
-                if (
-                    brick_z < self.bricks["z"]
-                    and brick_y < self.bricks["y"]
-                    and brick_x < self.bricks["x"]
-                ):
-                    sub_idx = (sz << 4) | (sy << 2) | sx
-                    bkey = (brick_x, brick_y, brick_z)
-                    if bkey not in brick_requests:
-                        brick_requests[bkey] = []
-                    brick_requests[bkey].append((sub_idx, l_bz, l_by, l_bx))
-
-            io_tasks = []
-            for (brick_x, brick_y, brick_z), reqs in brick_requests.items():
-                entry = self._idx[brick_z, brick_y, brick_x]
-                if int(entry["size"]) > 0:
-                    io_tasks.append((int(entry["offset"]), brick_x, brick_y, brick_z, reqs))
-
-            if io_tasks:
-                io_tasks.sort(key=lambda t: t[0])
-
-                def load_oblique_batch(batch):
-                    for _, brick_x, brick_y, brick_z, reqs in batch:
-                        sub_indices = [r[0] for r in reqs]
-                        decoded = self._read_tiled66_subblocks(brick_x, brick_y, brick_z, sub_indices)
-                        for sub_idx, l_bz, l_by, l_bx in reqs:
-                            blk = decoded.get(sub_idx)
-                            if blk is not None:
-                                sub_volume[
-                                    l_bz*16 : (l_bz+1)*16,
-                                    l_by*16 : (l_by+1)*16,
-                                    l_bx*16 : (l_bx+1)*16,
-                                ] = blk
-
-                batch_size = max(1, (len(io_tasks) + _NUM_WORKERS - 1) // _NUM_WORKERS)
-                batches = [io_tasks[i : i + batch_size] for i in range(0, len(io_tasks), batch_size)]
-                list(_IO_POOL.map(load_oblique_batch, batches))
-
-            local_z = pts_z - (b_z1 * 16)
-            local_y = pts_y - (b_y1 * 16)
-            local_x = pts_x - (b_x1 * 16)
-
+    def read_block(self, gx: int, gy: int, gz: int) -> Optional[np.ndarray]:
+        """One block as a C-contiguous (bs, bs, bs) array in the transport dtype, or None when its brick is
+        empty (all zero). Voxels past the end of the volume are whatever the store holds there."""
+        per = self._blocks_per_brick
+        bx, by, bz = gx // per, gy // per, gz // per
+        if not (bx < self.bricks["x"] and by < self.bricks["y"] and bz < self.bricks["z"]):
+            return None
+        if int(self._idx[bz, by, bx]["size"]) == 0:
+            return None
+        if self.block_size != self.brick_size:  # tiled66: 4 x 4 x 4 sub-blocks per brick
+            sub = ((gz & 3) << 4) | ((gy & 3) << 2) | (gx & 3)
+            core = self._read_tiled66_subblocks(bx, by, bz, [sub]).get(sub)
         else:
-            # Fallback for coarser LODs (64^3 bricks or zindex)
-            bs = self.brick_size
-            b_z1, b_z2 = z_min // bs, (z_max + bs - 1) // bs
-            b_y1, b_y2 = y_min // bs, (y_max + bs - 1) // bs
-            b_x1, b_x2 = x_min // bs, (x_max + bs - 1) // bs
+            core = self._read_brick_core(bx, by, bz)
+        if core is None:
+            return None
+        return np.ascontiguousarray(core, dtype=_NATIVE[self.dtype][0])
 
-            nz_b = b_z2 - b_z1
-            ny_b = b_y2 - b_y1
-            nx_b = b_x2 - b_x1
-            sub_volume = np.zeros((nz_b * bs, ny_b * bs, nx_b * bs), dtype=self._np_dtype)
-
-            qz0 = np.clip((np.floor(valid_z).astype(np.int32) - margin) // bs, b_z1, b_z2 - 1) - b_z1
-            qz1 = np.clip((np.ceil(valid_z).astype(np.int32) + margin) // bs, b_z1, b_z2 - 1) - b_z1
-            qy0 = np.clip((np.floor(valid_y).astype(np.int32) - margin) // bs, b_y1, b_y2 - 1) - b_y1
-            qy1 = np.clip((np.ceil(valid_y).astype(np.int32) + margin) // bs, b_y1, b_y2 - 1) - b_y1
-            qx0 = np.clip((np.floor(valid_x).astype(np.int32) - margin) // bs, b_x1, b_x2 - 1) - b_x1
-            qx1 = np.clip((np.ceil(valid_x).astype(np.int32) + margin) // bs, b_x1, b_x2 - 1) - b_x1
-
-            touched = np.zeros((nz_b, ny_b, nx_b), dtype=np.bool_)
-            for dz_s in (qz0, qz1):
-                for dy_s in (qy0, qy1):
-                    for dx_s in (qx0, qx1):
-                        touched[dz_s, dy_s, dx_s] = True
-
-            io_tasks = []
-            tz, ty, tx = np.nonzero(touched)
-            for l_bz, l_by, l_bx in zip(tz.tolist(), ty.tolist(), tx.tolist()):
-                brick_z = b_z1 + l_bz
-                brick_y = b_y1 + l_by
-                brick_x = b_x1 + l_bx
-                if (
-                    brick_z < self.bricks["z"]
-                    and brick_y < self.bricks["y"]
-                    and brick_x < self.bricks["x"]
-                ):
-                    entry = self._idx[brick_z, brick_y, brick_x]
-                    if int(entry["size"]) > 0:
-                        io_tasks.append((int(entry["offset"]), brick_x, brick_y, brick_z, l_bx, l_by, l_bz))
-
-            if io_tasks:
-                io_tasks.sort(key=lambda t: t[0])
-
-                def load_coarse_batch(batch):
-                    for _, brick_x, brick_y, brick_z, l_bx, l_by, l_bz in batch:
-                        core = self._read_brick_core(brick_x, brick_y, brick_z)
-                        if core is not None:
-                            sub_volume[
-                                l_bz*bs : (l_bz+1)*bs,
-                                l_by*bs : (l_by+1)*bs,
-                                l_bx*bs : (l_bx+1)*bs,
-                            ] = core
-
-                batch_size = max(1, (len(io_tasks) + _NUM_WORKERS - 1) // _NUM_WORKERS)
-                batches = [io_tasks[i : i + batch_size] for i in range(0, len(io_tasks), batch_size)]
-                list(_IO_POOL.map(load_coarse_batch, batches))
-
-            local_z = pts_z - (b_z1 * bs)
-            local_y = pts_y - (b_y1 * bs)
-            local_x = pts_x - (b_x1 * bs)
-
-        coords = np.array([local_z, local_y, local_x])
-        sampled = map_coordinates(sub_volume, coords, order=order, mode="constant", cval=0.0)
-        if self.dtype != self.source_dtype:
-            sampled = sampled.astype(self.dtype, copy=False)
-        return sampled
-
-    def read_arbitrary_slice_euler(
+    def plan_plane(
         self,
-        center_mm: Tuple[float, float, float],
-        angles: Tuple[float, float, float],
-        output_shape: Tuple[int, int],
-        seq: str = "xyz",
-        degrees: bool = True,
-        output_pixel_size_mm: float = 1.0,
-        order: int = 1,
-    ) -> np.ndarray:
-        """
-        Extract an arbitrary 2D oblique slice specified by Euler angles `angles`.
-        Matches BlockTiledVolume.read_arbitrary_slice_euler signature and behavior.
-        """
-        r = Rotation.from_euler(seq, angles, degrees=degrees)
-        rotation_matrix = r.as_matrix()
+        origin: Tuple[float, float, float],
+        u: Tuple[float, float, float],
+        v: Tuple[float, float, float],
+        pixel: float,
+        width: int,
+        height: int,
+    ) -> dict:
+        """Plan of the image of a plane: pixel (col, row) has its centre at
+        origin + (col + .5) * pixel * u + (row + .5) * pixel * v, all in physical (x, y, z) units, u and v
+        unit vectors. Returns what the browser needs to assemble the image from blocks:
 
-        return self.read_arbitrary_slice_matrix(
-            center_mm=center_mm,
-            rotation_matrix=rotation_matrix,
-            output_shape=output_shape,
-            output_pixel_size_mm=output_pixel_size_mm,
-            order=order,
-        )
+        - `p0`, `du`, `dv`: the position of pixel (0, 0) and the step to the next column / row, in voxel
+          index space of this level (voxel i has its centre at i), x, y, z. The pixel (col, row) samples the
+          volume (trilinearly) at p0 + row * dv + col * du, evaluated in that order, in float64.
+        - `blocks`: flat [gx, gy, gz, weight] * n, the non-empty blocks the image reads from, most needed
+          first. weight = the number of pixels that read from the block. Blocks that are not listed are
+          empty (zero) or outside the volume.
+        Pixels that fall outside the volume read from no block and stay zero."""
+        t0 = time.perf_counter()
+        sp = np.array([self.spacing["x"], self.spacing["y"], self.spacing["z"]], dtype=np.float64)
+        u = np.asarray(u, dtype=np.float64)
+        v = np.asarray(v, dtype=np.float64)
+        p0 = (np.asarray(origin, dtype=np.float64) + 0.5 * pixel * (u + v)) / sp - 0.5
+        du = pixel * u / sp
+        dv = pixel * v / sp
+        dims = (self.dims["x"], self.dims["y"], self.dims["z"])
+        bs = self.block_size
+        nbx, nby, nbz = (self.block_grid[a] for a in "xyz")
 
+        cols = np.arange(width, dtype=np.float64)[None, :]
+        rows_per_band = max(1, 1_000_000 // width)
+        key_parts: List[np.ndarray] = []
+        count_parts: List[np.ndarray] = []
+        for r0 in range(0, height, rows_per_band):
+            r = np.arange(r0, min(height, r0 + rows_per_band), dtype=np.float64)[:, None]
+            pos = [(p0[k] + r * dv[k]) + cols * du[k] for k in range(3)]
+            # a superset of what the browser treats as inside (it tests without the tolerance)
+            inside = np.ones(pos[0].shape, dtype=bool)
+            for k in range(3):
+                inside &= (pos[k] >= -0.5 - 1e-6) & (pos[k] < dims[k] - 0.5 + 1e-6)
+            if not inside.any():
+                continue
+            lo: List[np.ndarray] = []
+            hi: List[np.ndarray] = []
+            for k in range(3):
+                p = pos[k][inside]
+                # the voxels a trilinear sample reads are floor(p) and floor(p) + 1 (clamped to the volume);
+                # the tolerance keeps float rounding at an exact integer from losing a block
+                lo.append(np.clip(np.floor(p - 1e-4), 0, dims[k] - 1).astype(np.int64) // bs)
+                hi.append(np.clip(np.floor(p + 1e-4) + 1, 0, dims[k] - 1).astype(np.int64) // bs)
+            differs = [hi[k] != lo[k] for k in range(3)]
+            keys = [(lo[2] * nby + lo[1]) * nbx + lo[0]]
+            for i in (0, 1):
+                for j in (0, 1):
+                    for k in (0, 1):
+                        if not (i or j or k):
+                            continue
+                        sel = np.ones(lo[0].shape, dtype=bool)
+                        if i:
+                            sel &= differs[0]
+                        if j:
+                            sel &= differs[1]
+                        if k:
+                            sel &= differs[2]
+                        if not sel.any():
+                            continue
+                        bx = (hi if i else lo)[0][sel]
+                        by = (hi if j else lo)[1][sel]
+                        bz = (hi if k else lo)[2][sel]
+                        keys.append((bz * nby + by) * nbx + bx)
+            uk, cnt = np.unique(np.concatenate(keys), return_counts=True)
+            key_parts.append(uk)
+            count_parts.append(cnt)
 
-def angled_basis(angles_deg) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Directions (x, y, z) of an angled plane's image rows (u, pointing down), columns (v, pointing
-    right) and normal. The plane starts as the XY plane (u = +y, v = +x, normal = +z) and is rotated
-    by the Euler angles (degrees) about the volume's fixed x, then y, then z axes."""
-    r = Rotation.from_euler("xyz", [float(a) for a in angles_deg], degrees=True).as_matrix()
-    return r @ np.array([0.0, 1.0, 0.0]), r @ np.array([1.0, 0.0, 0.0]), r @ np.array([0.0, 0.0, 1.0])
+        blocks: List[int] = []
+        total = 0
+        if key_parts:
+            uk, inverse = np.unique(np.concatenate(key_parts), return_inverse=True)
+            weight = np.bincount(inverse.ravel(), weights=np.concatenate(count_parts)).astype(np.int64)
+            bx = uk % nbx
+            by = (uk // nbx) % nby
+            bz = uk // (nbx * nby)
+            per = self._blocks_per_brick
+            in_grid = (bx // per < self.bricks["x"]) & (by // per < self.bricks["y"]) & (bz // per < self.bricks["z"])
+            bx, by, bz, weight = bx[in_grid], by[in_grid], bz[in_grid], weight[in_grid]
+            sizes = np.asarray(self._idx["size"])[bz // per, by // per, bx // per] if len(bx) else np.zeros(0)
+            keep = sizes > 0
+            bx, by, bz, weight = bx[keep], by[keep], bz[keep], weight[keep]
+            order = np.argsort(-weight, kind="stable")  # the blocks most pixels read from first
+            flat = np.stack([bx[order], by[order], bz[order], weight[order]], axis=1)
+            blocks = flat.ravel().tolist()
+            total = int(weight.sum())
+        return {
+            "width": int(width),
+            "height": int(height),
+            "dtype": self.dtype,
+            "level": self.level,
+            "blockSize": bs,
+            "dims": dict(self.dims),
+            "p0": p0.tolist(),
+            "du": du.tolist(),
+            "dv": dv.tolist(),
+            "blocks": blocks,
+            "totalWeight": total,
+            "planMs": round((time.perf_counter() - t0) * 1000, 1),
+        }
+
+    def check_blocks(self, flat: List[int]) -> List[Tuple[int, int, int, int]]:
+        """[gx, gy, gz, weight] * n (as plan_plane lists them) -> [(gx, gy, gz, weight)], validated."""
+        if len(flat) % 4:
+            raise SliceError("blocks must be a flat list of [gx, gy, gz, weight] groups")
+        out = []
+        for i in range(0, len(flat), 4):
+            gx, gy, gz, w = flat[i], flat[i + 1], flat[i + 2], flat[i + 3]
+            if not (0 <= gx < self.block_grid["x"] and 0 <= gy < self.block_grid["y"] and 0 <= gz < self.block_grid["z"]):
+                raise SliceError(f"block ({gx}, {gy}, {gz}) is outside the volume")
+            out.append((gx, gy, gz, min(max(w, 0), 1 << 30)))
+        return out
 
 
 def percentile_window(plane: np.ndarray, lo: float = 1.0, hi: float = 99.0) -> dict:
@@ -1248,41 +1124,121 @@ def plane_response_parts(
         headers["Content-Encoding"] = content_encoding
     return body, headers
 
+# ------------------------------------------------------------ block streaming (the slice delivery)
 
-def oblique_response_parts(
+BLOCK_HEADER = struct.Struct("<4I")  # gx, gy, gz, payload bytes
+BLOCK_EMPTY = 0                      # payload size of a block whose brick is empty: all zero, no payload
+BLOCK_ERROR = 0xFFFFFFFE             # payload size of a block that could not be read
+STREAM_END = 0xFFFFFFFF              # gx, gy, gz of the closing record; the 4th field is the number of blocks sent
+MAX_BLOCKS_PER_REQUEST = 40_000
+
+
+class PriorityPool:
+    """Worker threads that always take the queued job with the best priority (lowest tuple) first, ties in
+    submission order. Block reads of every viewer share one, so the blocks that most pixels read from are read
+    before the rest, whichever request they belong to."""
+
+    def __init__(self, workers: int, name: str = "blocks"):
+        self._queue: "queue.PriorityQueue" = queue.PriorityQueue()
+        self._seq = itertools.count()
+        self._workers = max(1, workers)
+        self._name = name
+        self._started = False
+        self._lock = threading.Lock()
+
+    def _start(self) -> None:
+        with self._lock:
+            if self._started:
+                return
+            for i in range(self._workers):
+                threading.Thread(target=self._run, name=f"{self._name}-{i}", daemon=True).start()
+            self._started = True
+
+    def _run(self) -> None:
+        while True:
+            _, _, fn, args = self._queue.get()
+            try:
+                fn(*args)
+            except Exception:  # a job reports its own failures; never kill the worker
+                log.exception("block job failed")
+
+    def submit(self, priority: tuple, fn, *args) -> None:
+        self._start()
+        self._queue.put((priority, next(self._seq), fn, args))
+
+    @property
+    def queued(self) -> int:
+        return self._queue.qsize()
+
+
+_BLOCK_POOL = PriorityPool(_NUM_WORKERS)
+
+
+def encode_block(gx: int, gy: int, gz: int, payload: Optional[bytes], failed: bool = False) -> bytes:
+    if failed:
+        return BLOCK_HEADER.pack(gx, gy, gz, BLOCK_ERROR)
+    if not payload:
+        return BLOCK_HEADER.pack(gx, gy, gz, BLOCK_EMPTY)
+    return BLOCK_HEADER.pack(gx, gy, gz, len(payload)) + payload
+
+
+async def stream_blocks(
     vs: VolumeSlicesKiln,
-    center: Tuple[float, float, float],
-    angles: Tuple[float, float, float],
-    size: int,
-    scale: float,
-    order: int = 1,
-    channel: int = 0,
-    encoding: str = "identity",
-) -> Tuple[bytes, dict]:
-    """(body, headers) of an angled plane, like plane_response_parts. The X-Oblique-* headers carry
-    the plane's geometry (see VolumeSlicesKiln.read_angled_plane)."""
-    if encoding not in ENCODINGS:
-        raise SliceError(f"enc must be one of {', '.join(ENCODINGS)}")
-    if not 0 <= channel < vs.channels:
-        raise SliceError(f"channel must be in 0..{vs.channels - 1}")
-    t0 = time.perf_counter()
-    img, geo = vs.read_angled_plane(center, angles, size, scale, order)
-    out = to_transport(img, vs.dtype)
-    body, content_encoding = encode_plane(out, encoding, settings.SLICE_ZSTD_LEVEL)
-    headers = {
-        "X-Plane-Width": str(out.shape[1]),
-        "X-Plane-Height": str(out.shape[0]),
-        "X-Plane-Dtype": vs.dtype,
-        "X-Plane-Stride": "1",
-        "X-Plane-Source": "angled",
-        "X-Plane-Raw-Bytes": str(out.nbytes),
-        "X-Plane-Server-Ms": f"{(time.perf_counter() - t0) * 1000:.1f}",
-        "X-Plane-Encoding": encoding,
-        "X-Oblique-U": ",".join(f"{c:.6f}" for c in geo["u"]),
-        "X-Oblique-V": ",".join(f"{c:.6f}" for c in geo["v"]),
-        "X-Oblique-Pixel": f"{geo['pixel']:.9g}",
-        "Vary": "Accept-Encoding",
-    }
-    if content_encoding:
-        headers["Content-Encoding"] = content_encoding
-    return body, headers
+    blocks: List[Tuple[int, int, int, int]],
+    prefetch: bool = False,
+    window: Optional[int] = None,
+):
+    """Async generator of the wire form of `blocks` ([(gx, gy, gz, weight)]), each record as soon as its block
+    has been read, not in request order: header (4 x uint32 LE: gx, gy, gz, payload bytes) + payload, the block's
+    voxels (z, y, x) in the transport dtype; a closing record (STREAM_END x3, count) tells a complete stream from
+    a cut one.
+
+    Reads go through the shared priority pool, best first: foreground before prefetch, then by weight. Only
+    `window` reads are outstanding at a time (a slow client does not make the server read ahead without
+    bound), and the generator cancelling (client gone) drops the queued rest."""
+    loop = asyncio.get_running_loop()
+    done: "asyncio.Queue" = asyncio.Queue()
+    cancelled = threading.Event()
+    window = window or _NUM_WORKERS * 4
+    cls = 1 if prefetch else 0
+    # the plan lists blocks best first, but a request may be a subset in any order: sort again
+    todo = sorted(blocks, key=lambda b: -b[3])
+    cursor = 0
+    inflight = 0
+
+    def work(gx: int, gy: int, gz: int) -> None:
+        if cancelled.is_set():
+            return
+        try:
+            arr = vs.read_block(gx, gy, gz)
+            item = (gx, gy, gz, arr.tobytes() if arr is not None else None, False)
+        except Exception:
+            log.exception("reading block (%s, %s, %s) failed", gx, gy, gz)
+            item = (gx, gy, gz, None, True)
+        try:
+            loop.call_soon_threadsafe(done.put_nowait, item)
+        except RuntimeError:  # the loop is gone
+            pass
+
+    def feed() -> None:
+        nonlocal cursor, inflight
+        while inflight < window and cursor < len(todo):
+            gx, gy, gz, weight = todo[cursor]
+            cursor += 1
+            inflight += 1
+            _BLOCK_POOL.submit((cls, -weight), work, gx, gy, gz)
+
+    sent = 0
+    try:
+        feed()
+        while inflight:
+            batch = [await done.get()]
+            while len(batch) < 64 and not done.empty():
+                batch.append(done.get_nowait())
+            inflight -= len(batch)
+            feed()
+            sent += len(batch)
+            yield b"".join(encode_block(*item[:3], item[3], item[4]) for item in batch)
+        yield BLOCK_HEADER.pack(STREAM_END, STREAM_END, STREAM_END, sent)
+    finally:
+        cancelled.set()

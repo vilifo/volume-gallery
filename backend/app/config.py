@@ -68,10 +68,6 @@ class Settings:
     SLICE_CACHE_MB: int = int(os.environ.get("VG_SLICE_CACHE_MB", "2048"))
     # Slabs decoded in parallel from sharded binary bricks
     SLICE_BUILD_THREADS: int = int(os.environ.get("VG_SLICE_BUILD_THREADS", "2"))
-    # Angled (oblique) slices: the dense box around the sampled plane may not exceed this many MB
-    # (a plane through a huge volume at a wide field of view would need gigabytes); the request
-    # then fails with 413 and the viewer asks the user to zoom in.
-    OBLIQUE_MAX_BOX_MB: int = int(os.environ.get("VG_OBLIQUE_MAX_BOX_MB", "4096"))
     # zstd level for planes sent to browsers that accept it (1 = fastest)
     SLICE_ZSTD_LEVEL: int = int(os.environ.get("VG_SLICE_ZSTD_LEVEL", "1"))
 
@@ -132,4 +128,4 @@ _tmp.mkdir(parents=True, exist_ok=True)
 (settings.PROCESSING_DIR / ".uploads").mkdir(parents=True, exist_ok=True)
 (settings.DATA_DIR / ".uploads").mkdir(parents=True, exist_ok=True)
 tempfile.tempdir = str(_tmp)
-os.environ["TMPDIR"] = str(_tmp)
+os.environ["TMPDIR"] = str(_tmp)

@@ -7,8 +7,8 @@
 // mode uses). The lines are drawn in an SVG layer above the canvas, so they are
 // not occluded by the volume; that is intended for position indicators.
 
-import { AXIS_COLORS, voxelToNormal } from "./geometry.js";
-import { distance, formatLength, measureLabel, voxelToWorld } from "./measure.js?v=meas1";
+import { AXIS_COLORS, lineInBox, planeBoxPolygon } from "./geometry.js";
+import { distance, formatLength, measureLabel, voxelToWorld } from "./measure.js?v=mpr1";
 
 /** Multiplies a column-major 4x4 matrix with a vec4. */
 export function mulMat4Vec4(m, v) {
@@ -56,29 +56,24 @@ export function projectSegment(viewProj, a, b, width, height, eps = 1e-4) {
   return [...px(p0), ...px(p1)];
 }
 
-/** World-space corners (and cursor lines) for the current cursor. */
-export function planeGeometry(cursor, dims, size) {
-  const pos = {
-    x: (voxelToNormal(cursor.x, dims.x) - 0.5) * size[0],
-    y: (voxelToNormal(cursor.y, dims.y) - 0.5) * size[1],
-    z: (voxelToNormal(cursor.z, dims.z) - 0.5) * size[2],
-  };
-  const h = size.map((s) => s / 2);
-  return {
-    pos,
-    // closed outlines of the three planes
-    planes: {
-      z: [[-h[0], -h[1], pos.z], [h[0], -h[1], pos.z], [h[0], h[1], pos.z], [-h[0], h[1], pos.z]],
-      y: [[-h[0], pos.y, -h[2]], [h[0], pos.y, -h[2]], [h[0], pos.y, h[2]], [-h[0], pos.y, h[2]]],
-      x: [[pos.x, -h[1], -h[2]], [pos.x, h[1], -h[2]], [pos.x, h[1], h[2]], [pos.x, -h[1], h[2]]],
-    },
-    // the three lines where two planes cross (each parallel to one axis)
-    lines: {
-      x: [[-h[0], pos.y, pos.z], [h[0], pos.y, pos.z]],
-      y: [[pos.x, -h[1], pos.z], [pos.x, h[1], pos.z]],
-      z: [[pos.x, pos.y, -h[2]], [pos.x, pos.y, h[2]]],
-    },
-  };
+/**
+ * World-space outlines of the three slice planes (where they cut the volume) and the three lines where two of
+ * them cross, for the state's cursor and orientation. Plane and line names are the axes (x, y, z) their normal /
+ * direction is closest to: the plane "z" is the XY pane's, and so on.
+ */
+export function planeGeometry(st, size) {
+  const geoms = { z: st.paneGeom("xy"), y: st.paneGeom("xz"), x: st.paneGeom("yz") };
+  const S = geoms.z.S;
+  const world = (p) => [(p[0] / S[0] - 0.5) * size[0], (p[1] / S[1] - 0.5) * size[1], (p[2] / S[2] - 0.5) * size[2]];
+  const P = [st.pos.x * st.spacing.x, st.pos.y * st.spacing.y, st.pos.z * st.spacing.z];
+  for (const g of Object.values(geoms)) for (let k = 0; k < 3; k++) if (Math.abs(g.n[k]) > 1 - 1e-9) P[k] = g.point[k]; // (axis-aligned planes sit at the centre of their voxel)
+  const planes = {}, lines = {};
+  for (const [axis, g] of Object.entries(geoms)) {
+    planes[axis] = planeBoxPolygon(g.n, g.offset, S).map(world);
+    const seg = lineInBox(P, g.n, S); // the two other planes cross along this plane's normal
+    lines[axis] = seg ? seg.map(world) : null;
+  }
+  return { pos: world(P), planes, lines };
 }
 
 const NS = "http://www.w3.org/2000/svg";
@@ -119,12 +114,12 @@ export class Overlay3D {
     if (!w || !h) return;
     const view = viewer.camera.getViewMatrix();
     const proj = viewer.camera.getProjectionMatrix(w / h);
-    const key = `${Array.from(view)}|${Array.from(proj)}|${w}x${h}|${st.cursor.x},${st.cursor.y},${st.cursor.z}|${+st.show3dCursor}${+st.show3dPlanes}`;
+    const key = `${Array.from(view)}|${Array.from(proj)}|${w}x${h}|${st._ver}|${+st.show3dCursor}${+st.show3dPlanes}`;
     if (key === this._lastKey) return;
     this._lastKey = key;
 
     const vp = multiplyMat4(proj, view);
-    const geo = planeGeometry(st.cursor, st.dims, viewer.engine.config.normalizedSize);
+    const geo = planeGeometry(st, viewer.engine.config.normalizedSize);
     const parts = [];
     const line = (a, b, color, width, opacity = 1) => {
       const s = projectSegment(vp, a, b, w, h);
@@ -133,12 +128,12 @@ export class Overlay3D {
     if (st.show3dPlanes) {
       for (const axis of ["x", "y", "z"]) {
         const c = geo.planes[axis];
-        for (let i = 0; i < 4; i++) line(c[i], c[(i + 1) % 4], AXIS_COLORS[axis], 1.5, 0.85);
+        for (let i = 0; i < c.length; i++) line(c[i], c[(i + 1) % c.length], AXIS_COLORS[axis], 1.5, 0.85);
       }
     }
     if (st.show3dCursor) {
-      for (const axis of ["x", "y", "z"]) line(geo.lines[axis][0], geo.lines[axis][1], AXIS_COLORS[axis], 2.5);
-      const dot = projectPoint(vp, [geo.pos.x, geo.pos.y, geo.pos.z], w, h);
+      for (const axis of ["x", "y", "z"]) if (geo.lines[axis]) line(geo.lines[axis][0], geo.lines[axis][1], AXIS_COLORS[axis], 2.5);
+      const dot = projectPoint(vp, geo.pos, w, h);
       if (dot) parts.push(`<circle cx="${dot[0].toFixed(1)}" cy="${dot[1].toFixed(1)}" r="4" fill="#fff" fill-opacity="0.9" stroke="#000" stroke-opacity="0.6"/>`);
     }
     this.handles = [];

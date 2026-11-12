@@ -115,7 +115,6 @@ export function createPlayer({ host, getViewer, getSlices, is3dVisible, onChange
 
   function tickSlices(now) {
     const { views, axis, indices, spec } = run;
-    const normal = run.normal;
     if (run.waitFor != null) {
       if (!sliceReady(run.waitFor)) return; // the next slice has not arrived: hold the one on screen
       run.waitFor = null;
@@ -123,7 +122,7 @@ export function createPlayer({ host, getViewer, getSlices, is3dVisible, onChange
     }
     if (now - run.shownAt < 1000 / spec.speed) return;
     const idx = indices[run.pos];
-    views.state.setCursor({ [normal]: idx }, "play");
+    views.setSlice(axis, idx, "play");
     run.waitFor = idx;
     run.pos = (run.pos + 1) % indices.length;
     run.bar.progress(run.pos / indices.length);
@@ -260,7 +259,7 @@ export function createPlayer({ host, getViewer, getSlices, is3dVisible, onChange
       if (spec.kind === "slices") {
         run.pos = Math.min(run.indices.length - 1, Math.floor(Math.min(0.9999, u) * run.indices.length));
         const idx = run.indices[run.pos];
-        run.views.state.setCursor({ [run.normal]: idx }, "play");
+        run.views.setSlice(run.axis, idx, "play");
         run.waitFor = idx;
         run.bar.progress(u);
         emitProgress(u, run.pos / spec.speed);
@@ -289,7 +288,7 @@ export function createPlayer({ host, getViewer, getSlices, is3dVisible, onChange
       try {
         if (ended.spec.kind === "slices") {
           ended.views.setPrefetch?.(true);
-          ended.views.state.setCursor({ [ended.normal]: ended.savedIndex }, "play");
+          ended.views.setSlice(ended.axis, ended.savedIndex, "play");
         } else release();
       } catch (err) { console.error("[playback] restore", err); }
       ended.bar?.destroy();

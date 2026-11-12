@@ -3,7 +3,7 @@
 // reload, so this section keeps no state of its own: everything lives in SliceState.
 
 import { textureFormatFor } from "./geometry.js";
-import { ANGLE_LIMIT } from "./cursor.js?v=ang1";
+import { ANGLE_LIMITS } from "./cursor.js?v=mpr1";
 import { TF_LABELS, TF_PRESET_NAMES, hexToRgb, insertStop } from "./transfer-function.js";
 
 const toggle = (role, label, checked, title = "") => `
@@ -19,15 +19,18 @@ const ANGLE_AXES = [
   ["rz", "Z", "Rotation about the Z axis"],
 ];
 
-const angleRow = (key, label, value, title) => `
+const angleRow = (key, label, value, title) => {
+  const lim = ANGLE_LIMITS[key];
+  return `
   <div class="ctl-slider-row" title="${title}">
     <span class="ctl-row-label ctl-slider-label">Angle ${label}</span>
     <div class="ctl-slider-track">
-      <div class="ctl-slider-fill" data-role="fill-${key}" style="width:${((value + ANGLE_LIMIT) / (2 * ANGLE_LIMIT)) * 100}%"></div>
-      <input type="range" class="ctl-slider-input" data-role="slider-${key}" min="${-ANGLE_LIMIT}" max="${ANGLE_LIMIT}" step="1" value="${value}">
+      <div class="ctl-slider-fill" data-role="fill-${key}" style="width:${((value + lim) / (2 * lim)) * 100}%"></div>
+      <input type="range" class="ctl-slider-input" data-role="slider-${key}" min="${-lim}" max="${lim}" step="1" value="${value}">
     </div>
-    <input type="number" class="ctl-select-input slice-num slice-angle-num" data-role="angle-${key}" value="${value}" min="${-ANGLE_LIMIT}" max="${ANGLE_LIMIT}" step="1" aria-label="${title} (degrees)">
+    <input type="number" class="ctl-select-input slice-num slice-angle-num" data-role="angle-${key}" value="${value}" min="${-lim}" max="${lim}" step="1" aria-label="${title} (degrees)">
   </div>`;
+};
 
 const numberRow = (role, label, value, min, max, step, title = "") => `
   <label class="ctl-select-row" ${title ? `title="${title}"` : ""}>
@@ -121,13 +124,12 @@ export function mountSliceControls(panelBody, views) {
           `<option value="${i}"${i === st.channel ? " selected" : ""}>${i}</option>`).join("")}</select></label>` : ""}
       ${["x", "y", "z"].map((a) => numberRow(`cur-${a}`, `Position ${a.toUpperCase()}`, st.cursor[a] + 1, 1, st.dims[a], 1, `Voxel index along ${a.toUpperCase()} (1-based)`)).join("")}
 
-      <div class="ctl-eyebrow ctl-subhead">Angled slice</div>
+      <div class="ctl-eyebrow ctl-subhead">Plane angles</div>
       <div class="ctl-row-label" style="opacity:.75;font-size:.8em;line-height:1.5;padding:2px 0 6px">
-        A slice at any angle through the cursor: the XY plane turned about X, then Y, then Z.</div>
-      ${ANGLE_AXES.map(([key, label, title]) => angleRow(key, label, st.angled[key], title)).join("")}
+        Drag a crosshair line in a slice pane to turn the three planes about the cursor (Shift: 15\u00b0 steps), or set the angles here: the planes turned about X, then Y, then Z.</div>
+      ${ANGLE_AXES.map(([key, label, title]) => angleRow(key, label, st.euler()[key], title)).join("")}
       <div class="ctl-select-row"><span class="ctl-row-label ctl-select-label"></span>
-        <button type="button" class="ctl-chip slice-reset" data-role="angled-open" style="position:static">Show angled slice</button>
-        <button type="button" class="ctl-chip slice-reset" data-role="angled-reset" style="position:static">Reset angles</button></div>
+        <button type="button" class="ctl-chip slice-reset" data-role="angled-reset" style="position:static">Reset to axis-aligned</button></div>
     </div>`;
   wireCollapsible(section, panelBody);
 
@@ -148,13 +150,12 @@ export function mountSliceControls(panelBody, views) {
   q("channel")?.addEventListener("change", (e) => st.setChannel(parseInt(e.target.value, 10)));
   for (const a of ["x", "y", "z"]) num(`cur-${a}`, (v) => st.setCursor({ [a]: v - 1 }, "controls"));
 
-  // ----------------------------------------------------------- angled slice
+  // ----------------------------------------------------------- plane angles
   for (const [key] of ANGLE_AXES) {
-    q(`slider-${key}`).addEventListener("input", (e) => st.setAngled({ [key]: parseFloat(e.target.value) }, "controls"));
-    num(`angle-${key}`, (v) => st.setAngled({ [key]: v }, "controls"));
+    q(`slider-${key}`).addEventListener("input", (e) => st.setOrientation({ [key]: parseFloat(e.target.value) }, "controls"));
+    num(`angle-${key}`, (v) => st.setOrientation({ [key]: v }, "controls"));
   }
-  q("angled-reset").addEventListener("click", () => st.resetAngled("controls"));
-  q("angled-open").addEventListener("click", () => st.setLayout("angled"));
+  q("angled-reset").addEventListener("click", () => st.resetOrientation("controls"));
 
   // ----------------------------------------------------------- transfer function editor
   const bar = q("tf-bar");
@@ -283,12 +284,14 @@ export function mountSliceControls(panelBody, views) {
     q("cursor3d").checked = st.show3dCursor;
     q("planes3d").checked = st.show3dPlanes;
     q("scalebar").checked = st.showScaleBar !== false;
+    const e = st.euler();
     for (const [key] of ANGLE_AXES) {
-      set(`angle-${key}`, st.angled[key]);
-      q(`slider-${key}`).value = st.angled[key];
-      q(`fill-${key}`).style.width = `${((st.angled[key] + ANGLE_LIMIT) / (2 * ANGLE_LIMIT)) * 100}%`;
+      const lim = ANGLE_LIMITS[key];
+      set(`angle-${key}`, e[key]);
+      if (document.activeElement !== q(`slider-${key}`)) q(`slider-${key}`).value = e[key];
+      q(`fill-${key}`).style.width = `${((e[key] + lim) / (2 * lim)) * 100}%`;
     }
   };
-  const offs = [st.on("window", refresh), st.on("cursor", refresh), st.on("option", refresh), st.on("angled", refresh), st.on("tf", syncEditor)];
+  const offs = [st.on("window", refresh), st.on("cursor", refresh), st.on("option", refresh), st.on("orientation", refresh), st.on("tf", syncEditor)];
   return () => { offs.forEach((off) => off()); section.remove(); };
 }

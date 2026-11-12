@@ -10,6 +10,7 @@
 //    the end in a slice pane.
 //  - "planes": on the three slice planes shown in the 3D view (exact; move them with the cursor).
 
+import { AXES } from "./geometry.js";
 import { hitHandle, loadCoarseVolume, pickPlanes, pickVolume, pixelRay, repositionAtDepth } from "./measure.js";
 
 const show3d = (layout) => layout === "3d" || layout === "quad"; // as SliceViews.show3d (not imported: it imports this)
@@ -107,7 +108,7 @@ export class Measure3D {
     if (!ray) return null;
     const size = v.engine.config.normalizedSize;
     if (st.measure3dMode === "planes") {
-      const hit = pickPlanes(ray, st.cursor, st.dims, size);
+      const hit = pickPlanes(ray, AXES.map((a) => st.paneGeom(a)), st.dims, size);
       return hit ? { point: hit.point, acc: 0 } : null;
     }
     if (!this.coarse) { this.ensureCoarse(); return null; }

@@ -9,11 +9,12 @@ export function mountDebugPanel(host, views) {
     const d = views.debugInfo();
     const st = views.state;
     el.textContent = [
-      `layout ${st.layout}   cursor ${st.cursor.x},${st.cursor.y},${st.cursor.z}   window ${Math.round(st.window.center)}/${Math.round(st.window.width)}`,
-      `volume ${st.dims.x}x${st.dims.y}x${st.dims.z} ${st.dtype}  level ${views.info.level}`,
-      `requests: ${d.fetches} fetched, ${d.hits} cache hits, ${d.aborted} aborted, ${d.inflight} in flight, ${d.queued} queued`,
-      `last plane: ${d.lastMs} ms total, server ${d.lastServerMs} ms (${d.lastSource || "-"})`,
-      `cache: ${d.planes} planes, ${d.cacheMB} MB   uploaded: ${d.uploadMB} MB`,
+      `layout ${st.layout}   cursor ${st.pos.x.toFixed(1)},${st.pos.y.toFixed(1)},${st.pos.z.toFixed(1)}   window ${Math.round(st.window.center)}/${Math.round(st.window.width)}`,
+      `volume ${st.dims.x}x${st.dims.y}x${st.dims.z} ${st.dtype}  level ${views.info.level} block ${views.info.blockSize}`,
+      `requests: ${d.loads} planes, ${d.fetchedBlocks} blocks fetched, ${d.cachedBlocks} from cache, ${d.aborted} aborted, ${d.inflight} in flight, ${d.queued} queued`,
+      `last plane: ${d.lastMs} ms (plan ${d.lastPlanMs} ms, server ${d.lastServerPlanMs} ms; first blocks ${d.lastFirstMs} ms; ${d.lastBlocks} blocks)`,
+      `cache: ${d.blocks} blocks, ${d.cacheMB} MB   streamed: ${d.streamedMB} MB   uploaded: ${d.uploadMB} MB`,
+      `orientation ${JSON.stringify(st.euler())}`,
       ...Object.entries(d.panes).map(([a, p]) => `${a.padEnd(9)} shown ${p.shown ?? "-"}  pending ${p.pending ?? "-"}`),
     ].join("\n");
   };
@@ -21,4 +22,4 @@ export function mountDebugPanel(host, views) {
   const timer = setInterval(tick, 400);
   const off = views.state.on("change", tick);
   return () => { clearInterval(timer); off(); el.remove(); };
-}
+}

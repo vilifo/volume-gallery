@@ -194,6 +194,26 @@ export class SliceRenderer {
     this.uploadBytes += plane.data.byteLength;
   }
 
+  /** Uploads rows [r0, r1] (inclusive) of a plane that was uploaded in full before (a plane that is being filled in). */
+  uploadRows(pane, plane, r0, r1) {
+    const fmt = textureFormatFor(plane.dtype);
+    if (!pane.texture || pane.width !== plane.width || pane.height !== plane.height || pane.format !== fmt?.format) {
+      this.upload(pane, plane);
+      return;
+    }
+    r0 = Math.max(0, r0);
+    r1 = Math.min(plane.height - 1, r1);
+    if (r1 < r0) return;
+    const rows = r1 - r0 + 1;
+    this.device.queue.writeTexture(
+      { texture: pane.texture, origin: [0, r0] },
+      plane.data,
+      { offset: r0 * plane.width * fmt.bytes, bytesPerRow: plane.width * fmt.bytes, rowsPerImage: rows },
+      [plane.width, rows],
+    );
+    this.uploadBytes += rows * plane.width * fmt.bytes;
+  }
+
   /**
    * Draws the pane's current plane into `target` (a GPUTextureView of `targetFormat`).
    * @param {object} v

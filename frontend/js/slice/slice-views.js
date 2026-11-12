@@ -1,32 +1,40 @@
 // Slice views: three 2D panes (xy / xz / yz) next to the kiln 3D view.
 //
-//   server (planes) -> PlaneClient -> SliceRenderer (WebGPU, one texture per pane)
-//                         ^                 ^
-//                         |                 +-- drawn on demand, never in a free-running loop
-//   SliceState (cursor, views, window, layout) <-- pointer / wheel / keyboard input
+//   server (plan + blocks) -> PlaneClient -> PlaneAssembler -> SliceRenderer (WebGPU, one texture per pane)
+//                                ^                                   ^
+//                                |                                   +-- drawn on demand, never in a free-running loop
+//   SliceState (cursor, orientation, views, window, layout) <-- pointer / wheel / keyboard input
 //
-// Every pane reads the same SliceState: clicking in one pane moves the cursor, and the
-// others re-request their plane and move their crosshair lines.
+// Every pane reads the same SliceState. The three panes show three perpendicular planes through the cursor;
+// clicking in a pane moves the cursor, and dragging one of its crosshair lines turns the three planes together
+// about the cursor, so any pane can show a plane at any angle. A pane asks the server for the plan of its plane
+// (a PaneGeometry), fetches the blocks that plan reads from (the ones most pixels need first) and shows the image
+// as it fills in.
 
-import { PlaneClient, prefetchIndices } from "./plane-client.js?v=ang1";
-import { SliceRenderer, requestSliceDevice } from "./slice-renderer.js?v=org3";
-import { SliceState } from "./cursor.js?v=ang1";
-import { ObliquePane } from "./oblique-pane.js?v=ang1";
+import { PlaneClient } from "./plane-client.js?v=mpr1";
+import { SliceRenderer, requestSliceDevice } from "./slice-renderer.js?v=mpr1";
+import { SliceState } from "./cursor.js?v=mpr1";
 import { bindTouchGestures } from "./touch-gestures.js?v=org6";
 import { buildLut, isGrayRamp } from "./transfer-function.js";
-import { Overlay3D } from "./overlay-3d.js?v=meas1";
-import { hitHandle, paneMeasureSvg, pointFromPlane, roundPoint } from "./measure.js?v=meas1";
-import { Measure3D } from "./measure-3d.js?v=meas1";
+import { Overlay3D } from "./overlay-3d.js?v=mpr1";
+import { hitHandle, paneMeasureSvg, pointFromPane, roundPoint } from "./measure.js?v=mpr1";
+import { Measure3D } from "./measure-3d.js?v=mpr1";
 import { ensureMeasureStyles } from "./measure-ui.js?v=meas1";
 import { niceScaleLength } from "../scalebar.js";
 import {
-  AXES, AXIS_INFO, AXIS_COLORS, clamp, cursorInPlane, dragWindow, panePpv, planeExtents,
-  planeIndex, planeToPixel, pixelToPlane, textureFormatFor, zoomAt,
+  lineInBox, AXES, AXIS_INFO, AXIS_COLORS, absView, clamp, clipLineToPolygon, dragWindow, isAligned,
+  paneScale, pixelToPlane, planeToPixel, textureFormatFor, zoomAt,
 } from "./geometry.js";
 
 const NS = "http://www.w3.org/2000/svg";
 const UNIT_LABEL = { micrometer: "\u00b5m", millimeter: "mm", nanometer: "nm", centimeter: "cm", meter: "m" };
-const PREVIEW_MIN_PIXELS = 512 * 512; // smaller planes are cheap enough to always fetch in full
+const HOLD_MS = 120;      // a new image replaces the one on screen when it is complete, or after this long (then it fills in)
+const GAP_PX = 12;        // the crosshair lines leave this much room around the cursor (a press there moves the cursor)
+const LINE_HIT_PX = 7;    // how close a press must be to a crosshair line to take it
+const ROT_SNAP = Math.PI / 12; // Shift while turning the lines: steps of 15 degrees
+const wrapPi = (a) => Math.atan2(Math.sin(a), Math.cos(a));
+const sameFrame = (a, b) => a.width === b.width && a.height === b.height && a.pixel === b.pixel
+  && a.u.every((c, i) => Math.abs(c - b.u[i]) < 1e-9) && a.v.every((c, i) => Math.abs(c - b.v[i]) < 1e-9);
 
 function fmtPos(mm, unit) {
   const label = UNIT_LABEL[unit] ?? unit ?? "";
@@ -82,10 +90,9 @@ export class Pane {
     this.axis = axis;
     this.el = el;
     this.visible = false;
-    this.shownKey = null;
-    this.pendingKey = null;
-    this.abort = null;
-    this.plane = null; // last uploaded plane (for the value read-out)
+    this.shown = null;       // what the texture holds: { geom, key, plane, complete }
+    this.load = null;        // the image being loaded: { key, geom, ac, t0, asm, swapped, timer }
+    this.lines = [];         // the crosshair lines as drawn, in pane pixels (hit testing)
     this.size = { width: 1, height: 1, dpr: 1 };
     this.drag = null;
     this.mdrag = null;       // a mouse press that is measuring: placing a point or dragging one
@@ -96,7 +103,6 @@ export class Pane {
     this.lastDir = 1;
     this.error = null;
     this.busyTimer = null;
-    this.lastStats = { fetchMs: 0, source: "" };
 
     const info = AXIS_INFO[axis];
     el.classList.add("slice-pane", "slice-pane-2d");
@@ -106,7 +112,7 @@ export class Pane {
       <canvas class="slice-canvas"></canvas>
       <svg class="slice-svg" xmlns="${NS}"></svg>
       <div class="slice-head">
-        <span class="slice-title" style="color:${AXIS_COLORS[info.normal]}" title="${info.label} plane: slices along ${info.normal.toUpperCase()}">${info.label}</span>
+        <span class="slice-title" style="color:${AXIS_COLORS[info.normal]}" title="${info.label} plane (scroll to move it along ${info.normal.toUpperCase()}; drag a crosshair line to turn the planes)">${info.label}</span>
         <span class="slice-sub"></span>
         <span class="slice-btns">
           <button type="button" data-act="measure" title="Measure distances (M): click two points" aria-pressed="false">\ud83d\udccf</button>
@@ -178,47 +184,56 @@ export class Pane {
 
   // ------------------------------------------------------------ data
 
+  /** Key of the complete image on the texture (null while it is being replaced by one that is not complete yet). */
+  get shownKey() {
+    return this.shown?.complete ? this.shown.key : null;
+  }
+
+  get pendingKey() {
+    return this.load?.key ?? null;
+  }
+
   cancelPending() {
-    this.abort?.abort();
-    this.abort = null;
-    this.pendingKey = null;
+    const l = this.load;
+    if (l) { l.ac.abort(); clearTimeout(l.timer); }
+    this.load = null;
     this.setBusy(false);
   }
 
-  /** Makes sure the plane for the current cursor is (being) loaded. */
+  keyFor(geom) {
+    const st = this.state;
+    return `${this.views.sliceInfo(this.axis).index}/${st.channel}/${geom.key}`;
+  }
+
+  /** Whether the pane's plane is the slice stack of its own axis (so scrolling, playing and saving by slice index make sense). */
+  get alongOwnAxis() {
+    const g = this.state.paneGeom(this.axis);
+    const k = ["x", "y", "z"].indexOf(AXIS_INFO[this.axis].normal);
+    return Math.abs(g.n[k]) > 1 - 1e-9;
+  }
+
+  /** Makes sure the image of the pane's plane (for the cursor and orientation now) is (being) loaded. */
   sync() {
     if (!this.visible) return;
     const st = this.state;
-    const idx = planeIndex(this.axis, st.cursor);
-    const ext = planeExtents(this.axis, st.dims);
-    const preview = st.interacting && ext.u * ext.v >= PREVIEW_MIN_PIXELS;
-    const stride = preview ? 2 : 1;
-    const key = `${idx}/${stride}/${st.channel}`;
-    if (key === this.shownKey || key === this.pendingKey) return;
-
-    const client = this.views.client;
-    const hit = client.peek(this.axis, idx, st.channel, stride);
-    if (hit) {
-      this.cancelPending();
-      this.show(hit, key);
-      return;
-    }
+    const geom = st.paneGeom(this.axis);
+    const key = this.keyFor(geom);
+    if (this.shown?.complete && this.shown.key === key) { this.cancelPending(); return; }
+    if (key === this.pendingKey) return;
     this.cancelPending(); // latest wins
     const ac = new AbortController();
-    this.abort = ac;
-    this.pendingKey = key;
-    this.busyTimer = setTimeout(() => { if (this.pendingKey === key) this.setBusy(true); }, 120);
-    client
-      .get(this.axis, idx, { channel: st.channel, stride, signal: ac.signal, priority: 2 })
-      .then((plane) => {
-        if (this.pendingKey !== key) return;
-        this.pendingKey = null;
-        this.setBusy(false);
-        this.show(plane, key);
-      })
+    const load = { key, geom, ac, t0: performance.now(), asm: null, swapped: false, timer: 0 };
+    this.load = load;
+    this.busyTimer = setTimeout(() => { if (this.load === load) this.setBusy(true); }, 120);
+    // while scrolling, the slice that was shown fills the picture until the blocks of the new one arrive
+    const underlay = this.shown && sameFrame(this.shown.geom, geom) ? this.shown.plane : null;
+    this.views.client
+      .loadPlane(geom.spec(), { channel: st.channel, priority: 2, signal: ac.signal, underlay, onUpdate: (asm) => this.onLoadUpdate(load, asm) })
+      .then(({ assembler }) => this.onLoadDone(load, assembler))
       .catch((err) => {
-        if (err?.name === "AbortError" || this.pendingKey !== key) return;
-        this.pendingKey = null;
+        if (err?.name === "AbortError" || this.load !== load) return;
+        this.load = null;
+        clearTimeout(load.timer);
         this.setBusy(false);
         this.error = err.message || String(err);
         this.updateHud();
@@ -226,28 +241,74 @@ export class Pane {
       });
   }
 
-  show(plane, key) {
+  /** The loading image has changed (cached blocks applied, or a chunk of the stream arrived). */
+  onLoadUpdate(load, asm) {
+    if (load !== this.load || !asm) return;
+    load.asm = asm;
+    if (!load.swapped) {
+      const wait = HOLD_MS - (performance.now() - load.t0);
+      if (this.shown && !asm.complete && wait > 0) { // keep the old image a moment: most loads are done by then
+        load.timer ||= setTimeout(() => { load.timer = 0; this.onLoadUpdate(load, load.asm); }, wait + 2);
+        return;
+      }
+      this.swap(load, asm);
+      return;
+    }
+    const rows = asm.takeDirty();
+    if (!rows) return;
+    this.views.renderer.uploadRows(this.gpu, asm.plane, rows.r0, rows.r1);
+    this.shown.complete = asm.complete;
+    this.views.requestRender();
+  }
+
+  /** The loading image goes on the texture (in full; the rows that change after this are uploaded as they do). */
+  swap(load, asm) {
     try {
-      this.views.renderer.upload(this.gpu, plane);
+      this.views.renderer.upload(this.gpu, asm.plane);
     } catch (err) {
+      this.load = null;
+      this.cancelPending();
       this.error = err.message;
       this.updateHud();
       return;
     }
+    asm.takeDirty();
+    load.swapped = true;
     this.error = null;
-    this.plane = plane;
-    this.shownKey = key;
-    this.lastStats = { fetchMs: this.views.client.counters.lastMs, source: plane.source };
+    this.shown = { geom: load.geom, key: load.key, plane: asm.plane, complete: asm.complete };
     this.views.requestRender();
-    this.prefetch(plane);
   }
 
-  prefetch(plane) {
-    if (!this.views.prefetchEnabled) return; // switched off while a slice sweep plays: only the plane on screen is fetched
+  onLoadDone(load, asm) {
+    if (load !== this.load) return;
+    clearTimeout(load.timer);
+    this.load = null;
+    this.setBusy(false);
+    if (!load.swapped) this.swap(load, asm);
+    else {
+      const rows = asm.takeDirty();
+      if (rows) this.views.renderer.uploadRows(this.gpu, asm.plane, rows.r0, rows.r1);
+      this.shown.complete = true;
+    }
+    this.error = null;
+    this.views.requestRender();
+    this.prefetch();
+  }
+
+  /** While scrolling through slices, warms the cache with the blocks the next slices will need (only at block boundaries: the rest is cached). */
+  prefetch() {
+    if (!this.views.prefetchEnabled || !this.alongOwnAxis) return; // switched off while a slice sweep plays: only the image on screen is fetched
     const st = this.state;
-    const n = AXIS_INFO[this.axis].normal;
-    const list = prefetchIndices(plane.index, this.lastDir, st.dims[n], this.views.info.chunk[n]);
-    this.views.client.prefetch(this.axis, list, { channel: st.channel, stride: 1 });
+    const normal = AXIS_INFO[this.axis].normal;
+    const bs = this.views.info.blockSize || 64;
+    const idx = st.cursor[normal];
+    const dir = this.lastDir;
+    const r = ((idx % bs) + bs) % bs;
+    const near = dir > 0 ? bs - 1 - r : r; // slices to the next block
+    if (near > 6) return;
+    const target = dir > 0 ? idx + near + 1 : idx - near - 1;
+    if (target < 0 || target >= st.dims[normal]) return;
+    this.views.client.prefetchPlane(st.paneGeomAt(this.axis, { ...st.pos, [normal]: target + 0.5 }).spec(), { channel: st.channel });
   }
 
   setBusy(on) {
@@ -259,7 +320,13 @@ export class Pane {
 
   ppv() {
     const st = this.state;
-    return panePpv(this.axis, st.dims, st.spacing, st.views[this.axis], this.size.width, this.size.height);
+    return paneScale(st.paneGeom(this.axis), st.views[this.axis], this.size.width, this.size.height);
+  }
+
+  /** The view as absolute plane coordinates of the current geometry. */
+  absView() {
+    const st = this.state;
+    return absView(st.views[this.axis], st.paneGeom(this.axis));
   }
 
   draw() {
@@ -267,11 +334,13 @@ export class Pane {
     const st = this.state;
     const { dpr } = this.size;
     const ppv = this.ppv();
+    // the texture is drawn in the frame of the image it holds (the same as the current one unless the orientation just changed)
+    const tg = this.shown?.geom ?? st.paneGeom(this.axis);
     this.views.renderer.draw(this.gpu, this.ctx.getCurrentTexture().createView(), this.format, {
       width: this.canvas.width,
       height: this.canvas.height,
-      extent: planeExtents(this.axis, st.dims),
-      view: st.views[this.axis],
+      extent: { u: tg.width, v: tg.height },
+      view: absView(st.views[this.axis], tg),
       ppv: { u: ppv.u * dpr, v: ppv.v * dpr },
       flip: st.flips[this.axis],
       window: st.window,
@@ -285,33 +354,55 @@ export class Pane {
   drawOverlay(ppv) {
     const st = this.state;
     const { width, height } = this.size;
-    const view = st.views[this.axis];
+    const geom = st.paneGeom(this.axis);
+    const view = absView(st.views[this.axis], geom);
     const flip = st.flips[this.axis];
     const info = AXIS_INFO[this.axis];
-    const ext = planeExtents(this.axis, st.dims);
-    const c = cursorInPlane(this.axis, st.cursor);
-    const p = planeToPixel(c.u, c.v, width, height, view, ppv, flip);
-    const a = planeToPixel(0, 0, width, height, view, ppv, flip);
-    const b = planeToPixel(ext.u, ext.v, width, height, view, ppv, flip);
-    const parts = [
-      `<rect x="${Math.min(a.x, b.x)}" y="${Math.min(a.y, b.y)}" width="${Math.abs(b.x - a.x)}" height="${Math.abs(b.y - a.y)}" fill="none" stroke="#ffffff" stroke-opacity="0.18"/>`,
-    ];
-    if (st.showCrosshair) {
-      const cu = AXIS_COLORS[info.u]; // the vertical line is the plane of constant u
-      const cv = AXIS_COLORS[info.v];
-      const gap = 10;
-      const yTop = Math.min(a.y, b.y), yBot = Math.max(a.y, b.y), xL = Math.min(a.x, b.x), xR = Math.max(a.x, b.x);
-      const seg = (x1, y1, x2, y2, col) => (x1 === x2 && y1 === y2 ? "" :
-        `<line x1="${x1.toFixed(1)}" y1="${y1.toFixed(1)}" x2="${x2.toFixed(1)}" y2="${y2.toFixed(1)}" stroke="${col}" stroke-opacity="0.85"/>`);
-      parts.push(
-        seg(p.x, Math.max(yTop, 0), p.x, p.y - gap, cu), seg(p.x, p.y + gap, p.x, Math.min(yBot, height), cu),
-        seg(Math.max(xL, 0), p.y, p.x - gap, p.y, cv), seg(p.x + gap, p.y, Math.min(xR, width), p.y, cv),
-        `<circle cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="3" fill="none" stroke="#fff" stroke-opacity="0.9"/>`,
-      );
+    const toPx = (a, b) => planeToPixel(a, b, width, height, view, ppv, flip);
+    const poly = geom.polygon().map(([a, b]) => toPx(a, b));
+    const ptsAttr = poly.map((q) => `${q.x.toFixed(1)},${q.y.toFixed(1)}`).join(" ");
+    const parts = [];
+    if (poly.length >= 3) {
+      if (!isAligned(geom.n)) { // a tilted plane: what is outside the volume is background
+        parts.push(`<path d="M0,0H${width}V${height}H0Z M${poly.map((q) => `${q.x.toFixed(1)},${q.y.toFixed(1)}`).join("L")}Z" fill="rgb(15,15,15)" fill-rule="evenodd"/>`);
+      }
+      parts.push(`<polygon points="${ptsAttr}" fill="none" stroke="#ffffff" stroke-opacity="0.18"/>`);
     }
-    if (st.showScaleBar !== false) parts.push(scaleBarSvg(st.spacing[info.u] / ppv.u, width, height));
+    this.lines = [];
+    const cp = geom.project(st.pos);
+    const c = toPx(cp.a, cp.b);
+    if (st.showCrosshair && poly.length >= 3) {
+      const gap = GAP_PX / ppv.u; // in plane units
+      for (const other of AXES) {
+        if (other === this.axis) continue;
+        const d = geom.lineDirection(other);
+        const span = clipLineToPolygon([cp.a, cp.b], d, geom.polygon());
+        if (!span) continue;
+        const col = AXIS_COLORS[AXIS_INFO[other].normal]; // the plane `other` is the plane of constant <its normal axis>
+        const at = (t) => toPx(cp.a + d[0] * t, cp.b + d[1] * t);
+        const seg = (t0, t1) => {
+          if (t1 - t0 < 1e-6) return "";
+          const p = at(t0), q = at(t1);
+          return `<line x1="${p.x.toFixed(1)}" y1="${p.y.toFixed(1)}" x2="${q.x.toFixed(1)}" y2="${q.y.toFixed(1)}" stroke="${col}" stroke-opacity="0.85"/>`;
+        };
+        const hot = this.hotLine === other || this.drag?.mode === "rotate";
+        if (hot) parts.push(`<g stroke-width="2.6" stroke-linecap="round">${seg(span[0], Math.min(span[1], -gap))}${seg(Math.max(span[0], gap), span[1])}</g>`);
+        else parts.push(seg(span[0], Math.min(span[1], -gap)), seg(Math.max(span[0], gap), span[1]));
+        const e = at(1), f = at(0);
+        const sd = { x: e.x - f.x, y: e.y - f.y }; // screen direction of the line (unit: ppv.u is the same along both axes)
+        const sl = Math.hypot(sd.x, sd.y) || 1;
+        this.lines.push({ other, x: c.x, y: c.y, dx: sd.x / sl, dy: sd.y / sl, t0: span[0] * ppv.u, t1: span[1] * ppv.u });
+        for (const t of [span[1] - 14 / ppv.u, span[0] + 14 / ppv.u]) { // grips near the ends
+          if (Math.abs(t) < gap + 20 / ppv.u) continue;
+          const g = at(t);
+          parts.push(`<circle cx="${g.x.toFixed(1)}" cy="${g.y.toFixed(1)}" r="${hot ? 4.5 : 3}" fill="${col}" fill-opacity="${hot ? 0.9 : 0.55}" stroke="#000" stroke-opacity="0.5"/>`);
+        }
+      }
+      parts.push(`<circle cx="${c.x.toFixed(1)}" cy="${c.y.toFixed(1)}" r="3" fill="none" stroke="#fff" stroke-opacity="0.9"/>`);
+    }
+    if (st.showScaleBar !== false) parts.push(scaleBarSvg(geom.pixel / ppv.u, width, height));
     const meas = paneMeasureSvg({
-      axis: this.axis, index: st.cursor[info.normal], measures: st.measures, pending: st.pending, rubber: this.rubber,
+      geom, measures: st.measures, pending: st.pending, rubber: this.rubber,
       selected: st.measureSel, spacing: st.spacing, unit: st.unit ?? "micrometer", width, height, view, ppv, flip,
     });
     this.handles = meas.handles;
@@ -324,11 +415,18 @@ export class Pane {
     const st = this.state;
     const n = AXIS_INFO[this.axis].normal;
     const idx = st.cursor[n];
-    const pos = (idx + 0.5) * st.spacing[n];
-    const phys = this.views.info.unit ? ` \u00b7 ${fmtPos(pos, this.views.info.unit)}` : "";
-    const stale = this.shownKey && !this.shownKey.startsWith(`${idx}/`) ? " \u00b7 \u2026" : "";
     const zoom = st.views[this.axis].zoom;
-    const text = `${n} ${idx + 1} / ${st.dims[n]}${phys}${zoom !== 1 ? ` \u00b7 ${Math.round(zoom * 100)}%` : ""}${stale}`;
+    let where;
+    if (this.alongOwnAxis) {
+      const pos = (idx + 0.5) * st.spacing[n];
+      const phys = this.views.info.unit ? ` \u00b7 ${fmtPos(pos, this.views.info.unit)}` : "";
+      where = `${n} ${idx + 1} / ${st.dims[n]}${phys}`;
+    } else {
+      const e = st.euler();
+      where = `tilted ${e.rx}\u00b0 ${e.ry}\u00b0 ${e.rz}\u00b0`;
+    }
+    const stale = this.load ? " \u00b7 \u2026" : "";
+    const text = `${where}${zoom !== 1 ? ` \u00b7 ${Math.round(zoom * 100)}%` : ""}${stale}`;
     if (this.subEl.textContent !== text) this.subEl.textContent = text;
   }
 
@@ -345,13 +443,68 @@ export class Pane {
   }
 
   planePoint(x, y) {
-    const st = this.state;
-    return pixelToPlane(x, y, this.size.width, this.size.height, st.views[this.axis], this.ppv(), st.flips[this.axis]);
+    return pixelToPlane(x, y, this.size.width, this.size.height, this.absView(), this.ppv(), this.state.flips[this.axis]);
   }
 
   moveCursorTo(x, y) {
     const pt = this.planePoint(x, y);
-    this.state.setFromPlane(this.axis, pt.u, pt.v, this.axis);
+    this.state.setFromPane(this.axis, pt.u, pt.v, this.axis);
+  }
+
+  /** Zooms by `factor` about the pointer; views are offsets from the image centre. */
+  zoomBy(factor, x, y) {
+    const s = this.state, g = s.paneGeom(this.axis);
+    const r = zoomAt(this.absView(), factor, x, y, this.size.width, this.size.height, this.ppv(), s.flips[this.axis]);
+    s.setView(this.axis, { zoom: r.zoom, centerU: r.centerU - g.width / 2, centerV: r.centerV - g.height / 2 });
+  }
+
+  panBy(dx, dy) {
+    const s = this.state, ppv = this.ppv(), flip = s.flips[this.axis], v = s.views[this.axis];
+    s.setView(this.axis, { centerU: v.centerU - (flip.u * dx) / ppv.u, centerV: v.centerV - (flip.v * dy) / ppv.v });
+  }
+
+  // ------------------------------------------------------------ turning the planes
+
+  /** The crosshair line near a pixel, if a press there would take it (not the middle, which moves the cursor). */
+  lineAt(x, y, tolerance = LINE_HIT_PX) {
+    let best = null, bd = tolerance;
+    for (const l of this.lines) {
+      const rx = x - l.x, ry = y - l.y;
+      const along = rx * l.dx + ry * l.dy;
+      const across = Math.abs(-rx * l.dy + ry * l.dx);
+      if (Math.abs(along) < GAP_PX || along < l.t0 - 4 || along > l.t1 + 4 || across > bd) continue;
+      best = l;
+      bd = across;
+    }
+    return best;
+  }
+
+  /** Angle of a pixel around the cursor in plane coordinates (from u towards v). */
+  angleAt(x, y) {
+    const g = this.state.paneGeom(this.axis), c = g.project(this.state.pos), q = this.planePoint(x, y);
+    return Math.atan2(q.v - c.b, q.u - c.a);
+  }
+
+  startRotate(x, y) {
+    const st = this.state;
+    return { snap: st.orientationSnapshot(), last: this.angleAt(x, y), total: 0 };
+  }
+
+  /** Turns the planes so the lines follow the pointer at (x, y); `rot` is what startRotate returned. */
+  rotateTo(rot, x, y, snapSteps) {
+    const a = this.angleAt(x, y);
+    rot.total += wrapPi(a - rot.last);
+    rot.last = a;
+    const angle = snapSteps ? Math.round(rot.total / ROT_SNAP) * ROT_SNAP : rot.total;
+    this.state.rotateAboutPane(this.axis, angle, rot.snap, this.axis);
+  }
+
+  setHotLine(l) {
+    const other = l?.other ?? null;
+    if (other === this.hotLine) return;
+    this.hotLine = other;
+    this.el.style.cursor = other ? "grab" : "";
+    this.views.requestRender();
   }
 
   bindInput() {
@@ -371,12 +524,14 @@ export class Pane {
         this.measureDown(x, y, e.pointerId);
         return;
       }
-      const mode = e.button === 1 || (e.button === 0 && (e.shiftKey || spaceDown)) ? "pan" : e.button === 0 ? "cursor" : e.button === 2 ? "window" : null;
+      const { x, y } = this.local(e);
+      const line = e.button === 0 && !e.shiftKey && !spaceDown ? this.lineAt(x, y) : null;
+      const mode = line ? "rotate" : e.button === 1 || (e.button === 0 && (e.shiftKey || spaceDown)) ? "pan" : e.button === 0 ? "cursor" : e.button === 2 ? "window" : null;
       if (!mode) return;
       e.preventDefault();
       el.setPointerCapture(e.pointerId);
-      const { x, y } = this.local(e);
-      this.drag = { mode, id: e.pointerId, x, y };
+      this.drag = { mode, id: e.pointerId, x, y, rot: mode === "rotate" ? this.startRotate(x, y) : null };
+      if (mode === "rotate") this.el.style.cursor = "grabbing";
       st().beginInteraction();
       if (mode === "cursor") this.moveCursorTo(x, y);
     });
@@ -389,6 +544,7 @@ export class Pane {
         return;
       }
       if (!this.drag) {
+        this.setHotLine(st().showCrosshair && !st().measuring ? this.lineAt(x, y) : null);
         this.hover(x, y);
         if (st().measuring && st().pending) this.setRubber(this.measurePoint(x, y)); // live line to the pointer
         return;
@@ -399,9 +555,10 @@ export class Pane {
       const s = st();
       if (this.drag.mode === "cursor") {
         this.moveCursorTo(x, y);
+      } else if (this.drag.mode === "rotate") {
+        this.rotateTo(this.drag.rot, x, y, e.shiftKey);
       } else if (this.drag.mode === "pan") {
-        const ppv = this.ppv(), flip = s.flips[this.axis], v = s.views[this.axis];
-        s.setView(this.axis, { centerU: v.centerU - (flip.u * dx) / ppv.u, centerV: v.centerV - (flip.v * dy) / ppv.v });
+        this.panBy(dx, dy);
       } else {
         s.setWindow(dragWindow(s.window, dx, dy, s.dtype));
       }
@@ -410,12 +567,14 @@ export class Pane {
     const end = (e) => {
       if (this.mdrag && this.mdrag.id === e.pointerId) { this.measureEnd(); return; }
       if (!this.drag || this.drag.id !== e.pointerId) return;
+      const was = this.drag.mode;
       this.drag = null;
+      if (was === "rotate") { const p = this.local(e); this.el.style.cursor = ""; this.setHotLine(this.lineAt(p.x, p.y)); }
       st().endInteraction();
     };
     el.addEventListener("pointerup", end);
     el.addEventListener("pointercancel", end);
-    el.addEventListener("pointerleave", () => { if (!this.drag) this.updateHud(); });
+    el.addEventListener("pointerleave", () => { if (!this.drag) { this.updateHud(); this.setHotLine(null); } });
 
     el.addEventListener("wheel", (e) => {
       e.preventDefault();
@@ -423,7 +582,7 @@ export class Pane {
       if (e.ctrlKey || e.metaKey) {
         const { x, y } = this.local(e);
         const factor = Math.exp(-e.deltaY * (e.deltaMode === 1 ? 0.05 : 0.0025));
-        s.setView(this.axis, zoomAt(s.views[this.axis], factor, x, y, this.size.width, this.size.height, this.ppv(), s.flips[this.axis]));
+        this.zoomBy(factor, x, y);
         return;
       }
       // one step per mouse-wheel notch / ~40 px of trackpad scroll
@@ -439,20 +598,21 @@ export class Pane {
 
     el.addEventListener("dblclick", (e) => {
       if (e.target.closest(".slice-head")) return;
-      st().resetView(this.axis);
+      const { x, y } = this.local(e);
+      if (this.lineAt(x, y)) st().resetOrientation(this.axis); // a double-click on a crosshair line levels the planes
+      else st().resetView(this.axis);
     });
 
     el.addEventListener("keydown", (e) => {
       const s = st();
       const k = e.key;
-      const { u } = AXIS_INFO[this.axis];
       const step = e.shiftKey ? 10 : 1;
       let handled = true;
       if (k === " ") spaceDown = true;
       else if (k === "ArrowUp" || k === "PageUp") { this.lastDir = 1; s.moveAlong(this.axis, k === "PageUp" ? 10 : step, this.axis); }
       else if (k === "ArrowDown" || k === "PageDown") { this.lastDir = -1; s.moveAlong(this.axis, -(k === "PageDown" ? 10 : step), this.axis); }
-      else if (k === "ArrowLeft") s.setCursor({ [u]: s.cursor[u] - step }, this.axis);
-      else if (k === "ArrowRight") s.setCursor({ [u]: s.cursor[u] + step }, this.axis);
+      else if (k === "ArrowLeft") s.moveInPlane(this.axis, -step, this.axis);
+      else if (k === "ArrowRight") s.moveInPlane(this.axis, step, this.axis);
       else if (k === "Home" || k === "r") s.resetView(this.axis);
       else if (k === "i") s.setInvert(!s.invert);
       else if (k === "w") s.resetWindow();
@@ -494,12 +654,10 @@ export class Pane {
     this.views.requestRender();
   }
 
-  /** The 3D point under a pixel of this pane: on the slice shown, inside the volume. */
+  /** The 3D point under a pixel of this pane: on the plane shown, inside the volume. */
   measurePoint(x, y) {
-    const st = this.state;
     const pt = this.planePoint(x, y);
-    const ext = planeExtents(this.axis, st.dims);
-    return roundPoint(pointFromPlane(this.axis, clamp(pt.u, 0, ext.u), clamp(pt.v, 0, ext.v), st.cursor[AXIS_INFO[this.axis].normal]));
+    return roundPoint(pointFromPane(this.state.paneGeom(this.axis), pt.u, pt.v) ?? this.state.pos);
   }
 
   /** The end of a measurement (or the pending point) near a pixel, if any. */
@@ -599,7 +757,7 @@ export class Pane {
       tool: () => this.views.touchTool,
       focus: () => this.el.focus({ preventScroll: true }),
       begin: () => { this.scrollAcc = 0; this.state.beginInteraction(); },
-      end: () => { this.touchMeasureEnd(); this.state.endInteraction(); },
+      end: () => { this.touchMeasureEnd(); this.trot = null; this.state.endInteraction(); },
       tap: (x, y) => { if (this.views.touchTool === "measure") this.measureTap(x, y); else { this.moveCursorTo(x, y); this.hover(x, y); } },
       // two quick taps place two points with the ruler: they are not a double tap there
       doubleTap: (x, y) => { if (this.views.touchTool === "measure") this.measureTap(x, y); else this.state.resetView(this.axis); },
@@ -611,8 +769,7 @@ export class Pane {
   touchDrag(tool, x, y, dx, dy) {
     const s = this.state;
     if (tool === "pan") {
-      const ppv = this.ppv(), flip = s.flips[this.axis], v = s.views[this.axis];
-      s.setView(this.axis, { centerU: v.centerU - (flip.u * dx) / ppv.u, centerV: v.centerV - (flip.v * dy) / ppv.v });
+      this.panBy(dx, dy);
     } else if (tool === "window") {
       s.setWindow(dragWindow(s.window, dx, dy, s.dtype));
     } else if (tool === "measure") {
@@ -626,15 +783,19 @@ export class Pane {
       this.lastDir = steps > 0 ? 1 : -1;
       s.moveAlong(this.axis, steps, this.axis);
     } else {
-      this.moveCursorTo(x, y);
+      // a finger that starts on a crosshair line turns the planes; anywhere else it moves the cursor
+      if (!this.trot) {
+        const line = s.showCrosshair ? this.lineAt(x - dx, y - dy, 16) : null;
+        this.trot = line ? this.startRotate(x - dx, y - dy) : { cursor: true };
+      }
+      if (this.trot.cursor) this.moveCursorTo(x, y);
+      else this.rotateTo(this.trot, x, y, false);
     }
   }
 
   touchPinch({ factor, cx, cy, dx, dy }) {
-    const s = this.state, axis = this.axis;
-    s.setView(axis, zoomAt(s.views[axis], factor, cx, cy, this.size.width, this.size.height, this.ppv(), s.flips[axis]));
-    const ppv = this.ppv(), flip = s.flips[axis], v = s.views[axis];
-    s.setView(axis, { centerU: v.centerU - (flip.u * dx) / ppv.u, centerV: v.centerV - (flip.v * dy) / ppv.v });
+    this.zoomBy(factor, cx, cy);
+    this.panBy(dx, dy);
   }
 
   showTouchTool() {
@@ -643,23 +804,24 @@ export class Pane {
 
   hover(x, y) {
     const st = this.state;
+    const geom = st.paneGeom(this.axis);
     const pt = this.planePoint(x, y);
-    const ext = planeExtents(this.axis, st.dims);
-    if (pt.u < 0 || pt.v < 0 || pt.u >= ext.u || pt.v >= ext.v) {
+    const q = pointFromPane(geom, pt.u, pt.v);
+    if (!q || Math.hypot(geom.project(q).a - pt.u, geom.project(q).b - pt.v) > 1e-6) { // outside the cut of the volume
       this.updateHud();
       return;
     }
-    const { u, v, normal } = AXIS_INFO[this.axis];
-    const vox = { [u]: Math.floor(pt.u), [v]: Math.floor(pt.v), [normal]: st.cursor[normal] };
     let value = "";
-    const p = this.plane;
-    if (p && p.index === st.cursor[normal]) {
-      const s = p.stride ?? 1;
-      const col = Math.min(p.width - 1, Math.round(vox[u] / s)), row = Math.min(p.height - 1, Math.round(vox[v] / s));
-      const val = p.data[row * p.width + col];
-      value = ` = ${Number.isInteger(val) ? val : val.toPrecision(5)}`;
+    const sh = this.shown;
+    if (sh) { // the value where the pointer is, from the image on the texture (in its own frame)
+      const s = sh.geom.project(q);
+      const col = Math.floor(s.a), row = Math.floor(s.b);
+      if (col >= 0 && row >= 0 && col < sh.plane.width && row < sh.plane.height) {
+        const val = sh.plane.data[row * sh.plane.width + col];
+        value = ` = ${Number.isInteger(val) ? val : val.toPrecision(5)}`;
+      }
     }
-    this.updateHud(`x ${vox.x}  y ${vox.y}  z ${vox.z}${value}`);
+    this.updateHud(`x ${Math.floor(q.x)}  y ${Math.floor(q.y)}  z ${Math.floor(q.z)}${value}`);
   }
 
   dispose() {
@@ -704,6 +866,7 @@ export class SliceViews {
     this.info = info;
     this.device = device;
     this.state = state;
+    state.maxSide = Math.min(device.limits.maxTextureDimension2D, 4096); // (before any geometry is made)
     // What one finger drags do on a touch screen (see Pane.bindTouch); remembered in this browser
     this.touchTool = "cursor";
     try {
@@ -721,26 +884,20 @@ export class SliceViews {
 
     this.panes = {};
     for (const axis of AXES) this.panes[axis] = new Pane(this, axis, grid.querySelector(`[data-axis="${axis}"]`));
-    const angledEl = grid.querySelector('[data-axis="angled"]');
-    this.angled = angledEl ? new ObliquePane(this, angledEl, { scaleBarSvg }) : null; // the angled slice (see oblique-pane.js)
 
+    this._needSync = false;
     this._offs = [
       state.on("cursor", ({ changed }) => {
         for (const axis of AXES) {
-          if (changed.includes(AXIS_INFO[axis].normal)) {
-            const pane = this.panes[axis];
-            const idx = state.cursor[AXIS_INFO[axis].normal];
-            pane.lastDir = Math.sign(idx - pane.prevIdx) || pane.lastDir; // scroll direction, for prefetching
-            pane.prevIdx = idx;
-            pane.sync();
-          }
+          const pane = this.panes[axis];
+          const idx = state.cursor[AXIS_INFO[axis].normal];
+          if (idx !== pane.prevIdx) pane.lastDir = Math.sign(idx - pane.prevIdx) || pane.lastDir; // scroll direction, for prefetching
+          pane.prevIdx = idx;
         }
-        this.angled?.sync();
-        this.requestRender();
+        this.requestSync();
       }),
-      state.on("angled", () => { this.angled?.sync(); this.requestRender(); }),
-      state.on("channel", () => { for (const p of Object.values(this.panes)) { p.shownKey = null; p.sync(); } if (this.angled) { this.angled.shownKey = null; this.angled.sync(); } }),
-      state.on("interaction", ({ active }) => { if (!active) for (const p of Object.values(this.panes)) p.sync(); }),
+      state.on("orientation", () => this.requestSync()),
+      state.on("channel", () => { for (const p of Object.values(this.panes)) p.shown = null; this.requestSync(); }),
       state.on("layout", () => this.applyLayout()),
       state.on("view", () => this.requestRender()),
       state.on("window", () => this.requestRender()),
@@ -774,7 +931,7 @@ export class SliceViews {
   }
 
   fail(message) {
-    for (const p of [...Object.values(this.panes), this.angled]) if (p) { p.error = message; p.updateHud(); }
+    for (const p of Object.values(this.panes)) { p.error = message; p.updateHud(); }
   }
 
   // ------------------------------------------------------------------ layout
@@ -786,24 +943,30 @@ export class SliceViews {
     const layout = this.state.layout;
     this.grid.dataset.layout = layout;
     if (this.pane3d) this.pane3d.dataset.visible = SliceViews.show3d(layout) ? "1" : "0";
-    // "angled": the angled slice big on the left, the three axis panes next to it
-    for (const axis of AXES) this.panes[axis].setVisible(layout === "quad" || layout === "angled" || layout === axis);
-    this.angled?.setVisible(layout === "angled");
+    for (const axis of AXES) this.panes[axis].setVisible(layout === "quad" || layout === axis);
     this.requestRender();
     for (const p of Object.values(this.panes)) if (p.visible) p.resize();
-    if (this.angled?.visible) this.angled.resize();
     this.onLayout?.(layout);
   }
 
   // ---------------------------------------------------------------- rendering
+
+  /** The panes bring their images up to date before the next frame (a drag makes many changes per frame: one load each at most). */
+  requestSync() {
+    this._needSync = true;
+    this.requestRender();
+  }
 
   requestRender() {
     if (this._raf || this._disposed) return;
     this._raf = requestAnimationFrame(() => {
       this._raf = 0;
       if (this._disposed) return;
+      if (this._needSync) {
+        this._needSync = false;
+        for (const p of Object.values(this.panes)) p.sync();
+      }
       for (const p of Object.values(this.panes)) p.draw();
-      this.angled?.draw();
       this.onRender?.();
     });
   }
@@ -816,56 +979,101 @@ export class SliceViews {
     this.prefetchEnabled = !!on;
   }
 
-  /** The slice panes on screen now: [{ axis, label, index }]. */
+  /**
+   * Where a pane is in its stack of slices: { index, count, own, t0, step }. For a pane along its own axis the
+   * slices are the voxel layers; for a tilted plane they are steps of the finest voxel size along its normal,
+   * through the cursor, from one side of the volume to the other (t0: where the first is, relative to the cursor).
+   */
+  sliceInfo(axis) {
+    const st = this.state;
+    const g = st.paneGeom(axis);
+    const n = AXIS_INFO[axis].normal;
+    if (this.panes[axis].alongOwnAxis) return { index: st.cursor[n], count: st.dims[n], own: true, t0: 0, step: 1 };
+    const P = [st.pos.x * st.spacing.x, st.pos.y * st.spacing.y, st.pos.z * st.spacing.z];
+    const seg = lineInBox(P, g.n, g.S);
+    const d = (p) => (p[0] - P[0]) * g.n[0] + (p[1] - P[1]) * g.n[1] + (p[2] - P[2]) * g.n[2];
+    const [ta, tb] = seg ? [d(seg[0]), d(seg[1])].sort((x, y) => x - y) : [0, 0];
+    const step = g.pixel;
+    return { index: Math.round(-ta / step) + 0, count: Math.max(1, Math.floor((tb - ta) / step + 1e-9) + 1), own: false, t0: ta, step };
+  }
+
+  /** The cursor position (voxel coordinates) of slice `index` of a pane's stack: the cursor moved along the pane's normal. */
+  slicePos(axis, index) {
+    const st = this.state;
+    const info = this.sliceInfo(axis);
+    if (info.own) return { ...st.pos, [AXIS_INFO[axis].normal]: clamp(Math.round(index), 0, info.count - 1) + 0.5 };
+    const g = st.paneGeom(axis);
+    const t = info.t0 + clamp(Math.round(index), 0, info.count - 1) * info.step;
+    return { x: st.pos.x + (g.n[0] * t) / st.spacing.x, y: st.pos.y + (g.n[1] * t) / st.spacing.y, z: st.pos.z + (g.n[2] * t) / st.spacing.z };
+  }
+
+  /** Moves the cursor to slice `index` of a pane's stack (see sliceInfo). */
+  setSlice(axis, index, source = null) {
+    return this.state.setPos(this.slicePos(axis, index), source);
+  }
+
+  /** The slice panes on screen now: [{ axis, label, name, index, count, normal }] (a tilted pane has its stack of slices along its normal). */
   visibleSlices() {
     return AXES.filter((a) => this.panes[a].visible).map((axis) => {
       const info = AXIS_INFO[axis];
-      const index = planeIndex(axis, this.state.cursor);
-      return { axis, label: `${info.label} slice (${info.normal.toUpperCase()} = ${index})`, name: `${info.label}-${info.normal}${index}`, index, count: this.state.dims[info.normal], normal: info.normal };
+      const { index, count, own } = this.sliceInfo(axis);
+      return {
+        axis, index, count, normal: info.normal,
+        label: own ? `${info.label} slice (${info.normal.toUpperCase()} = ${index})` : `${info.label} slice (tilted, ${index + 1} of ${count})`,
+        name: `${info.label}-${own ? info.normal : "tilted"}${index}`,
+      };
     });
   }
 
   /**
-   * The part of a plane that is saved: [u0, u1) x [v0, v1) in voxels. "whole" = the full plane,
-   * "visible" = what the pane shows at its current zoom and pan (clipped to the plane).
+   * The part of a pane's image that is saved: [u0, u0 + width) x [v0, v0 + height) in image pixels (physical
+   * pixels of the finest voxel size, see PaneGeometry). "whole" = the full image, "visible" = what the pane shows
+   * at its current zoom and pan (clipped to the image).
    */
   exportRegion(axis, area) {
-    const ext = planeExtents(axis, this.state.dims);
-    if (area !== "visible") return { u0: 0, v0: 0, width: ext.u, height: ext.v };
+    const g = this.state.paneGeom(axis);
+    if (area !== "visible") return { u0: 0, v0: 0, width: g.width, height: g.height };
     const pane = this.panes[axis];
     const ppv = pane.ppv();
-    const view = this.state.views[axis];
+    const view = absView(this.state.views[axis], g);
     const halfU = pane.size.width / ppv.u / 2;
     const halfV = pane.size.height / ppv.v / 2;
     const u0 = Math.max(0, Math.floor(view.centerU - halfU));
-    const u1 = Math.min(ext.u, Math.ceil(view.centerU + halfU));
+    const u1 = Math.min(g.width, Math.ceil(view.centerU + halfU));
     const v0 = Math.max(0, Math.floor(view.centerV - halfV));
-    const v1 = Math.min(ext.v, Math.ceil(view.centerV + halfV));
+    const v1 = Math.min(g.height, Math.ceil(view.centerV + halfV));
     return { u0, v0, width: Math.max(0, u1 - u0), height: Math.max(0, v1 - v0) };
   }
 
   /**
-   * Saves a slice at the full resolution of the data: one image pixel per voxel, whatever the zoom.
-   * Orientation (flips), window / level, invert and the colour table are those of the pane.
+   * Saves a slice at the full resolution of the data: one image pixel per (finest) voxel, whatever the zoom.
+   * Orientation (flips), window / level, invert and the colour table are those of the pane. A tilted plane is
+   * saved as it is cut: what is outside the volume is zero.
    * @param {"xy"|"xz"|"yz"} axis
    * @param {{area?: "whole"|"visible", raw?: boolean, index?: number}} [o]  raw: the voxel values themselves,
-   *   not the picture; index: a slice other than the cursor's (the cursor is not moved)
+   *   not the picture; index: a slice other than the cursor's (the cursor is not moved; for a pane that shows
+   *   the slices of its own axis)
    * @returns {Promise<{width, height, rgba, gray} | {width, height, raw}>}
    */
   async exportSlice(axis, { area = "whole", raw = false, index } = {}) {
     const st = this.state;
+    const shownGeom = st.paneGeom(axis);
     const region = this.exportRegion(axis, area);
     if (region.width < 1 || region.height < 1) throw new Error("The slice is not in view");
-    const idx = index ?? planeIndex(axis, st.cursor);
-    // always the full-resolution plane (the pane may be showing a coarser preview)
-    const plane = await this.client.get(axis, idx, { channel: st.channel, stride: 1, priority: 2 });
-    const { width, height } = region;
+    // the full-resolution image (the pane may be showing a coarser one: the largest the GPU takes, at most what the server makes)
+    const pos = index === undefined ? st.pos : this.slicePos(axis, index);
+    const geom = st.paneGeomAt(axis, pos, Math.min(this.device.limits.maxTextureDimension2D, 16384));
+    const k = shownGeom.pixel / geom.pixel; // (the pane's image can be coarser than the full-resolution one)
+    const full = { u0: Math.round(region.u0 * k), v0: Math.round(region.v0 * k), width: Math.min(geom.width, Math.round(region.width * k)), height: Math.min(geom.height, Math.round(region.height * k)) };
+    const { assembler } = await this.client.loadPlane(geom.spec(), { channel: st.channel, priority: 2 });
+    const plane = assembler.plane;
+    const { width, height } = full;
     const flip = st.flips[axis];
-    const cu = region.u0 + width / 2;
-    const cv = region.v0 + height / 2;
+    const cu = full.u0 + width / 2;
+    const cv = full.v0 + height / 2;
 
     if (raw) {
-      // the same orientation as the picture; voxel (i, j) of the output is read straight from the plane
+      // the same orientation as the picture; value (i, j) of the output is read straight from the image
       const data = new plane.data.constructor(width * height);
       for (let j = 0; j < height; j++) {
         const pv = Math.min(plane.height - 1, Math.max(0, Math.floor(cv + (flip.v * (j + 0.5 - height / 2)))));
@@ -884,7 +1092,7 @@ export class SliceViews {
       const rgba = await this.renderer.renderToPixels(gpu, {
         width,
         height,
-        extent: planeExtents(axis, st.dims),
+        extent: { u: plane.width, v: plane.height },
         view: { centerU: cu, centerV: cv },
         ppv: { u: 1, v: 1 },
         flip,
@@ -905,11 +1113,12 @@ export class SliceViews {
   }
 
   debugInfo() {
-    const stats = this.client.stats();
+    const c = this.client.stats();
     return {
-      planes: stats.planes, cacheMB: stats.cacheMB, inflight: stats.inflight, queued: stats.queued,
-      fetches: stats.fetches, hits: stats.hits, aborted: stats.aborted,
-      lastMs: +stats.lastMs.toFixed(1), lastServerMs: stats.lastServerMs, lastSource: stats.lastSource,
+      blocks: c.blocks, cacheMB: c.cacheMB, inflight: c.inflight, queued: c.queued,
+      loads: c.loads, cachedBlocks: c.cached, fetchedBlocks: c.fetched, aborted: c.aborted, streamedMB: +(c.bytes / 1e6).toFixed(1),
+      lastMs: +c.lastMs.toFixed(1), lastPlanMs: +c.lastPlanMs.toFixed(1), lastServerPlanMs: +c.lastServerPlanMs.toFixed(1),
+      lastFirstMs: +c.lastFirstMs.toFixed(1), lastBlocks: c.lastBlocks,
       uploadMB: +(this.renderer.uploadBytes / 1e6).toFixed(1),
       panes: Object.fromEntries(AXES.map((a) => [a, { shown: this.panes[a].shownKey, pending: this.panes[a].pendingKey }])),
     };
@@ -930,7 +1139,6 @@ export class SliceViews {
     this.measure3d?.dispose();
     this.overlay3d?.dispose();
     for (const p of Object.values(this.panes)) p.dispose();
-    this.angled?.dispose();
     this.client.dispose();
     this.renderer.dispose();
     try { this.device.destroy(); } catch { /* already lost */ }

@@ -174,11 +174,17 @@ What lives where afterwards:
   taken, …) are deleted from the `.uploads` folders after
   `VG_UPLOAD_STAGING_MAX_AGE_HOURS` (default 24). An upload that is aborted
   half-way is removed by nginx immediately.
-- **Angled slices.** The slice views can show a plane at any angle through the cursor
-  (layout *Angled*, angles in the *Slice views* panel), served by
-  `GET /api/volumes/<id>/slices/<token>/oblique`. The server reads only the bricks the plane touches, but
-  needs a dense box around the plane in memory: `VG_OBLIQUE_MAX_BOX_MB` (default 4096) caps it, and
-  the viewer then asks the user to zoom in.
+- **Slices at any angle, delivered as blocks.** The three slice panes show three perpendicular planes
+  through the cursor; dragging a crosshair line turns them about the cursor, so any pane can show a plane
+  at any angle (angles can also be set in the *Slice views* panel). The server no longer builds the image:
+  `POST /api/volumes/<id>/slices/<token>/plan` takes the plane (origin, two unit vectors, pixel size, image
+  size) and returns the plan: how the image samples the volume and the blocks (the 64³ bricks, or the 16³
+  sub-blocks of compressed level 0) it reads from, weighted by how many pixels read from each.
+  `POST .../blocks` streams the blocks the browser asks for (16-byte header + voxels each, a `0xFFFFFFFF`
+  end marker). They are read on a priority pool, the heaviest first, and the browser assembles the image as
+  they arrive and keeps them in an LRU cache. A closed connection cancels the reads that have not started.
+  The old `GET .../<axis>/<index>` plane endpoint is kept for other clients; `/oblique` and
+  `VG_OBLIQUE_MAX_BOX_MB` are gone.
 - **Job queue.** Conversions (volumes, meshes, point clouds) run in a separate worker
   container (`volume-gallery-worker`) fed through Redis ([RQ](https://python-rq.org)), so
   restarting or redeploying the web app no longer kills a running conversion. Set

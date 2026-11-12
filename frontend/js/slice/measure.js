@@ -9,7 +9,7 @@
 // coarse copy of the volume held in memory (CoarseVolume) to find where the ray first meets the rendered
 // structure (approximate: the accuracy is that of the coarse level; refine the point in a slice pane).
 
-import { AXIS_INFO, clamp, planeToPixel, voxelToNormal } from "./geometry.js";
+import { clamp, dot3, nearestInPolygon, planeToPixel } from "./geometry.js";
 
 export const MAX_MEASURES = 50;
 const UNIT_METRES = { nanometer: 1e-9, micrometer: 1e-6, millimeter: 1e-3, centimeter: 1e-2, meter: 1 };
@@ -46,20 +46,17 @@ export { UNIT_SHORT };
 
 // ------------------------------------------------------------------------------- planes and points
 
-/** A point's coordinates inside a plane (u, v), in plane coordinates. */
-export function pointInPlane(axis, p) {
-  const { u, v } = AXIS_INFO[axis];
-  return { u: p[u], v: p[v] };
-}
+/** Half the thickness of the slice a pane shows, in physical units (half a voxel along its normal). */
+const halfThickness = (geom) => 0.5 * (Math.abs(geom.n[0]) * geom.spacing.x + Math.abs(geom.n[1]) * geom.spacing.y + Math.abs(geom.n[2]) * geom.spacing.z);
 
-/** The 3D point for plane coordinates (u, v) on the slice with index `index` of that plane's axis (its centre plane). */
-export function pointFromPlane(axis, u, v, index) {
-  const info = AXIS_INFO[axis];
-  return { [info.u]: u, [info.v]: v, [info.normal]: index + 0.5 };
-}
+/** Whether a point lies on the slice a pane shows (within half a voxel of its plane). */
+export const onSlice = (geom, p) => Math.abs(geom.project(p).h) <= halfThickness(geom) + 1e-9;
 
-/** Whether a point lies on the slice `index` of the plane's axis (the slice its coordinate falls in). */
-export const onSlice = (axis, p, index) => Math.floor(p[AXIS_INFO[axis].normal]) === index;
+/** The 3D point (voxel coordinates) under plane coordinates (a, b) of a pane: on its plane, inside the volume (null when the plane misses it). */
+export function pointFromPane(geom, a, b) {
+  const q = nearestInPolygon(geom.polygon(), a, b);
+  return q ? geom.unproject(q[0], q[1]) : null;
+}
 
 /** Rounds a point to 1/100 voxel (keeps links and saved views short). */
 export const roundPoint = (p) => ({ x: Math.round(p.x * 100) / 100, y: Math.round(p.y * 100) / 100, z: Math.round(p.z * 100) / 100 });
@@ -104,17 +101,17 @@ function labelSvg(x, y, text, color) {
 }
 
 /**
- * SVG of the measurements in a slice pane. `m` is the state's list; the point being placed (`pending`) and the
+ * SVG of the measurements in a slice pane (`geom`: its PaneGeometry; `view`: the absolute view, see absView). `measures` is the state's list; the point being placed (`pending`) and the
  * live line to the pointer (`rubber`, a point) are drawn too. Endpoints on this slice are solid; a measurement
  * with only one end on the slice shows the projected line dashed. Returns { svg, handles } where handles are
  * the draggable endpoints on this slice: [{ id, end: "a"|"b", x, y }] in pane pixels (id null for the pending point).
  */
-export function paneMeasureSvg({ axis, index, measures, pending = null, rubber = null, selected = null, spacing, unit, width, height, view, ppv, flip }) {
+export function paneMeasureSvg({ geom, measures, pending = null, rubber = null, selected = null, spacing, unit, width, height, view, ppv, flip }) {
   const parts = [];
   const handles = [];
   const px = (p) => {
-    const { u, v } = pointInPlane(axis, p);
-    return planeToPixel(u, v, width, height, view, ppv, flip);
+    const { a, b } = geom.project(p);
+    return planeToPixel(a, b, width, height, view, ppv, flip);
   };
   const handle = (pt, color, id, end, sel) => {
     handles.push({ id, end, x: pt.x, y: pt.y });
@@ -127,7 +124,7 @@ export function paneMeasureSvg({ axis, index, measures, pending = null, rubber =
     parts.push(`<line ${common} stroke="#000" stroke-opacity="0.7" stroke-width="${sel ? 4.5 : 3.5}"${dash}/>`, `<line ${common} stroke="${color}" stroke-width="${sel ? 2.2 : 1.5}"${dash}/>`);
   };
   for (const m of measures) {
-    const aOn = onSlice(axis, m.a, index), bOn = onSlice(axis, m.b, index);
+    const aOn = onSlice(geom, m.a), bOn = onSlice(geom, m.b);
     if (!aOn && !bOn) continue;
     const sel = m.id === selected;
     const color = sel ? "#ffd84a" : "#47e0c6";
@@ -140,7 +137,7 @@ export function paneMeasureSvg({ axis, index, measures, pending = null, rubber =
     parts.push(labelSvg((pa.x + pb.x) / 2, (pa.y + pb.y) / 2 - 8, `${len}${out}`, color));
   }
   if (pending) {
-    const on = onSlice(axis, pending, index);
+    const on = onSlice(geom, pending);
     const pp = px(pending);
     if (on) handle(pp, "#ffd84a", null, "a", true);
     if (rubber) {
@@ -239,25 +236,29 @@ export function rayBox(o, d, min, max) {
 }
 
 /**
- * Where the ray first meets one of the three slice planes (at the cursor) inside the volume: the exact way to
- * place a 3D point. Returns { point (voxel coordinates), axis ("x" | "y" | "z": which plane), t } or null.
+ * Where the ray first meets one of the three slice planes (`geoms`: their PaneGeometry, through the cursor)
+ * inside the volume: the exact way to place a 3D point. Returns { point (voxel coordinates), axis (the pane
+ * name), t } or null.
  */
-export function pickPlanes(ray, cursor, dims, size) {
-  const h = size.map((s) => s / 2);
+export function pickPlanes(ray, geoms, dims, size) {
+  const h = size.map((x) => x / 2);
+  const dm = [dims.x, dims.y, dims.z];
   let best = null;
-  for (const [i, a] of [[0, "x"], [1, "y"], [2, "z"]]) {
-    if (Math.abs(ray.dir[i]) < 1e-12) continue;
-    const pos = (voxelToNormal(cursor[a], dims[a]) - 0.5) * size[i];
-    const t = (pos - ray.origin[i]) / ray.dir[i];
+  for (const g of geoms) {
+    // the plane in voxel coordinates: sum(nv_k * x_k) = offset, with nv_k = spacing_k * n_k
+    const nv = [g.n[0] * g.spacing.x, g.n[1] * g.spacing.y, g.n[2] * g.spacing.z];
+    const x0 = ray.origin.map((o, k) => (o / size[k] + 0.5) * dm[k]);
+    const dx = ray.dir.map((d, k) => (d / size[k]) * dm[k]);
+    const denom = dot3(nv, dx);
+    if (Math.abs(denom) < 1e-12) continue;
+    const t = (g.offset - dot3(nv, x0)) / denom;
     if (!(t > 0) || (best && t >= best.t)) continue;
     const w = ray.origin.map((o, k) => o + ray.dir[k] * t);
-    if ([0, 1, 2].some((k) => k !== i && Math.abs(w[k]) > h[k])) continue;
-    best = { t, w, axis: a };
+    if ([0, 1, 2].some((k) => Math.abs(w[k]) > h[k])) continue;
+    best = { t, w, axis: g.axis };
   }
   if (!best) return null;
-  const point = worldToVoxel(best.w, dims, size);
-  point[best.axis] = cursor[best.axis] + 0.5; // exactly on the plane
-  return { point: roundPoint(point), axis: best.axis, t: best.t };
+  return { point: roundPoint(worldToVoxel(best.w, dims, size)), axis: best.axis, t: best.t };
 }
 
 // ------------------------------------------------------------------------- 3D: the coarse volume

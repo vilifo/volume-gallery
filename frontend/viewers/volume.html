@@ -77,13 +77,6 @@
   .slice-grid[data-layout="3d"], .slice-grid[data-layout="xy"],
   .slice-grid[data-layout="xz"], .slice-grid[data-layout="yz"] { grid-template: minmax(0, 1fr) / minmax(0, 1fr); }
   .slice-grid[data-layout="quad"] { grid-template: minmax(0, 1fr) minmax(0, 1fr) / minmax(0, 1fr) minmax(0, 1fr); }
-  /* angled slice: big on the left, the XY / XZ / YZ panes stacked on the right (narrow screens: angled on top) */
-  .slice-grid[data-layout="angled"] { grid-template: repeat(3, minmax(0, 1fr)) / minmax(0, 2fr) minmax(0, 1fr); }
-  .slice-grid[data-layout="angled"] > [data-axis="angled"] { grid-area: 1 / 1 / 4 / 2; }
-  @media (max-width: 700px) {
-    .slice-grid[data-layout="angled"] { grid-template: minmax(0, 2fr) minmax(0, 1fr) / repeat(3, minmax(0, 1fr)); }
-    .slice-grid[data-layout="angled"] > [data-axis="angled"] { grid-area: 1 / 1 / 2 / 4; }
-  }
   .slice-grid > [data-axis]:not(.slice-pane) { display: none; }
   .slice-pane { position: relative; min-width: 0; min-height: 0; overflow: hidden; background: #0b0b0d; outline: none; }
   .slice-pane[data-visible="0"] { display: none; }
@@ -561,7 +554,7 @@ import { insertStop, sampleStops, rgbToHex, decodeTf, encodeTf } from "/js/slice
       planAtlas,
       saveAtlasMB,
     } from "/js/atlas-budget.js?v=atlas3";
-    import { setupSliceIntegration } from "/js/slice/slice-integration.js?v=ang1";
+    import { setupSliceIntegration } from "/js/slice/slice-integration.js?v=mpr1";
     import { niceScaleLength } from "/js/scalebar.js?v=sb1";
     import { toggleHelpPanel } from "/js/help.js?v=help7";
     import { makeDescriptionExpandable } from "/js/description.js?v=org2";
@@ -812,10 +805,9 @@ import { insertStop, sampleStops, rgbToHex, decodeTf, encodeTf } from "/js/slice
             <div class="layout-seg" id="layout-seg" role="group" aria-label="View layout">
               <button type="button" data-layout="3d" title="3D view only">3D</button>
               <button type="button" data-layout="quad" title="3D view and the three slice views">Quad</button>
-              <button type="button" data-layout="xy" title="XY plane: slices along Z">XY</button>
+              <button type="button" data-layout="xy" title="XY pane: slices along Z (drag a crosshair line to tilt the planes)">XY</button>
               <button type="button" data-layout="xz" title="XZ plane: slices along Y">XZ</button>
               <button type="button" data-layout="yz" title="YZ plane: slices along X">YZ</button>
-              <button type="button" data-layout="angled" title="Angled slice: a plane at any angle through the cursor (set the angles in the Slice views panel), next to the XY, XZ and YZ views">Angled</button>
             </div>
             <button id="help-btn" class="icon-btn" aria-pressed="false" title="Show help for this viewer next to the view">${HELP_ICON}<span class="icon-btn-label">Help</span></button>
             <button id="bookmarks-btn" class="icon-btn" title="Save this view and come back to it later">${BOOKMARK_ICON}<span class="icon-btn-label">Bookmarks</span></button>
@@ -835,7 +827,7 @@ import { insertStop, sampleStops, rgbToHex, decodeTf, encodeTf } from "/js/slice
           <div class="viewer-canvas-area" id="canvas-area">
             <div class="slice-grid" id="slice-grid" data-layout="3d">
               <div class="slice-pane slice-pane-3d" id="pane-3d" data-visible="1"><canvas id="canvas"></canvas><div class="scale-bar" id="scale-bar" hidden><span class="scale-bar-label"></span><div class="scale-bar-line"></div></div></div>
-              <div data-axis="xy"></div><div data-axis="xz"></div><div data-axis="yz"></div><div data-axis="angled"></div>
+              <div data-axis="xy"></div><div data-axis="xz"></div><div data-axis="yz"></div>
             </div>
             <div class="viewer-progress" id="load-progress"><div class="viewer-progress-bar" id="load-progress-bar"></div></div>
             <div class="viewer-load-chip" id="load-chip"><div class="spinner"></div><span id="load-text">Loading\u2026</span></div>

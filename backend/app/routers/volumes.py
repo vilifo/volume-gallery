@@ -6,7 +6,9 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Annotated
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, UploadFile, File, Form, Query, Request
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
+from pydantic import BaseModel, Field
+from starlette.concurrency import run_in_threadpool
 from sqlmodel import Session, select
 
 from ..database import get_session, engine
@@ -17,7 +19,7 @@ from ..security import create_file_token, decode_token
 from ..config import settings
 from .. import workdir, jobs
 from ..organize import apply_asset_update, split_tags
-from ..helpers import SliceError, open_volume_slices, plane_response_parts, oblique_response_parts
+from ..helpers import SliceError, open_volume_slices, plane_response_parts, stream_blocks, MAX_BLOCKS_PER_REQUEST
 from ..helpers import volume_meta_path, process_zip, decompose_tiff_stack, RANGE_RE, SHARDED_FILE_RE, decompress_gzip, detect_level_is_tiled66, unshuffle_tiled66_to_66_bytes, compress_gzip_66, ensure_legacy66_level_files, compress_gzip_66_exact_size
 from ..helpers import read_thumbnail, write_thumbnail, store_thumbnail, remove_thumbnail, thumbnail_response
 from ..helpers import histogram_path
@@ -682,8 +684,10 @@ def mesh_view_url(
     )
 
 
-# ---------- Slice views: planes extracted server-side ----------
-# The browser asks for one finished plane at a time, read directly from sharded bricks. See helpers/slices.py for the cache that keeps scrolling fast.
+# ---------- Slice views: plans and blocks ----------
+# The browser asks for the plan of a plane (POST .../plan) and then for the blocks it lacks (POST .../blocks, streamed as
+# they are read), and assembles the image itself. See helpers/slices.py. GET .../{axis}/{index} still returns a whole
+# axis-aligned plane.
 
 @router.get("/{volume_id}/slice-access-url", response_model=FileAccessUrl)
 def slice_access_url(
@@ -746,36 +750,70 @@ def slice_info(
     return JSONResponse(vs.info(), headers={"Cache-Control": "private, max-age=60"})
 
 
-@router.get("/{volume_id}/slices/{token}/oblique")
-def slice_oblique(
+class SlicePlanRequest(BaseModel):
+    """A plane to show: the image is `width` x `height` pixels of `pixel` physical units; pixel (col, row) is
+    centred on origin + (col + .5) * pixel * u + (row + .5) * pixel * v (physical x, y, z; u and v unit vectors)."""
+
+    origin: List[float] = Field(min_length=3, max_length=3)
+    u: List[float] = Field(min_length=3, max_length=3)
+    v: List[float] = Field(min_length=3, max_length=3)
+    pixel: float = Field(gt=0, allow_inf_nan=False)
+    width: int = Field(ge=1, le=16384)
+    height: int = Field(ge=1, le=16384)
+
+
+class SliceBlocksRequest(BaseModel):
+    """Blocks to stream: a flat list of [gx, gy, gz, weight] groups, as the plan lists them."""
+
+    blocks: List[int] = Field(max_length=4 * MAX_BLOCKS_PER_REQUEST)
+    prefetch: bool = False  # warming the browser's cache: read after everything that is shown
+
+
+@router.post("/{volume_id}/slices/{token}/plan")
+def slice_plan(
     volume_id: int,
     token: str,
-    cx: float = Query(..., allow_inf_nan=False, description="Centre of the plane: voxel X"),
-    cy: float = Query(..., allow_inf_nan=False, description="Centre of the plane: voxel Y"),
-    cz: float = Query(..., allow_inf_nan=False, description="Centre of the plane: voxel Z"),
-    rx: float = Query(0.0, ge=-360, le=360, allow_inf_nan=False, description="Rotation about the X axis, degrees"),
-    ry: float = Query(0.0, ge=-360, le=360, allow_inf_nan=False, description="Rotation about the Y axis, degrees"),
-    rz: float = Query(0.0, ge=-360, le=360, allow_inf_nan=False, description="Rotation about the Z axis, degrees"),
-    size: int = Query(768, ge=64, le=2048, description="Width and height of the image in pixels"),
-    scale: float = Query(1.0, ge=0.05, le=64, allow_inf_nan=False, description="Pixel size, in multiples of the finest voxel spacing"),
-    order: int = Query(1, ge=0, le=1, description="Interpolation: 0 nearest, 1 linear"),
-    channel: int = Query(0, ge=0),
-    enc: str = Query("identity", description="identity (raw, the default) or zstd (Content-Encoding: zstd)"),
+    body: SlicePlanRequest,
     level: int = Query(0, ge=0),
     session: Session = Depends(get_session),
 ):
-    """An angled slice: the XY plane through (cx, cy, cz) rotated by rx, ry, rz degrees about the
-    volume's x, y and z axes (in that order). Same body and X-Plane-* headers as a plane request;
-    X-Oblique-U / -V (unit vectors of the image rows / columns, physical x,y,z) and X-Oblique-Pixel
-    (physical size of one pixel) describe where the pixels are. 413 when the plane is too large to
-    extract at this scale (VG_OBLIQUE_MAX_BOX_MB): ask for a smaller `scale` or `size`."""
+    """The plan of one plane's image: where its pixels sample the volume (`p0`, `du`, `dv`, in voxels of this
+    level) and which blocks they read from (`blocks`, flat [gx, gy, gz, weight] groups, the blocks most pixels
+    read from first). The browser fetches the blocks it does not have with POST .../blocks and assembles the
+    image itself. See VolumeSlicesKiln.plan_plane."""
     vs = _slice_store(volume_id, token, level, session)
+    if body.width * body.height > 64_000_000:
+        raise HTTPException(status_code=413, detail="The image is too large")
+    if not all(np.isfinite(c) for c in (*body.origin, *body.u, *body.v)):
+        raise HTTPException(status_code=422, detail="origin, u and v must be finite")
+    plan = vs.plan_plane(tuple(body.origin), tuple(body.u), tuple(body.v), body.pixel, body.width, body.height)
+    return JSONResponse(plan, headers={"Cache-Control": "no-store"})
+
+
+@router.post("/{volume_id}/slices/{token}/blocks")
+async def slice_blocks(
+    volume_id: int,
+    token: str,
+    body: SliceBlocksRequest,
+    level: int = Query(0, ge=0),
+    session: Session = Depends(get_session),
+):
+    """Streams blocks as they are read, best first (see helpers.slices.stream_blocks for the wire format):
+    records of a 16-byte header (gx, gy, gz, payload bytes; uint32 little-endian) and the block's voxels (z, y, x),
+    in the dtype of /info, ending with a record whose gx, gy, gz are all 0xFFFFFFFF and whose size field counts the
+    blocks sent. A payload size of 0 is an empty (all zero) block, 0xFFFFFFFE one that could not be read."""
+    vs = await run_in_threadpool(_slice_store, volume_id, token, level, session)
     try:
-        body, headers = oblique_response_parts(vs, (cx, cy, cz), (rx, ry, rz), size, scale, order, channel, enc)
+        blocks = vs.check_blocks(body.blocks)
     except SliceError as exc:
         raise HTTPException(status_code=exc.status, detail=str(exc))
-    headers["Cache-Control"] = f"private, max-age={settings.FILE_TOKEN_EXPIRE_MINUTES * 60}"
-    return Response(content=body, media_type="application/octet-stream", headers=headers)
+    headers = {
+        "Cache-Control": "no-store",
+        "X-Accel-Buffering": "no",  # nginx must pass records on as they come
+        "X-Block-Count": str(len(blocks)),
+        "X-Block-Bytes": str(vs.block_size ** 3 * np.dtype(vs.dtype).itemsize),
+    }
+    return StreamingResponse(stream_blocks(vs, blocks, body.prefetch), media_type="application/octet-stream", headers=headers)
 
 
 @router.get("/{volume_id}/slices/{token}/{axis}/{index}")
