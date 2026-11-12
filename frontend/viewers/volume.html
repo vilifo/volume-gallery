@@ -294,13 +294,14 @@
 
   .ctl-tf-canvas-container {
     position: relative;
-    margin-bottom: 0.9em;
+    margin-bottom: 0.4em;
     border-radius: 6px;
     overflow: hidden;
     border: 1px solid var(--viewer-border);
   }
   /* The stage is padded so handles at x/y = 0 or 1 sit fully inside the hit
-     area; the overlay canvas covers the whole stage and owns pointer input. */
+     area; the overlay canvas covers the whole stage and owns pointer input.
+     It stays black in both themes: it is the backdrop of the rendered curve. */
   .ctl-tf-stage { position: relative; padding: 10px; background: #000; }
   .ctl-tf-canvas { display: block; width: 100%; height: 190px; background: #000; }
   .ctl-tf-overlay {
@@ -313,18 +314,100 @@
     user-select: none;
     -webkit-user-select: none;
   }
-  /* Colour-stop editor under the TF canvas (preset "Custom"); the side padding matches .ctl-tf-stage
+  .ctl-tf-help { font-size: 10px; line-height: 1.4; color: var(--text-dim); text-align: center; margin: 0 0 1em; }
+
+  /* Colour-stop editor under the TF canvas (preset "Custom"). It uses the panel's own surface (the
+     black stage above is only the backdrop of the curve), and its side padding matches .ctl-tf-stage
      so the strip lines up with the canvas x axis. */
-  .ctl-tf-colors { background: #000; padding: 4px 10px 6px; color: var(--text-dim); font-size: 11px; }
-  .ctl-cs-bar { position: relative; height: 18px; margin: 6px 0 4px; border: 1px solid var(--viewer-border); border-radius: 4px; cursor: copy; touch-action: none; user-select: none; -webkit-user-select: none; outline: none; }
+  .ctl-tf-colors {
+    background: var(--panel-raised);
+    border-top: 1px solid var(--viewer-border);
+    padding: 12px 10px 10px;
+    color: var(--text-dim);
+    font-size: 11px;
+  }
+  .ctl-tf-colors[hidden] { display: none; }
+  .ctl-cs-bar {
+    position: relative;
+    height: 14px;
+    margin: 0 0 12px;
+    border: 1px solid var(--viewer-border);
+    border-radius: 4px;
+    cursor: copy;
+    touch-action: none;
+    user-select: none;
+    -webkit-user-select: none;
+    outline: none;
+  }
   .ctl-cs-bar:focus-visible { box-shadow: 0 0 0 2px var(--accent); }
-  .ctl-cs-stop { position: absolute; top: -5px; width: 10px; height: 26px; margin-left: -5px; box-sizing: border-box; border: 2px solid #fff; border-radius: 3px; background: var(--c); box-shadow: 0 0 0 1px rgba(0,0,0,0.75); cursor: ew-resize; }
-  .ctl-cs-stop.sel { border-color: var(--accent); z-index: 1; }
-  .ctl-cs-row { display: flex; align-items: center; gap: 0.5em; padding-top: 4px; }
-  /*.ctl-cs-row input[type="color"] { width: 34px; height: 24px; padding: 0; border: 1px solid var(--viewer-border); border-radius: 4px; background: none; cursor: pointer; }*/
-  /*.ctl-cs-row input[type="number"] { width: 4.6em; padding: 2px 4px; font: inherit; color: inherit; background: transparent; border: 1px solid var(--viewer-border); border-radius: 4px; }*/
-  .ctl-cs-row .ctl-chip:disabled { opacity: 0.4; cursor: default; }
-  .ctl-tf-help { font-size: 10px; color: var(--text-dim); text-align: center; padding: 0.35em 0; background: color-mix(in srgb, var(--panel) 86%, transparent); }
+  .ctl-cs-stop {
+    position: absolute;
+    top: -5px;
+    width: 10px;
+    height: 22px;
+    margin-left: -5px;
+    box-sizing: border-box;
+    border: 2px solid #fff;
+    border-radius: 3px;
+    background: var(--c);
+    box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.75);
+    cursor: ew-resize;
+    transition: transform 0.08s ease;
+  }
+  .ctl-cs-stop.end { cursor: pointer; }
+  .ctl-cs-stop:hover { transform: scaleY(1.08); }
+  .ctl-cs-stop.sel { border-color: var(--accent); box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.75), 0 0 0 3px color-mix(in srgb, var(--accent) 35%, transparent); z-index: 1; }
+  .ctl-cs-row { display: flex; align-items: center; gap: 6px; }
+  .ctl-cs-row .ctl-cs-spacer { flex: 1; }
+  /* css/style.css gives every <input> width: 100% and a roomy padding; these two are compact fields. */
+  .ctl-cs-row input[type="color"] {
+    flex: none;
+    width: 30px;
+    height: 24px;
+    padding: 2px;
+    border: 1px solid var(--viewer-border);
+    border-radius: 4px;
+    background: var(--panel);
+    cursor: pointer;
+  }
+  .ctl-cs-row input[type="color"]::-webkit-color-swatch-wrapper { padding: 0; }
+  .ctl-cs-row input[type="color"]::-webkit-color-swatch { border: 0; border-radius: 2px; }
+  .ctl-cs-row input[type="color"]::-moz-color-swatch { border: 0; border-radius: 2px; }
+  .ctl-cs-pos { display: inline-flex; align-items: center; gap: 4px; margin: 0; color: var(--text-dim); font-size: 11px; }
+  .ctl-cs-row input[type="number"] {
+    flex: none;
+    width: 5em;
+    height: 24px;
+    padding: 0 6px;
+    -moz-appearance: textfield;
+    appearance: textfield;
+    font-family: var(--mono);
+    font-size: 11px;
+    text-align: right;
+    background: var(--panel);
+    border: 1px solid var(--viewer-border);
+    border-radius: 4px;
+    color: var(--text);
+  }
+  .ctl-cs-row input[type="number"]::-webkit-inner-spin-button,
+  .ctl-cs-row input[type="number"]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+  .ctl-cs-row input:disabled { opacity: 0.4; cursor: default; }
+  /* Small in-panel buttons. (.ctl-chip is the floating, absolutely positioned chip over the viewer, so it
+     cannot be used inside the panel flow.) */
+  .ctl-mini-btn {
+    flex: none;
+    height: 24px;
+    padding: 0 9px;
+    font-size: 11px;
+    line-height: 1;
+    color: var(--text);
+    background: var(--panel);
+    border: 1px solid var(--viewer-border);
+    border-radius: 4px;
+    cursor: pointer;
+  }
+  .ctl-mini-btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+  .ctl-mini-btn:disabled { opacity: 0.4; cursor: default; }
 
   .ctl-slider-row { display: flex; align-items: center; gap: 0.6em; margin-bottom: 0.7em; }
   .ctl-slider-label { width: 62px; flex-shrink: 0; color: var(--text-dim); font-size: 11px; }
@@ -1674,7 +1757,10 @@ import { insertStop, sampleStops, rgbToHex, decodeTf, encodeTf } from "/js/slice
       function wireTfCanvas(root) {
         const canvas = root.querySelector(".ctl-tf-canvas");
         const overlay = root.querySelector(".ctl-tf-overlay");
-        let drag = null; // { type: "point", index } | { type: "line", index, startPt, startP0, startP1 }
+        let drag = null; // { type: "point", index, ... } | { type: "line", index, startPt, startP0, startP1, ... }; both: { startX, startY (client px), moved }
+        let hover = -1; // the point under the pointer (drawn larger)
+        const X_GAP = 0.002; // closest two points may get along x
+        const DRAG_SLOP = 3; // px the pointer must travel before a press becomes a drag (a plain click or double-click moves nothing)
 
         function redraw() {
           const rect = canvas.getBoundingClientRect();
@@ -1720,10 +1806,11 @@ import { insertStop, sampleStops, rgbToHex, decodeTf, encodeTf } from "/js/slice
             const active =
               (drag?.type === "point" && drag.index === i) ||
               (drag?.type === "line" && (drag.index === i || drag.index + 1 === i));
+            const lit = active || (!drag && hover === i);
             ctx.beginPath();
-            ctx.arc(ox + p.x * rect.width, oy + (1 - p.y) * rect.height, active ? 7 : 6, 0, Math.PI * 2);
-            ctx.fillStyle = "#e8a33d";
-            ctx.strokeStyle = "rgba(20,23,28,0.9)";
+            ctx.arc(ox + p.x * rect.width, oy + (1 - p.y) * rect.height, lit ? 7 : 5.5, 0, Math.PI * 2);
+            ctx.fillStyle = lit ? "#ffc15e" : "#e8a33d";
+            ctx.strokeStyle = lit ? "#ffffff" : "rgba(20,23,28,0.9)";
             ctx.fill();
             ctx.stroke();
           });
@@ -1794,8 +1881,9 @@ import { insertStop, sampleStops, rgbToHex, decodeTf, encodeTf } from "/js/slice
           const pt = pointFromEvent(evt);
           const points = tf.getOpacityPoints();
           const ptIdx = nearestPointIndex(pt);
+          const press = { startX: evt.clientX, startY: evt.clientY, moved: false };
           if (ptIdx >= 0) {
-            drag = { type: "point", index: ptIdx };
+            drag = { type: "point", index: ptIdx, ...press };
           } else {
             const segIdx = nearestSegmentIndex(pt);
             if (segIdx >= 0) {
@@ -1805,6 +1893,7 @@ import { insertStop, sampleStops, rgbToHex, decodeTf, encodeTf } from "/js/slice
                 startPt: pt,
                 startP0: { x: points[segIdx].x, y: points[segIdx].y },
                 startP1: { x: points[segIdx + 1].x, y: points[segIdx + 1].y },
+                ...press,
               };
             }
           }
@@ -1817,9 +1906,14 @@ import { insertStop, sampleStops, rgbToHex, decodeTf, encodeTf } from "/js/slice
         overlay.addEventListener("pointermove", (evt) => {
           const pt = pointFromEvent(evt);
           if (drag === null) {
-            const hover = nearestPointIndex(pt) >= 0 || nearestSegmentIndex(pt) >= 0;
-            overlay.style.cursor = hover ? "grab" : "crosshair";
+            const idx = nearestPointIndex(pt);
+            overlay.style.cursor = idx >= 0 || nearestSegmentIndex(pt) >= 0 ? "grab" : "crosshair";
+            if (idx !== hover) { hover = idx; redraw(); }
             return;
+          }
+          if (!drag.moved) {
+            if (Math.hypot(evt.clientX - drag.startX, evt.clientY - drag.startY) < DRAG_SLOP) return;
+            drag.moved = true;
           }
           const points = tf.getOpacityPoints();
           if (drag.type === "point") {
@@ -1828,7 +1922,10 @@ import { insertStop, sampleStops, rgbToHex, decodeTf, encodeTf } from "/js/slice
             let x = pt.x;
             if (idx === 0) x = 0;
             else if (idx === points.length - 1) x = 1;
-            else x = Math.min(points[idx + 1].x, Math.max(points[idx - 1].x, x));
+            else {
+              const lo = points[idx - 1].x + X_GAP, hi = points[idx + 1].x - X_GAP;
+              x = lo > hi ? (points[idx - 1].x + points[idx + 1].x) / 2 : Math.min(hi, Math.max(lo, x));
+            }
             points[idx] = { x, y: pt.y };
             applyPoints(points);
           } else if (drag.type === "line") {
@@ -1837,25 +1934,20 @@ import { insertStop, sampleStops, rgbToHex, decodeTf, encodeTf } from "/js/slice
             const { startPt, startP0, startP1 } = drag;
             const dx = pt.x - startPt.x;
             const dy = pt.y - startPt.y;
-            const minDx = idx === 0 ? 0 : points[idx - 1].x - startP0.x;
-            const maxDx = idx + 1 === points.length - 1 ? 0 : points[idx + 2].x - startP1.x;
-            const clampedDx = Math.min(maxDx, Math.max(minDx, dx));
+            // A segment that has an end point (x = 0 or 1) as one of its ends can only slide up and down.
+            const pinned = idx === 0 || idx + 1 === points.length - 1;
+            const minDx = pinned ? 0 : points[idx - 1].x + X_GAP - startP0.x;
+            const maxDx = pinned ? 0 : points[idx + 2].x - X_GAP - startP1.x;
+            const clampedDx = minDx > maxDx ? 0 : Math.min(maxDx, Math.max(minDx, dx));
             const minDy = -Math.min(startP0.y, startP1.y);
             const maxDy = 1 - Math.max(startP0.y, startP1.y);
-            let y0, y1;
-            if (minDx === 0 && maxDx === 0 && minDy === 0 && maxDy === 0) {
-              y0 = Math.min(1, Math.max(0, startP0.y + dy));
-              y1 = Math.min(1, Math.max(0, startP1.y + dy));
-            } else {
-              const clampedDy = Math.min(maxDy, Math.max(minDy, dy));
-              y0 = startP0.y + clampedDy;
-              y1 = startP1.y + clampedDy;
-            }
-            points[idx] = { x: startP0.x + clampedDx, y: y0 };
-            points[idx + 1] = { x: startP1.x + clampedDx, y: y1 };
+            const clampedDy = Math.min(maxDy, Math.max(minDy, dy));
+            points[idx] = { x: startP0.x + clampedDx, y: startP0.y + clampedDy };
+            points[idx + 1] = { x: startP1.x + clampedDx, y: startP1.y + clampedDy };
             applyPoints(points);
           }
         });
+        overlay.addEventListener("pointerleave", () => { if (!drag && hover !== -1) { hover = -1; redraw(); } });
         overlay.addEventListener("pointerup", endDrag);
         overlay.addEventListener("pointercancel", endDrag);
         overlay.addEventListener("lostpointercapture", endDrag);
@@ -1867,6 +1959,7 @@ import { insertStop, sampleStops, rgbToHex, decodeTf, encodeTf } from "/js/slice
             if (idx <= 0 || idx >= points.length - 1) return; // keep the end points
             points.splice(idx, 1);
           } else {
+            if (points.some((p) => Math.abs(p.x - pt.x) < X_GAP)) return; // no room: a point is already there along x
             points.push(pt);
             points.sort((a, b) => a.x - b.x);
           }
@@ -1907,6 +2000,8 @@ import { insertStop, sampleStops, rgbToHex, decodeTf, encodeTf } from "/js/slice
       function wireColorEditor(root) {
         const host = root.querySelector('[data-role="tf-colors"]');
         let bar = null, drag = null;
+        let lastAdd = -Infinity; // when a click last added a stop: its double-click must not delete it again
+        let pressedStop = -1; // the stop the last press landed on (a double-click's own coordinates are rounded, so it is not hit-tested again)
 
         const gradient = (stops) =>
           `linear-gradient(to right, ${stops.map((s) => `${s.color} ${(s.pos * 100).toFixed(2)}%`).join(", ")})`;
@@ -1932,6 +2027,7 @@ import { insertStop, sampleStops, rgbToHex, decodeTf, encodeTf } from "/js/slice
             el.style.left = `${s.pos * 100}%`;
             el.style.setProperty("--c", s.color);
             el.classList.toggle("sel", i === selStop);
+            el.classList.toggle("end", i === 0 || i === stops.length - 1);
           });
           const interior = selStop > 0 && selStop < stops.length - 1;
           const colorInput = host.querySelector('[data-role="cs-color"]');
@@ -1946,7 +2042,7 @@ import { insertStop, sampleStops, rgbToHex, decodeTf, encodeTf } from "/js/slice
           bar = null;
           if (!tf.getColorStops()) {
             host.innerHTML = canCustomColours
-              ? `<button type="button" class="ctl-chip" data-role="cs-edit">Edit colours&hellip;</button>`
+              ? `<button type="button" class="ctl-mini-btn" data-role="cs-edit">Edit colours&hellip;</button>`
               : "";
             host.hidden = !canCustomColours;
             host.querySelector('[data-role="cs-edit"]')?.addEventListener("click", () => {
@@ -1957,12 +2053,13 @@ import { insertStop, sampleStops, rgbToHex, decodeTf, encodeTf } from "/js/slice
           }
           host.hidden = false;
           host.innerHTML = `
-            <div class="ctl-cs-bar" data-role="cs-bar" tabindex="0" title="Click to add a colour stop"></div>
+            <div class="ctl-cs-bar" data-role="cs-bar" tabindex="0" title="Click to add a colour stop; drag a stop to move it; double-click or press Delete to remove it"></div>
             <div class="ctl-cs-row">
-              <input type="color" data-role="cs-color" aria-label="Colour of the selected stop">
-              <input type="number" data-role="cs-pos" min="0" max="1" step="0.01" aria-label="Position of the selected stop">
-              <button type="button" class="ctl-chip" data-role="cs-remove">Remove</button>
-              <button type="button" class="ctl-chip" data-role="cs-reverse">Reverse</button>
+              <input type="color" data-role="cs-color" aria-label="Colour of the selected stop" title="Colour of the selected stop">
+              <label class="ctl-cs-pos">Pos <input type="number" data-role="cs-pos" min="0" max="1" step="0.01" aria-label="Position of the selected stop"></label>
+              <span class="ctl-cs-spacer"></span>
+              <button type="button" class="ctl-mini-btn" data-role="cs-remove" title="Remove the selected stop">Remove</button>
+              <button type="button" class="ctl-mini-btn" data-role="cs-reverse" title="Flip the colour map">Reverse</button>
             </div>`;
           bar = host.querySelector('[data-role="cs-bar"]');
           wire();
@@ -2009,9 +2106,11 @@ import { insertStop, sampleStops, rgbToHex, decodeTf, encodeTf } from "/js/slice
               const stops = insertStop(tf.getColorStops(), pos);
               idx = stops.reduce((best, s, i) => (Math.abs(s.pos - pos) < Math.abs(stops[best].pos - pos) ? i : best), 0);
               selStop = idx;
+              lastAdd = performance.now();
               commit(stops);
             }
             selStop = idx;
+            pressedStop = idx;
             drag = { index: idx };
             paint();
           });
@@ -2023,8 +2122,9 @@ import { insertStop, sampleStops, rgbToHex, decodeTf, encodeTf } from "/js/slice
           bar.addEventListener("pointercancel", endDrag);
           bar.addEventListener("lostpointercapture", endDrag);
           bar.addEventListener("dblclick", (evt) => {
-            const idx = hitStop(posFromEvent(evt));
-            if (idx > 0) removeStop(idx);
+            // (a double-click on empty strip adds a stop with its first click; the second one must not remove it)
+            if (performance.now() - lastAdd < 600) return;
+            if (pressedStop > 0) removeStop(pressedStop);
           });
           bar.addEventListener("keydown", (evt) => {
             if (evt.key === "Delete" || evt.key === "Backspace") {
@@ -2097,7 +2197,8 @@ import { insertStop, sampleStops, rgbToHex, decodeTf, encodeTf } from "/js/slice
               <canvas class="ctl-tf-overlay"></canvas>
             </div>
             <div class="ctl-tf-colors" data-role="tf-colors"></div>
-              <div class="ctl-tf-help">Drag point or line to move &#x00b7; double-click to add/remove</div>
+          </div>
+          <div class="ctl-tf-help">Drag points or lines &#x00b7; double-click to add or remove</div>
           <div class="ctl-slider-row">
             <span class="ctl-row-label ctl-slider-label">Center</span>
             <div class="ctl-slider-track">
