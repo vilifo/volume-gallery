@@ -6,7 +6,9 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Annotated
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, UploadFile, File, Form, Query, Request
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
+from pydantic import BaseModel, Field
+from starlette.concurrency import run_in_threadpool
 from sqlmodel import Session, select
 
 from ..database import get_session, engine
@@ -15,9 +17,9 @@ from ..schemas import VolumeRead, AssetStatusRead, AssetUpdate, AccessGrant, Fil
 from ..deps import file_token_revoked, get_current_user, require_editor
 from ..security import create_file_token, decode_token
 from ..config import settings
-from .. import workdir
+from .. import workdir, jobs
 from ..organize import apply_asset_update, split_tags
-from ..helpers import SliceError, open_volume_slices, plane_response_parts
+from ..helpers import SliceError, open_volume_slices, plane_response_parts, stream_blocks, MAX_BLOCKS_PER_REQUEST
 from ..helpers import volume_meta_path, process_zip, decompose_tiff_stack, RANGE_RE, SHARDED_FILE_RE, decompress_gzip, detect_level_is_tiled66, unshuffle_tiled66_to_66_bytes, compress_gzip_66, ensure_legacy66_level_files, compress_gzip_66_exact_size
 from ..helpers import read_thumbnail, write_thumbnail, store_thumbnail, remove_thumbnail, thumbnail_response
 from ..helpers import histogram_path
@@ -210,6 +212,7 @@ def create_volume(
     ),
     spacing: Annotated[list[str], Form()] = None,
     mesh_file: Optional[UploadFile] = File(None),
+    mesh_texture_files: Optional[list[UploadFile]] = File(None),  # texture images etc. that come with an OBJ / PLY / glTF mesh
     thumbnail_file: Optional[UploadFile] = File(None, description="Optional PNG/JPEG/WebP thumbnail"),
     # Instead of the file fields above: ids returned by PUT /api/uploads/volume|mesh, for files
     # nginx has already written to disk (see routers/uploads.py). Order matters for tiff_upload_ids.
@@ -266,13 +269,19 @@ def create_volume(
         thumbnail_name = write_thumbnail(vol_dir, *thumbnail) if thumbnail else None
         # A multipart upload is copied into the scratch folder by the background task, so
         # the response isn't held up by it (see workdir.detach_upload).
+        # With a job queue the worker is another process and cannot inherit the descriptors, so
+        # multipart uploads are copied into the scratch folder here (the response waits for it).
+        save_now = jobs.enabled()
         if has_zip:
             if staged_zip is not None:
                 moves = [(staged_zip.path, work_dir / ZIP_NAME)]
             else:
-                upload_fd = workdir.detach_upload(tiff_zip)
+                upload_fd = workdir.accept_upload(tiff_zip, None, work_dir / ZIP_NAME, save_now)
         elif staged_files:
             moves = [(staged.path, work_dir / f"flice_{i:05d}.tiff") for i, staged in enumerate(staged_files)]
+        elif save_now:
+            for i, f in enumerate(tiff_files):
+                workdir.accept_upload(f, None, work_dir / f"flice_{i:05d}.tiff", True)
         else:
             upload_fds = [workdir.detach_upload(f) for f in tiff_files]
         workdir.reserve_uploads([src for src, _dst in moves])
@@ -304,7 +313,7 @@ def create_volume(
     mesh = None
     if mesh_file is not None or staged_mesh is not None:
         try:
-            mesh = attach_mesh_to_volume(session, volume, mesh_file, editor, background_tasks, staged_mesh)
+            mesh = attach_mesh_to_volume(session, volume, mesh_file, editor, background_tasks, staged_mesh, mesh_texture_files)
         except Exception:
             workdir.drop_staged(moves)
             if upload_fd is not None:
@@ -317,8 +326,8 @@ def create_volume(
             session.commit()
             raise
 
-    background_tasks.add_task(
-        _process_upload,
+    jobs.dispatch(
+        background_tasks, session, "volume", volume, _process_upload,
         volume.id,
         str(vol_dir),
         source_kind,
@@ -415,6 +424,7 @@ def upload_or_replace_mesh(
     volume_id: int,
     background_tasks: BackgroundTasks,
     mesh_file: Optional[UploadFile] = File(None),
+    texture_files: Optional[list[UploadFile]] = File(None),  # texture images etc. that come with an OBJ / PLY / glTF mesh
     mesh_upload_id: Optional[str] = Form(None),  # instead of mesh_file: see routers/uploads.py
     session: Session = Depends(get_session),
     editor: User = Depends(require_editor),
@@ -425,7 +435,7 @@ def upload_or_replace_mesh(
     if not volume:
         raise HTTPException(status_code=404, detail="Volume not found")
     staged = workdir.claim_upload(mesh_upload_id, "mesh", editor.id) if mesh_upload_id else None
-    mesh = attach_mesh_to_volume(session, volume, mesh_file, editor, background_tasks, staged)
+    mesh = attach_mesh_to_volume(session, volume, mesh_file, editor, background_tasks, staged, texture_files)
     session.refresh(volume)
     return _volume_read(volume, mesh)
 
@@ -674,8 +684,10 @@ def mesh_view_url(
     )
 
 
-# ---------- Slice views: planes extracted server-side ----------
-# The browser asks for one finished plane at a time, read directly from sharded bricks. See helpers/slices.py for the cache that keeps scrolling fast.
+# ---------- Slice views: plans and blocks ----------
+# The browser asks for the plan of a plane (POST .../plan) and then for the blocks it lacks (POST .../blocks, streamed as
+# they are read), and assembles the image itself. See helpers/slices.py. GET .../{axis}/{index} still returns a whole
+# axis-aligned plane.
 
 @router.get("/{volume_id}/slice-access-url", response_model=FileAccessUrl)
 def slice_access_url(
@@ -736,6 +748,72 @@ def slice_info(
     """Dimensions, voxel spacing, data type and a suggested window for the slice views."""
     vs = _slice_store(volume_id, token, level, session)
     return JSONResponse(vs.info(), headers={"Cache-Control": "private, max-age=60"})
+
+
+class SlicePlanRequest(BaseModel):
+    """A plane to show: the image is `width` x `height` pixels of `pixel` physical units; pixel (col, row) is
+    centred on origin + (col + .5) * pixel * u + (row + .5) * pixel * v (physical x, y, z; u and v unit vectors)."""
+
+    origin: List[float] = Field(min_length=3, max_length=3)
+    u: List[float] = Field(min_length=3, max_length=3)
+    v: List[float] = Field(min_length=3, max_length=3)
+    pixel: float = Field(gt=0, allow_inf_nan=False)
+    width: int = Field(ge=1, le=16384)
+    height: int = Field(ge=1, le=16384)
+
+
+class SliceBlocksRequest(BaseModel):
+    """Blocks to stream: a flat list of [gx, gy, gz, weight] groups, as the plan lists them."""
+
+    blocks: List[int] = Field(max_length=4 * MAX_BLOCKS_PER_REQUEST)
+    prefetch: bool = False  # warming the browser's cache: read after everything that is shown
+
+
+@router.post("/{volume_id}/slices/{token}/plan")
+def slice_plan(
+    volume_id: int,
+    token: str,
+    body: SlicePlanRequest,
+    level: int = Query(0, ge=0),
+    session: Session = Depends(get_session),
+):
+    """The plan of one plane's image: where its pixels sample the volume (`p0`, `du`, `dv`, in voxels of this
+    level) and which blocks they read from (`blocks`, flat [gx, gy, gz, weight] groups, the blocks most pixels
+    read from first). The browser fetches the blocks it does not have with POST .../blocks and assembles the
+    image itself. See VolumeSlicesKiln.plan_plane."""
+    vs = _slice_store(volume_id, token, level, session)
+    if body.width * body.height > 64_000_000:
+        raise HTTPException(status_code=413, detail="The image is too large")
+    if not all(np.isfinite(c) for c in (*body.origin, *body.u, *body.v)):
+        raise HTTPException(status_code=422, detail="origin, u and v must be finite")
+    plan = vs.plan_plane(tuple(body.origin), tuple(body.u), tuple(body.v), body.pixel, body.width, body.height)
+    return JSONResponse(plan, headers={"Cache-Control": "no-store"})
+
+
+@router.post("/{volume_id}/slices/{token}/blocks")
+async def slice_blocks(
+    volume_id: int,
+    token: str,
+    body: SliceBlocksRequest,
+    level: int = Query(0, ge=0),
+    session: Session = Depends(get_session),
+):
+    """Streams blocks as they are read, best first (see helpers.slices.stream_blocks for the wire format):
+    records of a 16-byte header (gx, gy, gz, payload bytes; uint32 little-endian) and the block's voxels (z, y, x),
+    in the dtype of /info, ending with a record whose gx, gy, gz are all 0xFFFFFFFF and whose size field counts the
+    blocks sent. A payload size of 0 is an empty (all zero) block, 0xFFFFFFFE one that could not be read."""
+    vs = await run_in_threadpool(_slice_store, volume_id, token, level, session)
+    try:
+        blocks = vs.check_blocks(body.blocks)
+    except SliceError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc))
+    headers = {
+        "Cache-Control": "no-store",
+        "X-Accel-Buffering": "no",  # nginx must pass records on as they come
+        "X-Block-Count": str(len(blocks)),
+        "X-Block-Bytes": str(vs.block_size ** 3 * np.dtype(vs.dtype).itemsize),
+    }
+    return StreamingResponse(stream_blocks(vs, blocks, body.prefetch), media_type="application/octet-stream", headers=headers)
 
 
 @router.get("/{volume_id}/slices/{token}/{axis}/{index}")
@@ -978,14 +1056,10 @@ def serve_mesh_file(
         raise HTTPException(status_code=404, detail="Not found")
     mesh = get_volume_mesh(session, volume_id)
     mesh_path = volume_mesh_source(mesh)
-    filename = f"{volume.slug}.{mesh.file_extension}"
     if mesh_path is None or not mesh_path.exists():
         raise HTTPException(status_code=404, detail="Not found")
-    return FileResponse(
-        mesh_path,
-        filename=filename,
-        headers={"Cache-Control": f"public, max-age={settings.FILE_TOKEN_EXPIRE_MINUTES * 60}, immutable"},
-    )
+    from .meshes import original_download  # (the mesh, or a zip of it and the texture files that came with it)
+    return original_download(mesh, volume.slug, {"Cache-Control": f"public, max-age={settings.FILE_TOKEN_EXPIRE_MINUTES * 60}, immutable"})
 
 
 @router.get("/{volume_id}/mesh-view-file/{token}")

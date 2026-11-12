@@ -123,6 +123,7 @@
   .layout-seg[data-busy] { cursor: progress; }
   .layout-seg[data-busy] button { pointer-events: none; opacity: 0.5; }
   .slice-num { width: 7.5em; text-align: right; }
+  .slice-angle-num { width: 4.5em; }
   .slice-tf-bar { position: relative; height: 22px; margin: 8px 6px 18px; border-radius: 4px; border: 1px solid rgba(128,128,128,0.45); cursor: copy; }
   .slice-tf-stop { position: absolute; top: -4px; width: 12px; height: 28px; margin-left: -6px; padding: 0; border: 2px solid #fff; border-radius: 3px; box-shadow: 0 0 0 1px rgba(0,0,0,0.55); cursor: ew-resize; }
   .slice-tf-stop.end { cursor: pointer; }
@@ -286,13 +287,14 @@
 
   .ctl-tf-canvas-container {
     position: relative;
-    margin-bottom: 0.9em;
+    margin-bottom: 0.4em;
     border-radius: 6px;
     overflow: hidden;
     border: 1px solid var(--viewer-border);
   }
   /* The stage is padded so handles at x/y = 0 or 1 sit fully inside the hit
-     area; the overlay canvas covers the whole stage and owns pointer input. */
+     area; the overlay canvas covers the whole stage and owns pointer input.
+     It stays black in both themes: it is the backdrop of the rendered curve. */
   .ctl-tf-stage { position: relative; padding: 10px; background: #000; }
   .ctl-tf-canvas { display: block; width: 100%; height: 190px; background: #000; }
   .ctl-tf-overlay {
@@ -305,18 +307,100 @@
     user-select: none;
     -webkit-user-select: none;
   }
-  /* Colour-stop editor under the TF canvas (preset "Custom"); the side padding matches .ctl-tf-stage
+  .ctl-tf-help { font-size: 10px; line-height: 1.4; color: var(--text-dim); text-align: center; margin: 0 0 1em; }
+
+  /* Colour-stop editor under the TF canvas (preset "Custom"). It uses the panel's own surface (the
+     black stage above is only the backdrop of the curve), and its side padding matches .ctl-tf-stage
      so the strip lines up with the canvas x axis. */
-  .ctl-tf-colors { background: #000; padding: 4px 10px 6px; color: var(--text-dim); font-size: 11px; }
-  .ctl-cs-bar { position: relative; height: 18px; margin: 6px 0 4px; border: 1px solid var(--viewer-border); border-radius: 4px; cursor: copy; touch-action: none; user-select: none; -webkit-user-select: none; outline: none; }
+  .ctl-tf-colors {
+    background: var(--panel-raised);
+    border-top: 1px solid var(--viewer-border);
+    padding: 12px 10px 10px;
+    color: var(--text-dim);
+    font-size: 11px;
+  }
+  .ctl-tf-colors[hidden] { display: none; }
+  .ctl-cs-bar {
+    position: relative;
+    height: 14px;
+    margin: 0 0 12px;
+    border: 1px solid var(--viewer-border);
+    border-radius: 4px;
+    cursor: copy;
+    touch-action: none;
+    user-select: none;
+    -webkit-user-select: none;
+    outline: none;
+  }
   .ctl-cs-bar:focus-visible { box-shadow: 0 0 0 2px var(--accent); }
-  .ctl-cs-stop { position: absolute; top: -5px; width: 10px; height: 26px; margin-left: -5px; box-sizing: border-box; border: 2px solid #fff; border-radius: 3px; background: var(--c); box-shadow: 0 0 0 1px rgba(0,0,0,0.75); cursor: ew-resize; }
-  .ctl-cs-stop.sel { border-color: var(--accent); z-index: 1; }
-  .ctl-cs-row { display: flex; align-items: center; gap: 0.5em; padding-top: 4px; }
-  /*.ctl-cs-row input[type="color"] { width: 34px; height: 24px; padding: 0; border: 1px solid var(--viewer-border); border-radius: 4px; background: none; cursor: pointer; }*/
-  /*.ctl-cs-row input[type="number"] { width: 4.6em; padding: 2px 4px; font: inherit; color: inherit; background: transparent; border: 1px solid var(--viewer-border); border-radius: 4px; }*/
-  .ctl-cs-row .ctl-chip:disabled { opacity: 0.4; cursor: default; }
-  .ctl-tf-help { font-size: 10px; color: var(--text-dim); text-align: center; padding: 0.35em 0; background: color-mix(in srgb, var(--panel) 86%, transparent); }
+  .ctl-cs-stop {
+    position: absolute;
+    top: -5px;
+    width: 10px;
+    height: 22px;
+    margin-left: -5px;
+    box-sizing: border-box;
+    border: 2px solid #fff;
+    border-radius: 3px;
+    background: var(--c);
+    box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.75);
+    cursor: ew-resize;
+    transition: transform 0.08s ease;
+  }
+  .ctl-cs-stop.end { cursor: pointer; }
+  .ctl-cs-stop:hover { transform: scaleY(1.08); }
+  .ctl-cs-stop.sel { border-color: var(--accent); box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.75), 0 0 0 3px color-mix(in srgb, var(--accent) 35%, transparent); z-index: 1; }
+  .ctl-cs-row { display: flex; align-items: center; gap: 6px; }
+  .ctl-cs-row .ctl-cs-spacer { flex: 1; }
+  /* css/style.css gives every <input> width: 100% and a roomy padding; these two are compact fields. */
+  .ctl-cs-row input[type="color"] {
+    flex: none;
+    width: 30px;
+    height: 24px;
+    padding: 2px;
+    border: 1px solid var(--viewer-border);
+    border-radius: 4px;
+    background: var(--panel);
+    cursor: pointer;
+  }
+  .ctl-cs-row input[type="color"]::-webkit-color-swatch-wrapper { padding: 0; }
+  .ctl-cs-row input[type="color"]::-webkit-color-swatch { border: 0; border-radius: 2px; }
+  .ctl-cs-row input[type="color"]::-moz-color-swatch { border: 0; border-radius: 2px; }
+  .ctl-cs-pos { display: inline-flex; align-items: center; gap: 4px; margin: 0; color: var(--text-dim); font-size: 11px; }
+  .ctl-cs-row input[type="number"] {
+    flex: none;
+    width: 5em;
+    height: 24px;
+    padding: 0 6px;
+    -moz-appearance: textfield;
+    appearance: textfield;
+    font-family: var(--mono);
+    font-size: 11px;
+    text-align: right;
+    background: var(--panel);
+    border: 1px solid var(--viewer-border);
+    border-radius: 4px;
+    color: var(--text);
+  }
+  .ctl-cs-row input[type="number"]::-webkit-inner-spin-button,
+  .ctl-cs-row input[type="number"]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+  .ctl-cs-row input:disabled { opacity: 0.4; cursor: default; }
+  /* Small in-panel buttons. (.ctl-chip is the floating, absolutely positioned chip over the viewer, so it
+     cannot be used inside the panel flow.) */
+  .ctl-mini-btn {
+    flex: none;
+    height: 24px;
+    padding: 0 9px;
+    font-size: 11px;
+    line-height: 1;
+    color: var(--text);
+    background: var(--panel);
+    border: 1px solid var(--viewer-border);
+    border-radius: 4px;
+    cursor: pointer;
+  }
+  .ctl-mini-btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+  .ctl-mini-btn:disabled { opacity: 0.4; cursor: default; }
 
   .ctl-slider-row { display: flex; align-items: center; gap: 0.6em; margin-bottom: 0.7em; }
   .ctl-slider-label { width: 62px; flex-shrink: 0; color: var(--text-dim); font-size: 11px; }
@@ -459,7 +543,7 @@
   <div class="app-shell" id="shell"></div>
 
   <script type="module">
-    import { api, requireLogin, getRole, getUsername, renderShell, wireLogout } from "/js/api.js?v=share1";
+    import { api, requireLogin, getRole, getUsername, renderShell, wireLogout } from "/js/api.js?v=org5";
     import { syncHistogram } from "/js/histogram.js?v=hist1";
 import { insertStop, sampleStops, rgbToHex, decodeTf, encodeTf } from "/js/slice/transfer-function.js";
     import { KilnViewer } from "/vendor/kiln-render/lib/kiln-render.js?v=atlas3";
@@ -470,16 +554,17 @@ import { insertStop, sampleStops, rgbToHex, decodeTf, encodeTf } from "/js/slice
       planAtlas,
       saveAtlasMB,
     } from "/js/atlas-budget.js?v=atlas3";
-    import { setupSliceIntegration } from "/js/slice/slice-integration.js?v=slice6";
+    import { setupSliceIntegration } from "/js/slice/slice-integration.js?v=mpr1";
     import { niceScaleLength } from "/js/scalebar.js?v=sb1";
-    import { toggleHelpPanel } from "/js/help.js?v=help6";
+    import { toggleHelpPanel } from "/js/help.js?v=help7";
     import { makeDescriptionExpandable } from "/js/description.js?v=org2";
     import { openExportPanel } from "/js/export-image.js?v=org2";
-    import { openAnimatePanel } from "/js/animate.js?v=org5";
-    import { createPlayer } from "/js/playback.js?v=org5";
+    import { createTimeline } from "/js/timeline.js?v=tl1";
+    import { decodeSpec, ANIM_PARAM } from "/js/anim-url.js?v=tl1";
+    import { createPlayer } from "/js/playback.js?v=tl1";
     import { createPathStore, createBookmarkStore } from "/js/saved-paths.js?v=org5";
     import { openBookmarksPanel } from "/js/bookmarks.js?v=org5";
-    import { interpolatePose, readPose, writePose } from "/js/animate.js?v=org5";
+    import { interpolatePose, readPose, writePose } from "/js/animate.js?v=tl1";
     import { captureStill } from "/js/render-capture.js?v=org4";
     import { startBrickCache, watchDataAccess, resetDataAccessWatch, onDataAccessExpired, setDataAccess, dataAccessExpiresAt, dataAccessTtlMs } from "/js/data-access.js?v=org4";
 
@@ -496,6 +581,7 @@ import { insertStop, sampleStops, rgbToHex, decodeTf, encodeTf } from "/js/slice
     const CUBE_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8 12 3 3 8m18 0v8l-9 5m9-13-9 5m0 8-9-5V8m9 13v-8M3 8l9 5"/></svg>`;
     const HELP_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.1 9a3 3 0 0 1 5.8 1c0 2-3 3-3 3M12 17h.01"/></svg>`;
     const DOWNLOAD_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>`;
+    const RULER_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 17 17 3l4 4L7 21z"/><path d="M7 13l2 2M10 10l2 2M13 7l2 2"/></svg>`;
     const ANIMATE_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polygon points="10 8 16 12 10 16 10 8"/></svg>`;
     const BOOKMARK_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>`;
     const LINK_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>`;
@@ -719,13 +805,14 @@ import { insertStop, sampleStops, rgbToHex, decodeTf, encodeTf } from "/js/slice
             <div class="layout-seg" id="layout-seg" role="group" aria-label="View layout">
               <button type="button" data-layout="3d" title="3D view only">3D</button>
               <button type="button" data-layout="quad" title="3D view and the three slice views">Quad</button>
-              <button type="button" data-layout="xy" title="XY plane: slices along Z">XY</button>
+              <button type="button" data-layout="xy" title="XY pane: slices along Z (drag a crosshair line to tilt the planes)">XY</button>
               <button type="button" data-layout="xz" title="XZ plane: slices along Y">XZ</button>
               <button type="button" data-layout="yz" title="YZ plane: slices along X">YZ</button>
             </div>
             <button id="help-btn" class="icon-btn" aria-pressed="false" title="Show help for this viewer next to the view">${HELP_ICON}<span class="icon-btn-label">Help</span></button>
             <button id="bookmarks-btn" class="icon-btn" title="Save this view and come back to it later">${BOOKMARK_ICON}<span class="icon-btn-label">Bookmarks</span></button>
-            <button id="animate-btn" class="icon-btn" title="Render an animation: a sweep through the slices, a 3D turntable or a camera path">${ANIMATE_ICON}<span class="icon-btn-label">Animate</span></button>
+            <button id="measure-btn" class="icon-btn" aria-pressed="false" title="Measure distances: click two points in a slice pane or in the 3D view">${RULER_ICON}<span class="icon-btn-label">Measure</span></button>
+            <button id="animate-btn" class="icon-btn" title="Animation timeline: a camera path with clipping and transfer function changes, a 3D turntable or a slice sweep; play it or render a video">${ANIMATE_ICON}<span class="icon-btn-label">Animate</span></button>
             <button id="export-btn" class="icon-btn" title="Save the view or a slice as an image file at full resolution">${DOWNLOAD_ICON}<span class="icon-btn-label">Export</span></button>
             <button id="share-btn" class="icon-btn" title="Copy a link to this exact view">${LINK_ICON}<span class="icon-btn-label">Share</span></button>
             ${
@@ -748,6 +835,7 @@ import { insertStop, sampleStops, rgbToHex, decodeTf, encodeTf } from "/js/slice
             <button type="button" class="ctl-chip" id="panel-open" style="right:12px; top:12px" hidden>Controls</button>
           </div>
         </div>
+        <div id="anim-dock"></div>
       `;
 
       const descEl = content.querySelector(".viewer-desc");
@@ -1026,8 +1114,9 @@ import { insertStop, sampleStops, rgbToHex, decodeTf, encodeTf } from "/js/slice
         onChange: (state) => {
           if (state !== "idle") return;
           const url = new URL(window.location.href); // stopped: the link no longer starts it again
-          if (url.searchParams.has("play")) {
+          if (url.searchParams.has("play") || url.searchParams.has(ANIM_PARAM)) {
             url.searchParams.delete("play");
+            url.searchParams.delete(ANIM_PARAM);
             history.replaceState(history.state, "", url.pathname + url.search + url.hash);
           }
         },
@@ -1048,12 +1137,19 @@ import { insertStop, sampleStops, rgbToHex, decodeTf, encodeTf } from "/js/slice
       }
       async function startAutoplay() {
         const id = params.get("play");
-        if (!id || autoplayStarted) return;
+        const animText = params.get(ANIM_PARAM); // a link to an animation that was never saved: the animation is in the link
+        if ((!id && !animText) || autoplayStarted) return;
         autoplayStarted = true;
         try {
-          const entry = await pathStore.getShared(id);
-          if (entry.spec.kind === "slices") await slices.requestLayout(entry.spec.axis);
-          await player.play(entry.spec);
+          let spec;
+          if (id) spec = (await pathStore.getShared(id)).spec;
+          else {
+            spec = await decodeSpec(animText);
+            if (!spec) throw new Error("The animation in this link is damaged, too long or from a newer version");
+          }
+          if (spec.kind === "slices") await slices.requestLayout(spec.axis);
+          getTimeline().load(spec); // the timeline shows what plays (it stays hidden until Animate is pressed)
+          await player.play(spec);
         } catch (err) {
           console.error("[autoplay]", err);
           showStatus(`Could not start the saved path: ${err.message}`, { busy: false });
@@ -1143,29 +1239,44 @@ import { insertStop, sampleStops, rgbToHex, decodeTf, encodeTf } from "/js/slice
         bookmarksBtn.setAttribute("aria-pressed", String(!!open));
       });
 
+      // The ruler: measures distances in the slice panes and the 3D view. Its measurements live in the slice views'
+      // state (they are made on demand); the button follows the ruler's state, which M and the Measure section change too.
+      const measureBtn = document.getElementById("measure-btn");
+      measureBtn.addEventListener("click", () => slices.toggleMeasure());
+      slices.onMeasuring((on) => measureBtn.setAttribute("aria-pressed", String(on)));
+
+      // The animation timeline docks below the panes. It is made when first needed (a link can play an animation
+      // before Animate is pressed) and keeps its settings and views while it is hidden.
       const animateBtn = document.getElementById("animate-btn");
-      animateBtn.addEventListener("click", () => {
-        const open = openAnimatePanel({
-          anchor: animateBtn,
-          baseName: volume.slug,
-          description: volume.title,
-          getViewer: () => currentViewer,
-          getSlices: () => slices.views,
-          getCanvas: () => $("canvas"),
-          pane: $("pane-3d"),
-          player,
-          store: pathStore,
-          bookmarks: bookmarkStore,
-          access: {
-            expiresAt: dataAccessExpiresAt,
-            ttlMs: dataAccessTtlMs,
-            renew: refreshDataAccess,
-            onExpired: onDataAccessExpired,
-          },
-          onClose: () => animateBtn.setAttribute("aria-pressed", "false"),
-        });
-        animateBtn.setAttribute("aria-pressed", String(!!open));
-      });
+      let timeline = null;
+      function getTimeline() {
+        if (!timeline) {
+          timeline = createTimeline({
+            dock: $("anim-dock"),
+            baseName: volume.slug,
+            description: volume.title,
+            getViewer: () => currentViewer,
+            getSlices: () => slices.views,
+            getCanvas: () => $("canvas"),
+            pane: $("pane-3d"),
+            player,
+            store: pathStore,
+            bookmarks: bookmarkStore,
+            access: {
+              expiresAt: dataAccessExpiresAt,
+              ttlMs: dataAccessTtlMs,
+              renew: refreshDataAccess,
+              onExpired: onDataAccessExpired,
+            },
+            onToggle: (open) => {
+              animateBtn.setAttribute("aria-pressed", String(open));
+              window.dispatchEvent(new Event("resize")); // the panes gained or lost height
+            },
+          });
+        }
+        return timeline;
+      }
+      animateBtn.addEventListener("click", () => getTimeline().toggle());
 
       document.getElementById("share-btn").addEventListener("click", async () => {
         const currentViewQuery =
@@ -1369,8 +1480,11 @@ import { insertStop, sampleStops, rgbToHex, decodeTf, encodeTf } from "/js/slice
         try {
           const p = stateToParams(viewer.getState(), getMinLevel());
           for (const [k, v] of Object.entries(sliceUrlParams())) p.set(k, v);
-          const play = new URLSearchParams(window.location.search).get("play"); // a link that plays a saved path
+          const now = new URLSearchParams(window.location.search);
+          const play = now.get("play"); // a link that plays a saved path
           if (play) p.set("play", play);
+          const anim = now.get(ANIM_PARAM); // a link that carries an animation that was not saved
+          if (anim) p.set(ANIM_PARAM, anim);
           const qs = "?" + p.toString();
           if (qs !== last) {
             history.replaceState(history.state, "", window.location.pathname + qs + window.location.hash);
@@ -1635,7 +1749,10 @@ import { insertStop, sampleStops, rgbToHex, decodeTf, encodeTf } from "/js/slice
       function wireTfCanvas(root) {
         const canvas = root.querySelector(".ctl-tf-canvas");
         const overlay = root.querySelector(".ctl-tf-overlay");
-        let drag = null; // { type: "point", index } | { type: "line", index, startPt, startP0, startP1 }
+        let drag = null; // { type: "point", index, ... } | { type: "line", index, startPt, startP0, startP1, ... }; both: { startX, startY (client px), moved }
+        let hover = -1; // the point under the pointer (drawn larger)
+        const X_GAP = 0.002; // closest two points may get along x
+        const DRAG_SLOP = 3; // px the pointer must travel before a press becomes a drag (a plain click or double-click moves nothing)
 
         function redraw() {
           const rect = canvas.getBoundingClientRect();
@@ -1681,10 +1798,11 @@ import { insertStop, sampleStops, rgbToHex, decodeTf, encodeTf } from "/js/slice
             const active =
               (drag?.type === "point" && drag.index === i) ||
               (drag?.type === "line" && (drag.index === i || drag.index + 1 === i));
+            const lit = active || (!drag && hover === i);
             ctx.beginPath();
-            ctx.arc(ox + p.x * rect.width, oy + (1 - p.y) * rect.height, active ? 7 : 6, 0, Math.PI * 2);
-            ctx.fillStyle = "#e8a33d";
-            ctx.strokeStyle = "rgba(20,23,28,0.9)";
+            ctx.arc(ox + p.x * rect.width, oy + (1 - p.y) * rect.height, lit ? 7 : 5.5, 0, Math.PI * 2);
+            ctx.fillStyle = lit ? "#ffc15e" : "#e8a33d";
+            ctx.strokeStyle = lit ? "#ffffff" : "rgba(20,23,28,0.9)";
             ctx.fill();
             ctx.stroke();
           });
@@ -1755,8 +1873,9 @@ import { insertStop, sampleStops, rgbToHex, decodeTf, encodeTf } from "/js/slice
           const pt = pointFromEvent(evt);
           const points = tf.getOpacityPoints();
           const ptIdx = nearestPointIndex(pt);
+          const press = { startX: evt.clientX, startY: evt.clientY, moved: false };
           if (ptIdx >= 0) {
-            drag = { type: "point", index: ptIdx };
+            drag = { type: "point", index: ptIdx, ...press };
           } else {
             const segIdx = nearestSegmentIndex(pt);
             if (segIdx >= 0) {
@@ -1766,6 +1885,7 @@ import { insertStop, sampleStops, rgbToHex, decodeTf, encodeTf } from "/js/slice
                 startPt: pt,
                 startP0: { x: points[segIdx].x, y: points[segIdx].y },
                 startP1: { x: points[segIdx + 1].x, y: points[segIdx + 1].y },
+                ...press,
               };
             }
           }
@@ -1778,9 +1898,14 @@ import { insertStop, sampleStops, rgbToHex, decodeTf, encodeTf } from "/js/slice
         overlay.addEventListener("pointermove", (evt) => {
           const pt = pointFromEvent(evt);
           if (drag === null) {
-            const hover = nearestPointIndex(pt) >= 0 || nearestSegmentIndex(pt) >= 0;
-            overlay.style.cursor = hover ? "grab" : "crosshair";
+            const idx = nearestPointIndex(pt);
+            overlay.style.cursor = idx >= 0 || nearestSegmentIndex(pt) >= 0 ? "grab" : "crosshair";
+            if (idx !== hover) { hover = idx; redraw(); }
             return;
+          }
+          if (!drag.moved) {
+            if (Math.hypot(evt.clientX - drag.startX, evt.clientY - drag.startY) < DRAG_SLOP) return;
+            drag.moved = true;
           }
           const points = tf.getOpacityPoints();
           if (drag.type === "point") {
@@ -1789,7 +1914,10 @@ import { insertStop, sampleStops, rgbToHex, decodeTf, encodeTf } from "/js/slice
             let x = pt.x;
             if (idx === 0) x = 0;
             else if (idx === points.length - 1) x = 1;
-            else x = Math.min(points[idx + 1].x, Math.max(points[idx - 1].x, x));
+            else {
+              const lo = points[idx - 1].x + X_GAP, hi = points[idx + 1].x - X_GAP;
+              x = lo > hi ? (points[idx - 1].x + points[idx + 1].x) / 2 : Math.min(hi, Math.max(lo, x));
+            }
             points[idx] = { x, y: pt.y };
             applyPoints(points);
           } else if (drag.type === "line") {
@@ -1798,25 +1926,20 @@ import { insertStop, sampleStops, rgbToHex, decodeTf, encodeTf } from "/js/slice
             const { startPt, startP0, startP1 } = drag;
             const dx = pt.x - startPt.x;
             const dy = pt.y - startPt.y;
-            const minDx = idx === 0 ? 0 : points[idx - 1].x - startP0.x;
-            const maxDx = idx + 1 === points.length - 1 ? 0 : points[idx + 2].x - startP1.x;
-            const clampedDx = Math.min(maxDx, Math.max(minDx, dx));
+            // A segment that has an end point (x = 0 or 1) as one of its ends can only slide up and down.
+            const pinned = idx === 0 || idx + 1 === points.length - 1;
+            const minDx = pinned ? 0 : points[idx - 1].x + X_GAP - startP0.x;
+            const maxDx = pinned ? 0 : points[idx + 2].x - X_GAP - startP1.x;
+            const clampedDx = minDx > maxDx ? 0 : Math.min(maxDx, Math.max(minDx, dx));
             const minDy = -Math.min(startP0.y, startP1.y);
             const maxDy = 1 - Math.max(startP0.y, startP1.y);
-            let y0, y1;
-            if (minDx === 0 && maxDx === 0 && minDy === 0 && maxDy === 0) {
-              y0 = Math.min(1, Math.max(0, startP0.y + dy));
-              y1 = Math.min(1, Math.max(0, startP1.y + dy));
-            } else {
-              const clampedDy = Math.min(maxDy, Math.max(minDy, dy));
-              y0 = startP0.y + clampedDy;
-              y1 = startP1.y + clampedDy;
-            }
-            points[idx] = { x: startP0.x + clampedDx, y: y0 };
-            points[idx + 1] = { x: startP1.x + clampedDx, y: y1 };
+            const clampedDy = Math.min(maxDy, Math.max(minDy, dy));
+            points[idx] = { x: startP0.x + clampedDx, y: startP0.y + clampedDy };
+            points[idx + 1] = { x: startP1.x + clampedDx, y: startP1.y + clampedDy };
             applyPoints(points);
           }
         });
+        overlay.addEventListener("pointerleave", () => { if (!drag && hover !== -1) { hover = -1; redraw(); } });
         overlay.addEventListener("pointerup", endDrag);
         overlay.addEventListener("pointercancel", endDrag);
         overlay.addEventListener("lostpointercapture", endDrag);
@@ -1828,6 +1951,7 @@ import { insertStop, sampleStops, rgbToHex, decodeTf, encodeTf } from "/js/slice
             if (idx <= 0 || idx >= points.length - 1) return; // keep the end points
             points.splice(idx, 1);
           } else {
+            if (points.some((p) => Math.abs(p.x - pt.x) < X_GAP)) return; // no room: a point is already there along x
             points.push(pt);
             points.sort((a, b) => a.x - b.x);
           }
@@ -1868,6 +1992,8 @@ import { insertStop, sampleStops, rgbToHex, decodeTf, encodeTf } from "/js/slice
       function wireColorEditor(root) {
         const host = root.querySelector('[data-role="tf-colors"]');
         let bar = null, drag = null;
+        let lastAdd = -Infinity; // when a click last added a stop: its double-click must not delete it again
+        let pressedStop = -1; // the stop the last press landed on (a double-click's own coordinates are rounded, so it is not hit-tested again)
 
         const gradient = (stops) =>
           `linear-gradient(to right, ${stops.map((s) => `${s.color} ${(s.pos * 100).toFixed(2)}%`).join(", ")})`;
@@ -1893,6 +2019,7 @@ import { insertStop, sampleStops, rgbToHex, decodeTf, encodeTf } from "/js/slice
             el.style.left = `${s.pos * 100}%`;
             el.style.setProperty("--c", s.color);
             el.classList.toggle("sel", i === selStop);
+            el.classList.toggle("end", i === 0 || i === stops.length - 1);
           });
           const interior = selStop > 0 && selStop < stops.length - 1;
           const colorInput = host.querySelector('[data-role="cs-color"]');
@@ -1907,7 +2034,7 @@ import { insertStop, sampleStops, rgbToHex, decodeTf, encodeTf } from "/js/slice
           bar = null;
           if (!tf.getColorStops()) {
             host.innerHTML = canCustomColours
-              ? `<button type="button" class="ctl-chip" data-role="cs-edit">Edit colours&hellip;</button>`
+              ? `<button type="button" class="ctl-mini-btn" data-role="cs-edit">Edit colours&hellip;</button>`
               : "";
             host.hidden = !canCustomColours;
             host.querySelector('[data-role="cs-edit"]')?.addEventListener("click", () => {
@@ -1918,12 +2045,13 @@ import { insertStop, sampleStops, rgbToHex, decodeTf, encodeTf } from "/js/slice
           }
           host.hidden = false;
           host.innerHTML = `
-            <div class="ctl-cs-bar" data-role="cs-bar" tabindex="0" title="Click to add a colour stop"></div>
+            <div class="ctl-cs-bar" data-role="cs-bar" tabindex="0" title="Click to add a colour stop; drag a stop to move it; double-click or press Delete to remove it"></div>
             <div class="ctl-cs-row">
-              <input type="color" data-role="cs-color" aria-label="Colour of the selected stop">
-              <input type="number" data-role="cs-pos" min="0" max="1" step="0.01" aria-label="Position of the selected stop">
-              <button type="button" class="ctl-chip" data-role="cs-remove">Remove</button>
-              <button type="button" class="ctl-chip" data-role="cs-reverse">Reverse</button>
+              <input type="color" data-role="cs-color" aria-label="Colour of the selected stop" title="Colour of the selected stop">
+              <label class="ctl-cs-pos">Pos <input type="number" data-role="cs-pos" min="0" max="1" step="0.01" aria-label="Position of the selected stop"></label>
+              <span class="ctl-cs-spacer"></span>
+              <button type="button" class="ctl-mini-btn" data-role="cs-remove" title="Remove the selected stop">Remove</button>
+              <button type="button" class="ctl-mini-btn" data-role="cs-reverse" title="Flip the colour map">Reverse</button>
             </div>`;
           bar = host.querySelector('[data-role="cs-bar"]');
           wire();
@@ -1970,9 +2098,11 @@ import { insertStop, sampleStops, rgbToHex, decodeTf, encodeTf } from "/js/slice
               const stops = insertStop(tf.getColorStops(), pos);
               idx = stops.reduce((best, s, i) => (Math.abs(s.pos - pos) < Math.abs(stops[best].pos - pos) ? i : best), 0);
               selStop = idx;
+              lastAdd = performance.now();
               commit(stops);
             }
             selStop = idx;
+            pressedStop = idx;
             drag = { index: idx };
             paint();
           });
@@ -1984,8 +2114,9 @@ import { insertStop, sampleStops, rgbToHex, decodeTf, encodeTf } from "/js/slice
           bar.addEventListener("pointercancel", endDrag);
           bar.addEventListener("lostpointercapture", endDrag);
           bar.addEventListener("dblclick", (evt) => {
-            const idx = hitStop(posFromEvent(evt));
-            if (idx > 0) removeStop(idx);
+            // (a double-click on empty strip adds a stop with its first click; the second one must not remove it)
+            if (performance.now() - lastAdd < 600) return;
+            if (pressedStop > 0) removeStop(pressedStop);
           });
           bar.addEventListener("keydown", (evt) => {
             if (evt.key === "Delete" || evt.key === "Backspace") {
@@ -2058,7 +2189,8 @@ import { insertStop, sampleStops, rgbToHex, decodeTf, encodeTf } from "/js/slice
               <canvas class="ctl-tf-overlay"></canvas>
             </div>
             <div class="ctl-tf-colors" data-role="tf-colors"></div>
-              <div class="ctl-tf-help">Drag point or line to move &#x00b7; double-click to add/remove</div>
+          </div>
+          <div class="ctl-tf-help">Drag points or lines &#x00b7; double-click to add or remove</div>
           <div class="ctl-slider-row">
             <span class="ctl-row-label ctl-slider-label">Center</span>
             <div class="ctl-slider-track">
@@ -2149,6 +2281,29 @@ import { insertStop, sampleStops, rgbToHex, decodeTf, encodeTf } from "/js/slice
       wireClipAxis("X", dimX, (lo, hi) => { renderer.clipMin[0] = lo; renderer.clipMax[0] = hi; dirty(); });
       wireClipAxis("Y", dimY, (lo, hi) => { renderer.clipMin[1] = lo; renderer.clipMax[1] = hi; dirty(); });
       wireClipAxis("Z", dimZ, (lo, hi) => { renderer.clipMin[2] = lo; renderer.clipMax[2] = hi; dirty(); });
+
+      // An animation changes the transfer function (colours, opacity curve, window, density): the panel follows.
+      let tfFrame = 0;
+      const onTfChanged = (evt) => {
+        if (!panel.isConnected) { window.removeEventListener("vg-tf-changed", onTfChanged); return; } // the panel was rebuilt
+        cancelAnimationFrame(tfFrame);
+        tfFrame = requestAnimationFrame(() => {
+          state.tfPreset = tf.preset;
+          const presetSelect = panel.querySelector('[data-role="tf-preset"]');
+          if (presetSelect && [...presetSelect.options].some((o) => o.value === tf.preset)) presetSelect.value = tf.preset;
+          const show = (role, value) => {
+            const input = panel.querySelector(`[data-role="slider-${role}"]`);
+            const label = panel.querySelector(`[data-role="value-${role}"]`);
+            if (input && Number.isFinite(value)) { input.value = value; if (label) label.textContent = value.toFixed(2); }
+          };
+          show("center", viewer.windowCenter);
+          show("width", viewer.windowWidth);
+          show("density", renderer.densityScale);
+          if (redrawTf) redrawTf();
+          if (evt.detail?.settled && rebuildColorEditor) rebuildColorEditor(); // the colour editor follows once the animation is over
+        });
+      };
+      window.addEventListener("vg-tf-changed", onTfChanged);
 
       // --- Advanced section ---
       wireSlider(panel, "renderScale", (v) => { viewer.renderScale = v; }, (v) => v.toFixed(2));

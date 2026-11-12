@@ -150,6 +150,33 @@ class ShareLinkRead(BaseModel):
 
 # ---------- saved ways of showing a volume (camera paths etc.) ----------
 
+class KeyTfPoint(BaseModel):
+    x: float = Field(ge=0, le=1)
+    y: float = Field(ge=0, le=1)
+
+
+class KeyTfStop(BaseModel):
+    pos: float = Field(ge=0, le=1)
+    color: str = Field(pattern=r"^#[0-9a-fA-F]{6}$")
+
+
+class KeyTf(BaseModel):
+    """The transfer function a view of a camera path carries: colour map (a built-in preset, or "custom" with
+    colour stops), opacity curve, window and density. Between two views these blend."""
+    preset: Literal["coolwarm", "grayscale", "grayscale-inverted", "hot", "cool", "viridis", "plasma", "seismic", "custom"]
+    colorStops: Optional[List[KeyTfStop]] = Field(default=None, min_length=2, max_length=64)
+    points: List[KeyTfPoint] = Field(min_length=2, max_length=64)
+    windowCenter: Optional[float] = Field(default=None, ge=0, le=1)
+    windowWidth: Optional[float] = Field(default=None, gt=0, le=1)
+    densityScale: Optional[float] = Field(default=None, gt=0, le=100)
+
+    @model_validator(mode="after")
+    def _custom_needs_stops(self):
+        if self.preset == "custom" and not self.colorStops:
+            raise ValueError('the "custom" colour map needs colour stops')
+        return self
+
+
 class PoseSpec(BaseModel):
     """A camera pose of the 3D view: eye = target + back * distance; `up` is the camera's up vector."""
     back: List[float] = Field(min_length=3, max_length=3)
@@ -161,6 +188,11 @@ class PoseSpec(BaseModel):
     # neither: a pose without a box leaves the clipping as it is.
     clipMin: Optional[List[float]] = Field(default=None, min_length=3, max_length=3)
     clipMax: Optional[List[float]] = Field(default=None, min_length=3, max_length=3)
+    # The transfer function at this pose; a pose without one leaves it as it is.
+    tf: Optional[KeyTf] = None
+    # When this view is reached, as a fraction 0..1 of one pass of the path (all views have it, or none: then they
+    # are spread evenly).
+    at: Optional[float] = Field(default=None, ge=0, le=1)
 
     @field_validator("back", "up", "target")
     @classmethod
@@ -193,6 +225,9 @@ class PlaybackSpec(BaseModel):
     ease: Literal["smooth", "linear"] = "smooth"
     angle: float = Field(default=360, ge=1, le=3600)             # turntable: degrees per pass
     direction: Literal[1, -1] = 1
+    # turntable: what it turns about. "up" is the viewer's up axis through the point looked at; the others run through
+    # the centre of the volume: its x, y, z axes, the vertical / horizontal of the screen, the line of sight.
+    turn_axis: Literal["up", "x", "y", "z", "screen-up", "screen-right", "view"] = "up"
     keys: List[PoseSpec] = Field(default_factory=list, max_length=200)
     start: Optional[PoseSpec] = None                             # turntable: begin from this view (else the current one)
     axis: Optional[Literal["xy", "xz", "yz"]] = None             # slice sweep
@@ -200,8 +235,17 @@ class PlaybackSpec(BaseModel):
     to_index: int = Field(default=0, ge=0, le=1_000_000)
     step: int = Field(default=1, ge=1, le=100_000)
     speed: float = Field(default=10, gt=0, le=240)               # slices per second
-    preload: bool = True
+    preload: bool = True                                         # 3D: load the data of the whole path before playing (never used for slices)
     pause_on_touch: bool = True
+
+    @model_validator(mode="after")
+    def _key_times(self):
+        timed = [k.at for k in self.keys if k.at is not None]
+        if timed and len(timed) != len(self.keys):
+            raise ValueError("either all views of a path have a time or none")
+        if any(b < a for a, b in zip(timed, timed[1:])):
+            raise ValueError("the views of a path must be in time order")
+        return self
 
 
 class PathWrite(BaseModel):
@@ -266,7 +310,7 @@ class BookmarkSpec(BaseModel):
     @field_validator("slices")
     @classmethod
     def _slices_small(cls, v):
-        if v is not None and (len(v) > 12 or any(len(k) > 20 or len(x) > 4000 for k, x in v.items())):
+        if v is not None and (len(v) > 20 or any(len(k) > 20 or len(x) > 4000 for k, x in v.items())):
             raise ValueError("slice parameters too large")
         return v
 

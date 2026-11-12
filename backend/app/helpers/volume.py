@@ -132,7 +132,7 @@ def extract_zip_parallel(zip_path, extract_to):
             raise
 
 
-def _find_tiff_dir(scratch_dir: Path) -> Optional[Path]:
+def find_tiff_dir(scratch_dir: Path) -> Optional[Path]:
     """Breadth-first search for the shallowest directory containing at least
     one .tif/.tiff file."""
     queue = deque([scratch_dir])
@@ -174,22 +174,6 @@ def process_zip(zip_path: Path, work_dir: Path, vol_dir: Path, spacing, log) -> 
     finally:
         shutil.rmtree(scratch_dir, ignore_errors=True)
     return max_lod
-
-
-def find_tiff_dir(scratch_dir: Path) -> Optional[Path]:
-    """Breadth-first search for the shallowest directory containing at least
-    one .tif/.tiff file."""
-    queue = deque([scratch_dir])
-    while queue:
-        current = queue.popleft()
-        try:
-            entries = list(current.iterdir())
-        except OSError:
-            continue
-        if any(p.is_file() and p.suffix.lower() in (".tif", ".tiff") for p in entries):
-            return current
-        queue.extend(sorted(p for p in entries if p.is_dir()))
-    return None
 
 
 def natural_sort_key(s: str) -> List:

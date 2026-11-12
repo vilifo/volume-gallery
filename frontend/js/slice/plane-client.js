@@ -1,27 +1,29 @@
-// Fetches finished planes from the server (see backend/app/helpers/slices.py).
+// Gets the images of planes from the server (see backend/app/helpers/slices.py) as plans and blocks:
 //
-//   * one request per plane; planes are raw unless a one-time probe shows that this
-//     browser/connection really decodes `Content-Encoding: zstd` (see _useZstd)
-//   * identical requests are shared; a request nobody waits for any more is aborted
-//     ("latest wins" while dragging a crosshair)
-//   * decoded planes are kept in a byte-budgeted LRU
-//   * foreground requests run before prefetches; at most `maxInflight` at a time
+//   1. POST .../plan with the plane (origin, u, v, pixel, size) returns the plan: where each pixel samples the
+//      volume and which blocks it reads from, the ones most pixels read from first;
+//   2. the blocks the browser does not have yet are requested in one POST .../blocks, which streams them back as
+//      the server reads them (the server reads the ones most pixels need first);
+//   3. a PlaneAssembler (plane-assembler.js) builds the image from the blocks as they arrive; the caller is told
+//      after every chunk and can show the image while it fills in.
 //
-// The renderer and panes only depend on `get()` / `prefetch()` / `peek()`, so the
-// transport can be swapped without touching them.
+// Blocks are kept in a byte-budgeted LRU, so a plane that overlaps one already seen (scrolling, a crosshair that
+// moves, a plane that turns a little) is mostly assembled at once from the cache and only the rest is fetched.
+// A load nobody waits for any more is aborted ("latest wins" while dragging); foreground loads run before
+// prefetches, at most `maxInflight` at a time.
 
+import { PlaneAssembler, BlockStreamParser } from "./plane-assembler.js";
 import { textureFormatFor } from "./geometry.js";
 
 export class PlaneError extends Error {
-  constructor(message, status = 0, { sizeMismatch = false } = {}) {
+  constructor(message, status = 0) {
     super(message);
     this.name = "PlaneError";
     this.status = status;
-    this.sizeMismatch = sizeMismatch;
   }
 }
 
-const keyOf = (axis, index, channel, stride) => `${axis}/${index}/${channel}/${stride}`;
+const abortError = () => new DOMException("aborted", "AbortError");
 
 export class PlaneClient {
   /**
@@ -29,27 +31,21 @@ export class PlaneClient {
    * @param {string} o.baseUrl   ".../slices/<token>/" (ends with "/")
    * @param {Function} [o.fetchFn]
    * @param {() => Promise<string>} [o.refreshUrl]  returns a new baseUrl when the token expired (403)
-   * @param {"auto"|"on"|"off"} [o.compression]  "auto" (default): ask for zstd only after the probe
-   *  proved that this connection decodes it; "off": always raw; "on": always zstd (falls back
-   *  to raw if a response turns out to be undecoded)
    */
-  constructor({ baseUrl, fetchFn = (...a) => fetch(...a), refreshUrl = null, maxCacheBytes = 384e6, maxInflight = 6, compression = "auto" }) {
+  constructor({ baseUrl, fetchFn = (...a) => fetch(...a), refreshUrl = null, maxCacheBytes = 512e6, maxInflight = 3 }) {
     this.baseUrl = baseUrl;
-    this.compression = compression;
-    this._zstd = compression === "on";
-    this._probe = null;
     this.fetchFn = fetchFn;
     this.refreshUrl = refreshUrl;
     this.maxCacheBytes = maxCacheBytes;
     this.maxInflight = maxInflight;
-    this._cache = new Map();
-    this._cacheBytes = 0;
-    this._jobs = new Map();
+    this._blocks = new Map(); // "channel/key" -> typed array | null (an empty block), least recently used first
+    this._blockBytes = 0;
     this._queue = [];
     this._running = 0;
+    this._seq = 0;
     this._info = null;
     this._disposed = false;
-    this.counters = { hits: 0, fetches: 0, aborted: 0, lastMs: 0, lastServerMs: 0, lastSource: "" };
+    this.counters = { loads: 0, cached: 0, fetched: 0, bytes: 0, aborted: 0, lastMs: 0, lastPlanMs: 0, lastServerPlanMs: 0, lastFirstMs: 0, lastBlocks: 0 };
   }
 
   async info() {
@@ -62,59 +58,41 @@ export class PlaneClient {
     }
   }
 
-  peek(axis, index, channel = 0, stride = 1) {
-    const k = keyOf(axis, index, channel, stride);
-    const p = this._cache.get(k);
-    if (p) {
-      this._cache.delete(k);
-      this._cache.set(k, p); // LRU touch
-    }
-    return p ?? null;
-  }
-
   /**
-   * @returns {Promise<{axis, index, channel, stride, width, height, dtype, data: ArrayBufferView, serverMs, source}>}
+   * Loads the image of a plane. `spec` is a PaneGeometry.spec(). `onUpdate(assembler)` is called when the
+   * cached blocks have been applied and after every chunk of the stream; the promise resolves with
+   * { plan, assembler } when the image is complete (assembler is null for a prefetch, which only fills the cache).
+   * Aborting `signal` stops it.
+   * @param {object} spec
+   * @param {{channel?: number, priority?: number, signal?: AbortSignal, underlay?: object, onUpdate?: Function, prefetch?: boolean}} [o]
    */
-  get(axis, index, { channel = 0, stride = 1, priority = 1, signal } = {}) {
-    const hit = this.peek(axis, index, channel, stride);
-    if (hit) {
-      this.counters.hits++;
-      return Promise.resolve(hit);
-    }
-    const job = this._job(axis, index, channel, stride, priority);
+  loadPlane(spec, { channel = 0, priority = 1, signal, underlay = null, onUpdate = null, prefetch = false } = {}) {
     return new Promise((resolve, reject) => {
-      const waiter = { resolve, reject };
-      job.waiters.add(waiter);
-      signal?.addEventListener(
-        "abort",
-        () => {
-          if (!job.waiters.delete(waiter)) return;
-          reject(new DOMException("aborted", "AbortError"));
-          this._maybeCancel(job);
-        },
-        { once: true },
-      );
-      if (signal?.aborted) {
-        job.waiters.delete(waiter);
-        reject(new DOMException("aborted", "AbortError"));
-        this._maybeCancel(job);
-      }
+      if (this._disposed || signal?.aborted) { reject(abortError()); return; }
+      const job = { spec, channel, priority: prefetch ? 0 : priority, underlay, onUpdate, prefetch, seq: this._seq++, controller: new AbortController(), resolve, reject, started: false };
+      signal?.addEventListener("abort", () => {
+        if (job.started) job.controller.abort();
+        else {
+          const i = this._queue.indexOf(job);
+          if (i >= 0) this._queue.splice(i, 1);
+          this.counters.aborted++;
+          reject(abortError());
+        }
+      }, { once: true });
+      this._queue.push(job);
+      this._pump();
     });
   }
 
-  /** Low-priority warm-up; never throws, never blocks foreground requests. */
-  prefetch(axis, indices, { channel = 0, stride = 1 } = {}) {
-    for (const index of indices) {
-      if (this._cache.has(keyOf(axis, index, channel, stride))) continue;
-      const job = this._job(axis, index, channel, stride, 0);
-      job.prefetch = true;
-    }
+  /** Low-priority warm-up of the cache; never throws. */
+  prefetchPlane(spec, { channel = 0 } = {}) {
+    this.loadPlane(spec, { channel, prefetch: true }).catch(() => {});
   }
 
   stats() {
     return {
-      planes: this._cache.size,
-      cacheMB: +(this._cacheBytes / 1e6).toFixed(1),
+      blocks: this._blocks.size,
+      cacheMB: +(this._blockBytes / 1e6).toFixed(1),
       inflight: this._running,
       queued: this._queue.length,
       ...this.counters,
@@ -123,202 +101,140 @@ export class PlaneClient {
 
   dispose() {
     this._disposed = true;
-    for (const job of this._jobs.values()) {
-      job.controller.abort();
-      for (const w of job.waiters) w.reject(new DOMException("disposed", "AbortError"));
-    }
-    this._jobs.clear();
-    this._queue = [];
-    this._cache.clear();
-    this._cacheBytes = 0;
+    for (const job of this._queue.splice(0)) job.reject(abortError());
+    this._blocks.clear();
+    this._blockBytes = 0;
   }
 
   // ------------------------------------------------------------------ internals
 
-  _job(axis, index, channel, stride, priority) {
-    const key = keyOf(axis, index, channel, stride);
-    let job = this._jobs.get(key);
-    if (job) {
-      if (priority > job.priority) {
-        job.priority = priority;
-        this._sortQueue();
-      }
-      return job;
-    }
-    job = {
-      key, axis, index, channel, stride, priority, prefetch: false,
-      waiters: new Set(), controller: new AbortController(), state: "queued", seq: this._seq = (this._seq ?? 0) + 1,
-    };
-    this._jobs.set(key, job);
-    this._queue.push(job);
-    this._sortQueue();
-    this._pump();
-    return job;
-  }
-
-  _sortQueue() {
-    this._queue.sort((a, b) => b.priority - a.priority || b.seq - a.seq); // newest foreground request first
-  }
-
-  _maybeCancel(job) {
-    if (job.waiters.size > 0 || job.prefetch) return;
-    if (job.state === "queued") {
-      this._queue = this._queue.filter((j) => j !== job);
-      this._jobs.delete(job.key);
-    } else {
-      job.controller.abort();
-    }
-    this.counters.aborted++;
-  }
-
+  /** The best queued job: highest priority, newest first (what is on screen now is what the user is waiting for). */
   _pump() {
     while (!this._disposed && this._running < this.maxInflight && this._queue.length) {
-      const job = this._queue.shift();
-      job.state = "running";
+      let best = 0;
+      for (let i = 1; i < this._queue.length; i++) {
+        const a = this._queue[i], b = this._queue[best];
+        if (a.priority > b.priority || (a.priority === b.priority && a.seq > b.seq)) best = i;
+      }
+      const job = this._queue.splice(best, 1)[0];
+      job.started = true;
       this._running++;
-      this._run(job).finally(() => {
-        this._running--;
-        this._jobs.delete(job.key);
-        this._pump();
-      });
+      this._run(job).then(job.resolve, (err) => {
+        if (err?.name === "AbortError") this.counters.aborted++;
+        else if (!job.prefetch) console.warn("[slice] plane request failed:", err);
+        job.reject(err?.name === "AbortError" ? abortError() : err);
+      }).finally(() => { this._running--; this._pump(); });
     }
   }
 
-  async _request(path, signal) {
-    let res = await this.fetchFn(this.baseUrl + path, { signal });
+  async _request(path, { signal, json } = {}) {
+    const init = () => (json === undefined
+      ? { signal }
+      : { signal, method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(json) });
+    let res = await this.fetchFn(this.baseUrl + path, init());
     if (res.status === 403 && this.refreshUrl) {
       this.baseUrl = await this.refreshUrl();
-      res = await this.fetchFn(this.baseUrl + path, { signal });
+      res = await this.fetchFn(this.baseUrl + path, init());
     }
     if (!res.ok) {
       let detail = "";
-      try { detail = (await res.json()).detail ?? ""; } catch { /* not json */ }
-      throw new PlaneError(detail || `HTTP ${res.status}`, res.status);
+      try { detail = (await res.json()).detail ?? ""; } catch (_) { /* not JSON */ }
+      throw new PlaneError(`${path.split("?")[0]}: ${detail || res.status}`, res.status);
     }
     return res;
   }
 
-  /**
-   * Whether to request `enc=zstd`. A body sent with `Content-Encoding: zstd` is only usable if
-   * fetch() decodes it; older embedded Chromium builds, proxies that drop the header and the like
-   * hand over the compressed bytes (the "plane size does not match its headers" failure). So in
-   * "auto" mode one tiny plane is fetched compressed first and its size checked; raw is the
-   * fallback and is always correct.
-   */
-  _useZstd() {
-    if (this.compression !== "auto") return Promise.resolve(this._zstd);
-    this._probe ??= this._probeZstd();
-    return this._probe;
-  }
-
-  async _probeZstd() {
-    let ok = false;
-    try {
-      const res = await this._request("xy/0?stride=8&enc=zstd");
-      const buf = await res.arrayBuffer();
-      const fmt = textureFormatFor(res.headers.get("X-Plane-Dtype"));
-      const w = parseInt(res.headers.get("X-Plane-Width"), 10);
-      const h = parseInt(res.headers.get("X-Plane-Height"), 10);
-      ok = !!fmt && buf.byteLength === w * h * fmt.bytes;
-    } catch {
-      ok = false;
+  _getBlock(channel, key) {
+    const k = `${channel}/${key}`;
+    const v = this._blocks.get(k);
+    if (v !== undefined) {
+      this._blocks.delete(k);
+      this._blocks.set(k, v); // LRU touch
     }
-    this._zstd = ok;
-    if (!ok) console.warn("[slice] compressed planes are not decoded on this connection; using raw planes");
-    return ok;
+    return v;
   }
 
-  _disableZstd() {
-    if (this._zstd) console.warn("[slice] a compressed plane arrived undecoded; switching to raw planes");
-    this._zstd = false;
-    this.compression = "off";
-  }
-
-  /** One request for one plane; throws PlaneError{sizeMismatch} when the body does not fit its headers. */
-  async _fetchPlane(job, zstd) {
-    const { axis, index, channel, stride } = job;
-    const qs = new URLSearchParams();
-    if (channel) qs.set("channel", String(channel));
-    if (stride !== 1) qs.set("stride", String(stride));
-    if (zstd) qs.set("enc", "zstd");
-    const res = await this._request(`${axis}/${index}${qs.size ? `?${qs}` : ""}`, job.controller.signal);
-    const buf = await res.arrayBuffer();
-    const dtype = res.headers.get("X-Plane-Dtype");
-    const fmt = textureFormatFor(dtype);
-    if (!fmt) throw new PlaneError(`Unsupported plane data type ${dtype}`);
-    const width = parseInt(res.headers.get("X-Plane-Width"), 10);
-    const height = parseInt(res.headers.get("X-Plane-Height"), 10);
-    const expected = width * height * fmt.bytes;
-    if (buf.byteLength !== expected) {
-      throw new PlaneError(
-        `Plane size does not match its headers: received ${buf.byteLength} bytes, expected ${expected} ` +
-        `(${width}x${height} ${dtype}); Content-Encoding: ${res.headers.get("Content-Encoding") ?? "none"}, ` +
-        `Content-Length: ${res.headers.get("Content-Length") ?? "?"}, requested ${zstd ? "zstd" : "raw"}`,
-        0,
-        { sizeMismatch: true },
-      );
+  _putBlock(channel, key, data) {
+    const k = `${channel}/${key}`;
+    const bytes = data ? data.byteLength : 64;
+    const old = this._blocks.get(k);
+    if (old !== undefined) this._blockBytes -= old ? old.byteLength : 64;
+    this._blocks.set(k, data);
+    this._blockBytes += bytes;
+    for (const [kk, v] of this._blocks) {
+      if (this._blockBytes <= this.maxCacheBytes || kk === k) break;
+      this._blocks.delete(kk);
+      this._blockBytes -= v ? v.byteLength : 64;
     }
-    return {
-      axis, index, channel, stride, width, height, dtype, data: new fmt.array(buf),
-      serverMs: parseFloat(res.headers.get("X-Plane-Server-Ms") ?? "0"),
-      source: res.headers.get("X-Plane-Source") ?? "",
-    };
   }
 
   async _run(job) {
-    const { axis, index, channel, stride } = job;
+    const { spec, channel, prefetch } = job;
+    const signal = job.controller.signal;
     const t0 = performance.now();
-    try {
-      const zstd = await this._useZstd();
-      let plane;
-      try {
-        plane = await this._fetchPlane(job, zstd);
-      } catch (err) {
-        if (!(err?.sizeMismatch && zstd)) throw err;
-        this._disableZstd(); // compressed bytes came through undecoded: retry this plane raw
-        plane = await this._fetchPlane(job, false);
+
+    const plan = await (await this._request("plan", { signal, json: spec })).json();
+    signal.throwIfAborted(); // (a fetch that does not honour the signal, or a plan that arrived as it was aborted)
+    this.counters.lastPlanMs = performance.now() - t0;
+    this.counters.lastServerPlanMs = plan.planMs ?? 0;
+    const fmt = textureFormatFor(plan.dtype);
+    if (!fmt) throw new PlaneError(`Unsupported data type ${plan.dtype}`);
+    const asm = prefetch ? null : new PlaneAssembler(plan, { underlay: job.underlay });
+    const keyOf = (gx, gy, gz) => `${gx},${gy},${gz}`;
+
+    // what the cache has goes in now; the rest is requested
+    const missing = [];
+    let cached = 0;
+    for (let i = 0; i < plan.blocks.length; i += 4) {
+      const gx = plan.blocks[i], gy = plan.blocks[i + 1], gz = plan.blocks[i + 2];
+      const data = this._getBlock(channel, keyOf(gx, gy, gz));
+      if (data !== undefined) { asm?.add(gx, gy, gz, data); cached++; }
+      else missing.push(gx, gy, gz, plan.blocks[i + 3]);
+    }
+    this.counters.cached += cached;
+    job.onUpdate?.(asm);
+    let first = performance.now() - t0;
+
+    if (missing.length) {
+      const res = await this._request("blocks", { signal, json: { blocks: missing, prefetch } });
+      let got = 0;
+      const parser = new BlockStreamParser({
+        Array: fmt.array,
+        blockBytes: plan.blockSize ** 3 * fmt.array.BYTES_PER_ELEMENT,
+        onBlock: (gx, gy, gz, data) => {
+          this._putBlock(channel, keyOf(gx, gy, gz), data);
+          asm?.add(gx, gy, gz, data);
+          if (!got++) first = performance.now() - t0;
+        },
+      });
+      if (res.body?.getReader) {
+        const reader = res.body.getReader();
+        try {
+          for (;;) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            signal.throwIfAborted();
+            this.counters.bytes += value.length;
+            parser.push(value);
+            job.onUpdate?.(asm);
+          }
+        } finally {
+          reader.cancel().catch(() => {}); // a no-op once the stream has ended; frees the connection when we stop early
+        }
+      } else {
+        const buf = new Uint8Array(await res.arrayBuffer());
+        this.counters.bytes += buf.length;
+        parser.push(buf);
+        job.onUpdate?.(asm);
       }
-      this.counters.fetches++;
-      this.counters.lastMs = performance.now() - t0;
-      this.counters.lastServerMs = plane.serverMs;
-      this.counters.lastSource = plane.source;
-      this._store(job.key, plane);
-      for (const w of job.waiters) w.resolve(plane);
-    } catch (err) {
-      const aborted = err?.name === "AbortError";
-      for (const w of job.waiters) w.reject(aborted ? new DOMException("aborted", "AbortError") : err);
-      if (!aborted && !job.prefetch) console.warn("[slice] plane request failed:", err);
-    } finally {
-      job.waiters.clear();
+      if (!parser.complete) throw new PlaneError("The block stream ended early");
+      this.counters.fetched += got;
     }
+    if (asm && !asm.complete) throw new PlaneError(`The image is incomplete: ${asm.pending} blocks missing`);
+    this.counters.loads++;
+    this.counters.lastMs = performance.now() - t0;
+    this.counters.lastFirstMs = first;
+    this.counters.lastBlocks = plan.blocks.length / 4;
+    return { plan, assembler: asm };
   }
-
-  _store(key, plane) {
-    const bytes = plane.data.byteLength;
-    if (bytes > this.maxCacheBytes) return;
-    this._cache.set(key, plane);
-    this._cacheBytes += bytes;
-    for (const [k, p] of this._cache) {
-      if (this._cacheBytes <= this.maxCacheBytes) break;
-      if (k === key) continue;
-      this._cache.delete(k);
-      this._cacheBytes -= p.data.byteLength;
-    }
-  }
-}
-
-/**
- * Prefetch plan around the plane being shown: a few planes ahead in the scroll
- * direction, one behind, and the first plane of the next slab when the cursor
- * is about to cross a chunk boundary (that is when the server decodes a new slab).
- */
-export function prefetchIndices(index, dir, size, chunk, { ahead = 4, behind = 1, boundaryMargin = 6 } = {}) {
-  const out = [];
-  const d = dir >= 0 ? 1 : -1;
-  for (let i = 1; i <= ahead; i++) out.push(index + d * i);
-  for (let i = 1; i <= behind; i++) out.push(index - d * i);
-  const local = index % chunk;
-  if (d > 0 && chunk - 1 - local <= boundaryMargin) out.push((Math.floor(index / chunk) + 1) * chunk);
-  if (d < 0 && local <= boundaryMargin) out.push(Math.floor(index / chunk) * chunk - 1);
-  return [...new Set(out)].filter((i) => i >= 0 && i < size);
 }

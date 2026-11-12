@@ -233,7 +233,13 @@
 
           <div class="field" id="mesh-field">
             <label for="mesh_file">Mesh file (.stl, .obj, .ply, \u2026)</label>
-            <input id="mesh_file" type="file" accept=".stl,.3mf,.ply,.obj,.glb" />
+            <input id="mesh_file" type="file" accept=".stl,.3mf,.ply,.obj,.glb,.gltf" />
+          </div>
+
+          <div class="field" id="texture-field" style="display:none">
+            <label for="texture_files">Texture files (optional)</label>
+            <input id="texture_files" type="file" multiple accept=".png,.jpg,.jpeg,.bmp,.tga,.tif,.tiff,.webp,.mtl,.bin" />
+            <div class="field-hint" id="texture-hint"></div>
           </div>
 
           <div class="field" id="pointcloud-field" style="display:none">
@@ -291,6 +297,7 @@
 
         tiffSection.style.display = source === "tiff" ? "" : "none";
         meshField.style.display = source === "mesh" || source === "tiff" ? "" : "none";
+        updateTextureField();
         pointCloudField.style.display = source === "pointcloud" ? "" : "none";
 
         spacingInputs.forEach(input => {
@@ -309,6 +316,26 @@
 
     srcTiffBtn.addEventListener("click", () => setSource("tiff"));
     srcMeshBtn.addEventListener("click", () => setSource("mesh"));
+
+    // --- texture files: for the mesh formats whose textures are separate files (OBJ, PLY, glTF) --------------------
+    const TEXTURE_HINTS = {
+      obj: "An OBJ names its material (.mtl) and its texture images; choose them here too (all at once). With only the image, choose just the image: it is used as the texture.",
+      ply: "Choose the texture image the PLY refers to.",
+      gltf: "A glTF refers to a .bin file and to texture images; choose them here too (all at once).",
+    };
+    function meshExtension() {
+      const f = document.getElementById("mesh_file").files[0];
+      return f ? f.name.split(".").pop().toLowerCase() : "";
+    }
+    function updateTextureField() {
+      const field = document.getElementById("texture-field");
+      const ext = meshExtension();
+      const shown = (source === "mesh" || source === "tiff") && ext in TEXTURE_HINTS;
+      field.style.display = shown ? "" : "none";
+      document.getElementById("texture-hint").textContent = shown ? TEXTURE_HINTS[ext] : "";
+      if (!shown) document.getElementById("texture_files").value = ""; // (a GLB or 3MF holds its texture inside; STL has none)
+    }
+    document.getElementById("mesh_file").addEventListener("change", updateTextureField);
     srcPointCloudBtn.addEventListener("click", () => setSource("pointcloud"));
 
     tiffModeZipBtn.addEventListener("click", () => setTiffMode("zip"));
@@ -538,6 +565,13 @@
         if (meshFile && source !== "mesh") {
             fd.append("mesh_file", meshFile);
             filesToTrack.push(meshFile);
+        }
+        if (meshFile && (source === "mesh" || source === "tiff")) {
+            // the texture files that come with the mesh (the API calls the field differently for a volume's mesh)
+            for (const tex of document.getElementById("texture_files").files) {
+                fd.append(source === "mesh" ? "texture_files" : "mesh_texture_files", tex);
+                filesToTrack.push(tex);
+            }
         }
         const thumbnailFile = document.getElementById("thumbnail_file").files[0];
         if (thumbnailFile) {

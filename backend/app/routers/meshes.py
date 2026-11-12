@@ -1,10 +1,14 @@
+import os
 import shutil
+import tempfile
+import zipfile
 from pathlib import Path
 from typing import List, Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, UploadFile, File, Form, Request
 from fastapi.responses import FileResponse
 from sqlmodel import Session, select
+from starlette.background import BackgroundTask
 
 import re
 from ..database import get_session, engine
@@ -13,13 +17,11 @@ from ..schemas import MeshRead, AssetStatusRead, AssetUpdate, AccessGrant, Grant
 from ..deps import file_token_revoked, get_current_user, require_editor
 from ..security import create_file_token, decode_token
 from ..config import settings
-from .. import workdir
+from .. import workdir, jobs
 from ..organize import apply_asset_update, split_tags
-from ..helpers import read_thumbnail, write_thumbnail, store_thumbnail, remove_thumbnail, thumbnail_response
+from ..helpers.mesh import EXTRA_DIR, MAX_EXTRA_FILES, convert_mesh_to_nxz, download_files, extra_name, extra_suffixes, list_extras
 from ..utils import SLUG_RE, _now  # shared slug validation + timestamp helper
 
-import os
-import pymeshlab
 
 router = APIRouter(prefix="/api/meshes", tags=["meshes"])
 
@@ -115,11 +117,46 @@ def delete_volume_mesh(session: Session, volume) -> None:
     session.add(volume)
 
 
+def _save_extras(mesh_dir: Path, source_ext: str, files: Optional[List[UploadFile]]) -> List[str]:
+    """Stores the files uploaded with a mesh (texture images, an OBJ's .mtl, a glTF's .bin) in mesh_dir/_extra, under
+    cleaned-up names. Raises ValueError, with a message for the person, for a file the format has no use for."""
+    files = [f for f in (files or []) if f is not None and f.filename]
+    if not files:
+        return []
+    allowed = extra_suffixes(source_ext)
+    if not allowed:
+        raise ValueError(f"A .{source_ext} file keeps its texture inside (or has none), so files uploaded with it are not used. "
+                         "Textures can come with OBJ, PLY and glTF meshes")
+    if len(files) > MAX_EXTRA_FILES:
+        raise ValueError(f"At most {MAX_EXTRA_FILES} files can come with a mesh")
+    limit = settings.MESH_EXTRA_MAX_MB * 1024 * 1024
+    target = mesh_dir / EXTRA_DIR
+    target.mkdir(exist_ok=True)
+    saved: List[str] = []
+    for f in files:
+        name = extra_name(f.filename, source_ext)
+        if name is None:
+            raise ValueError(f"{f.filename}: a .{source_ext} mesh can come with {', '.join(sorted(allowed))} files")
+        if name.lower() in (x.lower() for x in saved):  # (case-insensitive: some file systems would merge them)
+            raise ValueError(f"Two files are called {name}")
+        written = 0
+        with open(target / name, "wb") as out:
+            while chunk := f.file.read(1 << 20):
+                written += len(chunk)
+                if written > limit:
+                    raise ValueError(f"{f.filename} is larger than {settings.MESH_EXTRA_MAX_MB} MB")
+                out.write(chunk)
+        saved.append(name)
+    return saved
+
+
 def attach_mesh_to_volume(session: Session, volume, mesh_file: Optional[UploadFile], editor: User,
                           background_tasks: BackgroundTasks,
-                          mesh_staged: Optional[workdir.StagedUpload] = None) -> Mesh:
+                          mesh_staged: Optional[workdir.StagedUpload] = None,
+                          texture_files: Optional[List[UploadFile]] = None) -> Mesh:
     """Stores the uploaded mesh (`mesh_file`, or `mesh_staged`: a file nginx already wrote to
-    disk) as the volume's mesh (replacing any previous one) and queues the usual mesh conversion."""
+    disk) as the volume's mesh (replacing any previous one) and queues the usual mesh conversion
+    `texture_files`: images (and an OBJ's .mtl) that come with an OBJ, PLY or glTF mesh."""
     source_ext = Path((mesh_staged.filename if mesh_staged else mesh_file.filename) or "").suffix.lstrip(".").lower() or "bin"
     # The previous mesh is only removed once the new upload is saved (below): if saving fails, the
     # volume keeps the mesh it had. Until then it still exists, so the new mesh gets another slug.
@@ -129,7 +166,8 @@ def attach_mesh_to_volume(session: Session, volume, mesh_file: Optional[UploadFi
     try:
         workdir.prepare_work_dir("meshes", slug, mesh_dir)  # scratch for the conversion's temp files
         # multipart: copied into the data folder by the background task; staged: renamed there now
-        upload_fd = workdir.accept_upload(mesh_file, mesh_staged, mesh_dir / f"_upload.{source_ext}")
+        _save_extras(mesh_dir, source_ext, texture_files)  # (first: nothing is left open if a file is refused)
+        upload_fd = workdir.accept_upload(mesh_file, mesh_staged, mesh_dir / f"_upload.{source_ext}", jobs.enabled())
     except Exception as exc:  # noqa: BLE001
         shutil.rmtree(mesh_dir, ignore_errors=True)
         workdir.discard_job("meshes", slug)
@@ -146,7 +184,7 @@ def attach_mesh_to_volume(session: Session, volume, mesh_file: Optional[UploadFi
     session.add(volume)
     session.commit()
     session.refresh(mesh)
-    background_tasks.add_task(_process_mesh_upload, mesh.id, str(mesh_dir), upload_fd)
+    jobs.dispatch(background_tasks, session, "mesh", mesh, _process_mesh_upload, mesh.id, str(mesh_dir), upload_fd)
     return mesh
 
 
@@ -158,6 +196,30 @@ def volume_mesh_file(mesh: Mesh) -> Path:
 def volume_mesh_source(mesh: Mesh) -> Path:
     """The originally uploaded file of an attached mesh."""
     return _mesh_dir(mesh.slug) / f"_upload.{mesh.file_extension}"
+
+
+def original_download(mesh: Mesh, name: str, headers: dict) -> FileResponse:
+    """The download of a mesh as it was uploaded: the file itself, or, when texture files came with it, a zip of the
+    mesh and those files under the names the mesh asks for (so that the unpacked folder opens in a 3D program).
+    `name` is what the download is called, without the extension."""
+    m_dir = _mesh_dir(mesh.slug)
+    upload_path = m_dir / f"_upload.{mesh.file_extension}"
+    if not upload_path.exists():
+        raise HTTPException(status_code=404, detail="Original upload file not found")
+    extras = list_extras(m_dir)
+    if not extras:
+        return FileResponse(upload_path, filename=f"{name}.{mesh.file_extension}", headers=headers)
+    tmp = tempfile.NamedTemporaryFile(prefix="mesh-", suffix=".zip", delete=False)
+    try:
+        with zipfile.ZipFile(tmp, "w", zipfile.ZIP_STORED, allowZip64=True) as z:  # (stored: the pictures are compressed already)
+            for arcname, path in download_files(upload_path, f"{name}.{mesh.file_extension}", extras):
+                z.write(path, arcname)
+    except Exception:
+        tmp.close()
+        os.unlink(tmp.name)
+        raise
+    return FileResponse(tmp.name, filename=f"{name}.zip", media_type="application/zip", headers=headers,
+                        background=BackgroundTask(os.unlink, tmp.name))
 
 
 # ---------- Gallery ----------
@@ -197,6 +259,8 @@ def create_mesh(
     mesh_file: Optional[UploadFile] = File(None, description="Any common mesh format: obj, stl, ply, off, dae, glb, gltf, 3mf, ..."),
     thumbnail_file: Optional[UploadFile] = File(None, description="Optional PNG/JPEG/WebP thumbnail"),
     mesh_upload_id: Optional[str] = Form(None, description="Instead of mesh_file: an id from PUT /api/uploads/mesh"),
+    texture_files: List[UploadFile] = File([], description="Texture images that come with an OBJ, PLY or glTF mesh (and an OBJ's .mtl, a glTF's .bin). "
+                                                            "A mesh whose file does not hold its texture needs them to be shown textured"),
     session: Session = Depends(get_session),
     editor: User = Depends(require_editor),
 ):
@@ -219,8 +283,9 @@ def create_mesh(
     try:
         workdir.prepare_work_dir("meshes", slug, mesh_dir)  # scratch for the conversion's temp files
         thumbnail_name = write_thumbnail(mesh_dir, *thumbnail) if thumbnail else None
+        _save_extras(mesh_dir, source_ext, texture_files)  # (first: nothing is left open if a file is refused)
         # multipart: copied into the data folder by the background task; staged: renamed there now
-        upload_fd = workdir.accept_upload(mesh_file, staged, mesh_dir / f"_upload.{source_ext}")
+        upload_fd = workdir.accept_upload(mesh_file, staged, mesh_dir / f"_upload.{source_ext}", jobs.enabled())
     except Exception as exc:  # noqa: BLE001
         shutil.rmtree(mesh_dir, ignore_errors=True)
         workdir.discard_job("meshes", slug)
@@ -235,7 +300,7 @@ def create_mesh(
     session.commit()
     session.refresh(mesh)
 
-    background_tasks.add_task(_process_mesh_upload, mesh.id, str(mesh_dir), upload_fd)
+    jobs.dispatch(background_tasks, session, "mesh", mesh, _process_mesh_upload, mesh.id, str(mesh_dir), upload_fd)
 
     return _mesh_read(mesh, can_download=True)
 
@@ -254,8 +319,8 @@ def _process_mesh_upload(mesh_id: int, mesh_dir_str: str, upload_fd: int) -> Non
             session.add(mesh)
             session.commit()
 
-        # The original upload (kept for downloads) already sits in mesh_dir and the
-        # .nxz is compressed straight into it; only the intermediate .ply/.nxs
+        # The original upload (kept for downloads) already sits in mesh_dir, with the texture files that came with it
+        # (mesh_dir/_extra), and the .nxz is compressed straight into it; only the intermediate .ply/.nxs
         # files go to work_dir (the scratch folder, discarded afterward).
         work_dir = _work_dir(mesh.slug)
         try:
@@ -263,27 +328,9 @@ def _process_mesh_upload(mesh_id: int, mesh_dir_str: str, upload_fd: int) -> Non
             input_file = mesh_dir / f"_upload.{mesh.file_extension}"
             workdir.save_detached(upload_fd, input_file)
             log("Converting to nxz file")
-            ms = pymeshlab.MeshSet()
-            ms.load_new_mesh(str(input_file))
-            log("Loaded mesh")
-            for i in range(ms.mesh_number()):
-                ms.set_current_mesh(i)
-                c_mesh = ms.current_mesh()
-                if c_mesh.has_vertex_tex_coord():
-                    ms.compute_texcoord_transfer_vertex_to_wedge()
-
-                if c_mesh.texture_number() > 0:
-                    tex_filename = f"texture_{i}.png"
-                    tex_path = os.path.join(work_dir, tex_filename)
-                    c_mesh.texture(0).save(tex_path)
-                    ms.set_texture_per_mesh(textname=tex_path)
-                    log(f"Saved texture {i}")
-
-            if ms.mesh_number() > 1:
-                ms.generate_by_merging_visible_meshes(mergevisible=True, deletelayer=True)
-            log("Before saving")
-            ms.save_current_mesh(str(mesh_path(mesh_dir)), save_textures=True, pow_2_textures=True, save_vertex_normal=True)
-            log("Saved that mesh")
+            # MeshLab reads the mesh in a process of its own (a crash fails this mesh, not the server), nxsbuild embeds
+            # the textures: see helpers/mesh.py
+            convert_mesh_to_nxz(work_dir, mesh_dir, log)
             mesh.status = AssetStatus.ready
             log("Ready")
         except Exception as exc:  # noqa: BLE001 - the failure message IS the point, shown to the user
@@ -509,10 +556,7 @@ def serve_mesh_file(
     cache_headers = {"Cache-Control": f"public, max-age={settings.FILE_TOKEN_EXPIRE_MINUTES * 60}, immutable"}
 
     if kind == "mesh-download":
-        upload_path = m_dir / f"_upload.{mesh.file_extension}"
-        if not upload_path.exists():
-            raise HTTPException(status_code=404, detail="Original upload file not found")
-        return FileResponse(upload_path, filename=f"{mesh.slug}.{mesh.file_extension}", headers=cache_headers)
+        return original_download(mesh, mesh.slug, cache_headers)
 
     # Optional support for ?texture=foo.png on the base URL
     if texture:

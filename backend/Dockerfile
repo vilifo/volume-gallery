@@ -42,6 +42,15 @@ RUN git clone --depth 1 --branch 2025.07 https://github.com/cnr-isti-vclab/vcgli
     && mkdir -p /opt/nexus/bin /opt/nexus/lib \
     && cp build/src/nxsbuild/nxsbuild build/src/nxsedit/nxscompress /opt/nexus/bin/ \
     && ldd /opt/nexus/bin/nxsbuild /opt/nexus/bin/nxscompress | awk '/=> \//{print $3}' \
+       | grep -v -E '/lib(c|m)\.so' | sort -u | xargs -I{} cp -L {} /opt/nexus/lib/ \
+    # Qt loads its image codecs as plugins (dlopen), which ldd cannot see. nxsbuild stores every texture as a JPEG
+    # through QImageWriter; without the JPEG plugin that write fails silently and the .nxz names its textures
+    # without containing them (the viewer then asks for a byte range past the end of the file: HTTP 416).
+    && JPEG_PLUGIN="$(find /usr/lib -name libqjpeg.so -path '*imageformats*' | head -n 1)" \
+    && test -n "$JPEG_PLUGIN" \
+    && mkdir -p /opt/nexus/plugins/imageformats \
+    && cp -L "$JPEG_PLUGIN" /opt/nexus/plugins/imageformats/ \
+    && ldd "$JPEG_PLUGIN" | awk '/=> \//{print $3}' \
        | grep -v -E '/lib(c|m)\.so' | sort -u | xargs -I{} cp -L {} /opt/nexus/lib/
 
 # kiln-render: built from the v0.5.0 GitHub tag + our patch (backend/kiln-patches).
@@ -111,8 +120,12 @@ WORKDIR /opt
 # /opt/nexus/lib so they cannot clash with anything else in the image.
 COPY --from=builder /opt/nexus/bin/ /usr/local/bin/
 COPY --from=builder /opt/nexus/lib/ /opt/nexus/lib/
+COPY --from=builder /opt/nexus/plugins/ /opt/nexus/plugins/
+# Where Qt looks for its image codecs (the JPEG one is what nxsbuild writes the mesh textures with)
+ENV QT_PLUGIN_PATH=/opt/nexus/plugins
 RUN echo /opt/nexus/lib > /etc/ld.so.conf.d/nexus.conf && ldconfig \
-    && ldd /usr/local/bin/nxsbuild /usr/local/bin/nxscompress | (! grep "not found")
+    && ldd /usr/local/bin/nxsbuild /usr/local/bin/nxscompress | (! grep "not found") \
+    && ldd /opt/nexus/plugins/imageformats/libqjpeg.so | (! grep "not found")
 
 # Create the vendor directories first
 RUN mkdir -p /frontend/vendor/3dhop \
