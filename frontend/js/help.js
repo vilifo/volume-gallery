@@ -130,7 +130,7 @@ function volumeViewer() {
 function meshViewer(role) {
   const dl = role === "reader"
     ? "<strong>Download</strong> appears only if you were allowed to download the mesh."
-    : "<strong>Download</strong> saves the original mesh file.";
+    : "<strong>Download</strong> saves the original mesh file (a zip with its texture files, if it came with some).";
   return `<p>Drag with the left button to rotate the model, drag with the right or middle button (or Ctrl + left drag) to pan, and scroll (or pinch) to zoom. <code>H</code> resets the view and <code>Esc</code> switches off the active measuring tool. The toolbar offers:</p>
     <ul>
       <li><strong>Measure</strong>: distances between points on the surface.</li>
@@ -150,7 +150,8 @@ function uploading() {
   return `<p>Open <strong>Upload</strong> in the side menu and choose what you are adding:</p>
     <ul>
       <li><strong>TIFF stack (.zip or multiple files)</strong>: single-slice <code>.tif</code>/<code>.tiff</code> files, one per Z position. Slice order follows the filenames naturally (for example <code>slice_0001.tif</code>, <code>slice_0002.tif</code>), so use leading zeros. The server converts the stack to kiln sharded binary with out-of-core processing, then deletes the extracted TIFF files.</li>
-      <li><strong>Mesh file</strong>: <code>.stl</code>, <code>.3mf</code>, <code>.ply</code>, <code>.obj</code> or <code>.glb</code>. Added to a volume upload, a mesh becomes the volume\u2019s attached mesh.</li>
+      <li><strong>Mesh file</strong>: <code>.stl</code>, <code>.3mf</code>, <code>.ply</code>, <code>.obj</code>, <code>.glb</code> or <code>.gltf</code>. Added to a volume upload, a mesh becomes the volume\u2019s attached mesh.
+        <br /><strong>Textures</strong>: a <code>.glb</code> or <code>.3mf</code> holds its texture inside, and an <code>.stl</code> has none. An <code>.obj</code>, a <code>.ply</code> or a <code>.gltf</code> points at image files that are separate, so a <em>Texture files</em> field appears when you choose one: pick the images (and for an OBJ its <code>.mtl</code>, for a glTF its <code>.bin</code>) at the same time. If a mesh has texture coordinates but you give only one image, that image is used as its texture; if no image is found the mesh is shown without a texture, and the conversion log says so. Several textures are packed into one. Textures larger than 8192 pixels are scaled down. The files you add are kept with the mesh, and <strong>Download</strong> then gives a zip of the mesh and them.</li>
       <li><strong>Point cloud file</strong>: <code>.laz</code>, <code>.las</code>, <code>.ply</code>, <code>.xyz</code>, <code>.ptx</code>, <code>.pts</code> or <code>.e57</code>.</li>
     </ul>
     <p>Give every item a <strong>slug</strong> (the short name used in URLs: lowercase letters, digits, <code>-</code> and <code>_</code>, 2\u201363 characters, starting with a letter or digit) and a title. A description and a <strong>thumbnail</strong> (PNG, JPEG or WebP, 5 MB by default) are optional. The title, description, tags and folder can be changed later with <strong>Edit</strong> in the gallery.</p>

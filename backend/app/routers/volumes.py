@@ -210,6 +210,7 @@ def create_volume(
     ),
     spacing: Annotated[list[str], Form()] = None,
     mesh_file: Optional[UploadFile] = File(None),
+    mesh_texture_files: Optional[list[UploadFile]] = File(None),  # texture images etc. that come with an OBJ / PLY / glTF mesh
     thumbnail_file: Optional[UploadFile] = File(None, description="Optional PNG/JPEG/WebP thumbnail"),
     # Instead of the file fields above: ids returned by PUT /api/uploads/volume|mesh, for files
     # nginx has already written to disk (see routers/uploads.py). Order matters for tiff_upload_ids.
@@ -310,7 +311,7 @@ def create_volume(
     mesh = None
     if mesh_file is not None or staged_mesh is not None:
         try:
-            mesh = attach_mesh_to_volume(session, volume, mesh_file, editor, background_tasks, staged_mesh)
+            mesh = attach_mesh_to_volume(session, volume, mesh_file, editor, background_tasks, staged_mesh, mesh_texture_files)
         except Exception:
             workdir.drop_staged(moves)
             if upload_fd is not None:
@@ -421,6 +422,7 @@ def upload_or_replace_mesh(
     volume_id: int,
     background_tasks: BackgroundTasks,
     mesh_file: Optional[UploadFile] = File(None),
+    texture_files: Optional[list[UploadFile]] = File(None),  # texture images etc. that come with an OBJ / PLY / glTF mesh
     mesh_upload_id: Optional[str] = Form(None),  # instead of mesh_file: see routers/uploads.py
     session: Session = Depends(get_session),
     editor: User = Depends(require_editor),
@@ -431,7 +433,7 @@ def upload_or_replace_mesh(
     if not volume:
         raise HTTPException(status_code=404, detail="Volume not found")
     staged = workdir.claim_upload(mesh_upload_id, "mesh", editor.id) if mesh_upload_id else None
-    mesh = attach_mesh_to_volume(session, volume, mesh_file, editor, background_tasks, staged)
+    mesh = attach_mesh_to_volume(session, volume, mesh_file, editor, background_tasks, staged, texture_files)
     session.refresh(volume)
     return _volume_read(volume, mesh)
 
@@ -1016,14 +1018,10 @@ def serve_mesh_file(
         raise HTTPException(status_code=404, detail="Not found")
     mesh = get_volume_mesh(session, volume_id)
     mesh_path = volume_mesh_source(mesh)
-    filename = f"{volume.slug}.{mesh.file_extension}"
     if mesh_path is None or not mesh_path.exists():
         raise HTTPException(status_code=404, detail="Not found")
-    return FileResponse(
-        mesh_path,
-        filename=filename,
-        headers={"Cache-Control": f"public, max-age={settings.FILE_TOKEN_EXPIRE_MINUTES * 60}, immutable"},
-    )
+    from .meshes import original_download  # (the mesh, or a zip of it and the texture files that came with it)
+    return original_download(mesh, volume.slug, {"Cache-Control": f"public, max-age={settings.FILE_TOKEN_EXPIRE_MINUTES * 60}, immutable"})
 
 
 @router.get("/{volume_id}/mesh-view-file/{token}")

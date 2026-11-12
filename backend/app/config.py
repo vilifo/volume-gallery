@@ -85,6 +85,11 @@ class Settings:
     CONVERTER_TIMEOUT_SECONDS: float = float(os.environ.get("VG_CONVERTER_TIMEOUT_HOURS", "24")) * 3600  # 0 = no limit
     NXSBUILD_BIN: str = os.environ.get("VG_NXSBUILD_BIN", "nxsbuild")
     NXSCOMPRESS_BIN: str = os.environ.get("VG_NXSCOMPRESS_BIN", "nxscompress")
+    # Longest side, in pixels, of a mesh texture: bigger ones are scaled down while the mesh is converted (browsers and
+    # graphics cards limit the size of a texture; 8192 is safe nearly everywhere). 0 keeps them as they are.
+    MESH_MAX_TEXTURE_SIZE: int = int(os.environ.get("VG_MESH_MAX_TEXTURE_SIZE", "8192"))
+    # Largest file (a texture image, a .mtl) that may be uploaded together with a mesh, in MB
+    MESH_EXTRA_MAX_MB: int = int(os.environ.get("VG_MESH_EXTRA_MAX_MB", "256"))
     POTREE_CONVERTER_BIN: str = os.environ.get("VG_POTREE_CONVERTER_BIN", "PotreeConverter") # Must be the full path to the PotreeConverter binary
     if not os.path.exists(POTREE_CONVERTER_BIN):
         POTREE_CONVERTER_BIN = POTREE_CONVERTER_BIN.replace("\\", "/")
