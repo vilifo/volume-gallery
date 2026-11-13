@@ -2,7 +2,7 @@
 // with a small picture) and come back to it later. Not modal. Bookmarks can also be used as the views of a
 // camera path (see the Animate panel).
 
-import { openFloatingPanel } from "/js/floating-panel.js?v=org2";
+import { openFloatingPanel } from "./floating-panel.js";
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 

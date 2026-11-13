@@ -77,6 +77,18 @@ RUN sed -i 's/\r$//' /tmp/kiln-patches/*.patch \
     && grep -q "getFullOrbitState" lib/kiln-render.js \
     && grep -q 'hSign = this.upAxis.startsWith("-") ? 1 : -1' lib/kiln-render.js
 
+# The frontend, bundled with webpack (frontend/webpack.config.js): every file gets a hash of its content in its
+# name, so browsers never hold a stale copy and the pages need no ?v=... cache busting. The patched kiln-render
+# from the `kiln` stage is bundled into the volume page; it is copied with the chunks it loads on demand
+# (the Zarr codecs: blosc, lz4, zstd), which webpack splits into files of their own.
+FROM node:22-slim AS frontend
+WORKDIR /frontend
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci --no-audit --no-fund
+COPY frontend ./
+COPY --from=kiln /kiln/lib/*.js ./vendor/kiln-render/lib/
+RUN npm run build
+
 FROM python:3.12-slim
 
 ENV PYTHONUNBUFFERED=1 \
@@ -162,13 +174,11 @@ COPY backend/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY backend/app ./app
-COPY frontend /frontend
+# The bundled pages and scripts (the vendor directories above are not part of it: the Potree and 3DHOP
+# libraries the viewer pages load as classic scripts)
+COPY --from=frontend /frontend/dist /frontend
 # Default branding (branding.toml + logo); docker-compose mounts ./branding over it.
 COPY branding /branding
-
-# Patched kiln-render from the `kiln` stage. Copied after `COPY frontend` so it
-# always wins over any frontend/vendor/kiln-render copy in the build context.
-COPY --from=kiln /kiln/lib/kiln-render.js /frontend/vendor/kiln-render/lib/kiln-render.js
 
 # /processing is the mount point for the optional scratch directory (set
 # VG_PROCESSING_DIR=/processing to use it, see the README). No VOLUME for it:

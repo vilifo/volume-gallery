@@ -2,7 +2,7 @@
 // TIFF (written here: uncompressed, 8-bit grey / 8-bit RGB for what is displayed, and the raw 8/16-bit
 // integer or 32-bit float voxel values of a slice).
 
-import { openFloatingPanel } from "/js/floating-panel.js?v=org2";
+import { openFloatingPanel } from "./floating-panel.js";
 
 // ------------------------------------------------------------------------------------- TIFF
 

@@ -1,0 +1,414 @@
+// The page script of manage.html (it was an inline <script type="module"> there). Bundled by webpack.config.js.
+import { api, requireLogin, getRole, getUsername, renderShell, wireLogout, formatBytes } from "../js/api.js";
+import { pageHint } from "../js/help.js";
+import { folderIndex, detailsFormHtml, saveDetailsForm } from "../js/organize.js";
+
+requireLogin();
+const role = getRole();
+if (role !== "editor" && role !== "admin") window.location.href = "/index.html";
+
+const params = new URLSearchParams(window.location.search);
+const kind = params.get("kind") || "volume"; // "volume" | "mesh" | "pointcloud"
+const itemId = params.get("id");
+
+// Dispatch table so the rest of this page can stay kind-agnostic.
+const KIND = {
+  volume: {
+    label: "Volume",
+    get: (id) => api.getVolume(id),
+    listAccess: (id) => api.listAccess(id),
+    grantAccess: (id, userId, canDownload) => api.grantAccess(id, userId, canDownload),
+    revokeAccess: (id, userId) => api.revokeAccess(id, userId),
+    del: (id) => api.deleteVolume(id),
+  },
+  mesh: {
+    label: "Mesh",
+    get: (id) => api.getMesh(id),
+    listAccess: (id) => api.listMeshAccess(id),
+    grantAccess: (id, userId, canDownload) => api.grantMeshAccess(id, userId, canDownload),
+    revokeAccess: (id, userId) => api.revokeMeshAccess(id, userId),
+    del: (id) => api.deleteMesh(id),
+  },
+  pointcloud: {
+    label: "Point Cloud",
+    get: (id) => api.getPointCloud(id),
+    listAccess: (id) => api.listPointCloudAccess(id),
+    grantAccess: (id, userId, canDownload) => api.grantPointCloudAccess(id, userId, canDownload),
+    revokeAccess: (id, userId) => api.revokePointCloudAccess(id, userId),
+    del: (id) => api.deletePointCloud(id),
+  },
+}[kind];
+
+document.getElementById("shell").innerHTML = `
+  ${renderShell("gallery", role, getUsername())}
+  <main><div id="content"></div></main>
+`;
+wireLogout();
+
+const content = document.getElementById("content");
+
+// What this item takes on disk, by kind of file. Measured on the server (the first time can take a
+// moment for a big dataset), so it fills in after the rest of the page is there.
+async function loadStorageBox(refresh = false) {
+  const box = document.getElementById("storage-box");
+  if (!box) return;
+  let s;
+  try {
+    s = await api.assetStorage(kind, itemId, refresh);
+  } catch (err) {
+    box.textContent = `Disk usage is not available: ${err.message}`;
+    return;
+  }
+  const biggest = Math.max(1, ...s.entries.map((e) => e.bytes));
+  const rows = s.entries
+    .map(
+      (e) => `<tr>
+        <td>${escapeHtml(e.label)}</td>
+        <td class="mono" style="text-align:right">${e.files}</td>
+        <td class="mono" style="text-align:right" title="${escapeHtml(formatBytes(e.apparent_bytes))} of file contents">${formatBytes(e.bytes)}</td>
+        <td style="width:30%"><div style="height:8px;background:var(--panel-raised);border:1px solid var(--line);border-radius:2px;overflow:hidden"><i style="display:block;height:100%;width:${Math.max(1, Math.round((e.bytes / biggest) * 100))}%;background:var(--accent)"></i></div></td>
+      </tr>`
+    )
+    .join("");
+  const notes = [];
+  if (s.raw_bytes && s.ratio) {
+    notes.push(`The full-resolution voxels would take ${formatBytes(s.raw_bytes)} uncompressed; the stored bricks are ${s.ratio}\u00d7 smaller.`);
+  }
+  if (s.disk) {
+    const share = s.data_bytes ? Math.round((s.bytes / s.data_bytes) * 100) : null;
+    notes.push(
+      `${share != null ? `This is ${share}% of the ${formatBytes(s.data_bytes)} taken by all ${KIND.label.toLowerCase()}s. ` : ""}The data disk has ${formatBytes(s.disk.free)} free of ${formatBytes(s.disk.total)}.`
+    );
+  }
+  box.className = "";
+  box.innerHTML = `
+    <table style="max-width:640px">
+      <thead><tr><th>Kind of file</th><th style="text-align:right">Files</th><th style="text-align:right">On disk</th><th></th></tr></thead>
+      <tbody>${rows || `<tr><td colspan="4" class="dim">No files yet.</td></tr>`}</tbody>
+      <tfoot><tr><td><strong>Total</strong></td><td class="mono" style="text-align:right">${s.files}</td><td class="mono" style="text-align:right"><strong>${formatBytes(s.bytes)}</strong></td><td></td></tr></tfoot>
+    </table>
+    ${notes.map((n) => `<p class="dim" style="font-size:0.9em;margin:0.5em 0 0">${escapeHtml(n)}</p>`).join("")}
+    <p style="margin-top:0.6em"><button type="button" id="storage-refresh">Measure again</button></p>`;
+  document.getElementById("storage-refresh").addEventListener("click", (e) => {
+    e.target.disabled = true;
+    loadStorageBox(true);
+  });
+}
+
+async function load() {
+  const [item, granted, allUsers, shares, shareCfg, folders] = await Promise.all([
+    KIND.get(itemId),
+    KIND.listAccess(itemId),
+    api.listUsers().catch(() => []), // editors may not have list-users; fall back gracefully
+    api.listShares(kind, itemId).catch(() => []),
+    api.suggestShareCode().catch(() => ({ min_length: 8, max_length: 24, suggested_code: "" })),
+    api.listFolders().catch(() => []),
+  ]);
+
+  const grantedIds = new Set(granted.map((u) => u.id));
+  const readerCandidates = allUsers.filter((u) => u.role === "reader" && !grantedIds.has(u.id));
+
+  content.innerHTML = `
+    <h1>${escapeHtml(item.title)}</h1>
+    <p class="subtitle mono">${KIND.label} \u00b7 ${escapeHtml(item.slug)}</p>
+    ${pageHint("manage", role)}
+    <h2>Details</h2>
+    <div class="details-form">
+      ${detailsFormHtml(item, folderIndex(folders), "details")}
+      <p class="dim" style="font-size:0.85em;margin-top:-0.4em">The slug (<code>${escapeHtml(item.slug)}</code>) names the item\u2019s folder on the server and cannot be changed.</p>
+      <button type="button" id="details-save" class="primary">Save details</button>
+    </div>
+    ${
+      item.status !== "ready"
+        ? `<div class="${item.status === "failed" ? "error-box" : "dim"}" style="margin-bottom:1.2em">
+            <strong>${item.status === "failed" ? "Processing failed" : "Still processing"}</strong>
+            ${item.status_log && item.status_log.length
+              ? `<div class="mono" style="margin-top:0.4em;font-size:0.85em;white-space:pre-wrap">${escapeHtml(item.status_log.join("\n"))}</div>`
+              : ""}
+          </div>`
+        : ""
+    }
+
+    <h2>Reader access</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>User</th>
+          ${kind === "mesh" ? "<th>Can download</th>" : ""}
+          <th></th>
+        </tr>
+      </thead>
+      <tbody id="granted-body">
+        ${granted
+          .map(
+            (u) => `<tr>
+              <td>${escapeHtml(u.username)}</td>${kind === "mesh" ? `
+              <td>
+                <label class="cd-toggle">
+                  <input type="checkbox" data-cd-toggle="${u.id}" ${u.can_download ? "checked" : ""}>
+                  download
+                </label>
+              </td>` : ""}
+              <td><button class="danger" data-revoke="${u.id}">Revoke</button></td>
+            </tr>`
+          )
+          .join("") || `<tr><td colspan="${kind === "mesh" ? 3 : 2}" class="dim">No readers granted yet.</td></tr>`}
+      </tbody>
+    </table>
+
+    ${
+      readerCandidates.length
+        ? `<div class="field" style="margin-top:1em;max-width:360px">
+            <label for="grant-select">Grant access to</label>
+            <div style="display:flex;gap:0.5em;align-items:center">
+              <select id="grant-select">
+                ${readerCandidates.map((u) => `<option value="${u.id}">${escapeHtml(u.username)}</option>`).join("")}
+              </select>
+              ${kind === "mesh" ? `<label class="cd-toggle"><input type="checkbox" id="grant-cd"> download</label>` : ""}
+              <button id="grant-btn" class="primary">Grant</button>
+            </div>
+          </div>`
+        : `<p class="dim" style="margin-top:1em">${allUsers.length ? "All readers already have access." : "Sign in as admin to see the full user list here."}</p>`
+    }
+
+    <h2 style="margin-top:2em">Time-limited share links</h2>
+    <p class="dim" style="font-size:0.9em">Create a short link (<code>/s/&lt;code&gt;</code>) that grants temporary read-only access without a user account.</p>
+    <div id="share-error" class="error-box" style="display:none;max-width:560px"></div>
+    <div style="display:flex;flex-wrap:wrap;gap:0.6em;align-items:flex-end;max-width:680px;margin-bottom:1em">
+      <div class="field" style="margin:0;flex:1 1 220px">
+        <label for="share-code">Code / custom name (${shareCfg.min_length}–${shareCfg.max_length} chars)</label>
+        <div style="display:flex;gap:0.4em">
+          <input id="share-code" class="mono" value="${escapeHtml(shareCfg.suggested_code)}" minlength="${shareCfg.min_length}" maxlength="${shareCfg.max_length}" required />
+          <button type="button" id="share-regen-btn" title="Generate new random hash">↻</button>
+        </div>
+      </div>
+      <div class="field" style="margin:0;width:160px">
+        <label for="share-exp">Expires in</label>
+        <select id="share-exp">
+          <option value="60">1 hour</option>
+          <option value="1440" selected>24 hours</option>
+          <option value="10080">7 days</option>
+          <option value="43200">30 days</option>
+          <option value="262800">6 months</option>
+          <option value="525600">1 year</option>
+          <option value="0">Never</option>
+        </select>
+      </div>
+      ${kind === "mesh" ? `<label class="cd-toggle" style="margin-bottom:0.6em"><input type="checkbox" id="share-cd"> allow download</label>` : ""}
+      <button type="button" id="share-create-btn" class="primary">Create link</button>
+    </div>
+    <table class="responsive">
+      <thead>
+        <tr>
+          <th>Short link</th>
+          <th>Expires</th>
+          <th>Views</th>
+          ${kind === "mesh" ? "<th>Download</th>" : ""}
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+        ${shares
+          .map((s) => {
+            const rawExp = s.expires_at ?? s.expiresAt ?? s.exp;
+            const expDate = rawExp
+              ? new Date(typeof rawExp === "number" && rawExp < 1e12 ? rawExp * 1000 : rawExp)
+              : null;
+            const expValid = expDate && !Number.isNaN(expDate.getTime());
+            const isExpired = s.expired ?? (expValid && expDate.getTime() <= Date.now());
+            const expLabel = s.never_expires
+              ? "Never"
+              : isExpired
+              ? '<span class="dim">expired</span>'
+              : expValid
+                ? escapeHtml(expDate.toLocaleString())
+                : '<span class="dim">—</span>';
+            const views = s.views_count ?? s.views ?? 0;
+
+            return `<tr>
+              <td class="mono"><a href="${escapeHtml(s.url || `/s/${s.code}`)}" target="_blank" rel="noopener">${escapeHtml(s.code)}</a></td>
+              <td>${expLabel}</td>
+              <td>${Number(views)}</td>
+              ${kind === "mesh" ? `<td>${s.can_download ? "yes" : "no"}</td>` : ""}
+              <td class="row-actions">
+                <button type="button" data-copy-share="${escapeHtml(s.url || `${window.location.origin}/s/${s.code}`)}">Copy URL</button>
+                <button type="button" class="danger" data-del-share="${s.id}">Revoke</button>
+              </td>
+            </tr>`;
+          })
+          .join("") || `<tr><td colspan="${kind === "mesh" ? 5 : 4}" class="dim">No active share links.</td></tr>`}
+      </tbody>
+    </table>
+
+    <h2 style="margin-top:2em">Disk usage</h2>
+    <div id="storage-box" class="dim">Measuring\u2026</div>
+
+    <h2 style="margin-top:2em" id="danger-heading">Danger zone</h2>
+    <button class="danger" id="delete-btn">Delete this ${KIND.label.toLowerCase()}</button>
+  `;
+  loadStorageBox();
+
+  document.getElementById("details-save").addEventListener("click", async (e) => {
+    e.target.disabled = true;
+    try {
+      await saveDetailsForm(api, kind, item, "details");
+      load();
+    } catch (err) {
+      const box = document.getElementById("details-error");
+      box.textContent = err.message;
+      box.style.display = "block";
+      e.target.disabled = false;
+    }
+  });
+
+  document.getElementById("share-regen-btn").addEventListener("click", async () => {
+    const next = await api.suggestShareCode();
+    document.getElementById("share-code").value = next.suggested_code;
+  });
+
+  document.getElementById("share-create-btn").addEventListener("click", async () => {
+    const errBox = document.getElementById("share-error");
+    errBox.style.display = "none";
+    const code = document.getElementById("share-code").value.trim();
+    const expires_in_minutes = parseInt(document.getElementById("share-exp").value, 10);
+    const can_download = document.getElementById("share-cd")?.checked || false;
+    try {
+      const created = await api.createShare({
+        code,
+        asset_type: kind,
+        asset_id: Number(itemId),
+        expires_in_minutes,
+        can_download,
+      });
+      if (navigator.clipboard) {
+        navigator.clipboard.writeText(created.url).catch(() => {});
+      }
+      load();
+    } catch (err) {
+      errBox.textContent = err.message;
+      errBox.style.display = "block";
+    }
+  });
+
+  content.querySelectorAll("[data-copy-share]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      try {
+        await navigator.clipboard.writeText(btn.dataset.copyShare);
+        btn.textContent = "Copied!";
+        setTimeout(() => { btn.textContent = "Copy URL"; }, 1200);
+      } catch (_) {}
+    });
+  });
+
+  content.querySelectorAll("[data-del-share]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      await api.deleteShare(btn.dataset.delShare);
+      load();
+    });
+  });
+
+  const thumbSectionHtml = `
+    <h2 style="margin-top:2em">Thumbnail</h2>
+    <div class="thumb-preview" id="thumb-preview">${item.has_thumbnail ? "" : '<span class="dim">No thumbnail</span>'}</div>
+    <input type="file" id="thumb-file" accept="image/png,image/jpeg,image/webp" style="max-width:320px" />
+    <div style="display:flex;gap:0.5em;margin-top:0.6em">
+      <button id="thumb-upload-btn">Upload / replace thumbnail</button>
+      ${item.has_thumbnail ? '<button class="danger" id="thumb-delete-btn">Remove thumbnail</button>' : ""}
+    </div>
+    <p class="dim" style="font-size:0.85em">PNG, JPEG or WebP.</p>
+  `;
+  document.getElementById("danger-heading").insertAdjacentHTML("beforebegin", thumbSectionHtml);
+
+  if (item.has_thumbnail) {
+    api.thumbnailUrl(kind, itemId).then((url) => {
+      if (url) document.getElementById("thumb-preview").innerHTML = `<img src="${url}" alt="" />`;
+    });
+  }
+  document.getElementById("thumb-upload-btn").addEventListener("click", async () => {
+    const file = document.getElementById("thumb-file").files[0];
+    if (!file) return;
+    try {
+      await api.uploadThumbnail(kind, itemId, file);
+    } catch (err) {
+      alert(err.message);
+      return;
+    }
+    load();
+  });
+  const thumbDeleteBtn = document.getElementById("thumb-delete-btn");
+  if (thumbDeleteBtn) {
+    thumbDeleteBtn.addEventListener("click", async () => {
+      await api.deleteThumbnail(kind, itemId);
+      load();
+    });
+  }
+
+  if (kind === "volume") {
+    const meshSectionHtml = `
+      <h2 style="margin-top:2em">Attached mesh</h2>
+      <p class="dim" style="font-size:0.9em">Processed like any other mesh, but not listed separately: access follows this volume, and it is viewed and downloaded from the volume's viewer.</p>
+      <p class="dim" style="font-size:0.9em">${
+        item.has_mesh
+          ? (item.mesh_status && item.mesh_status !== "ready"
+              ? ` \u2014 ${escapeHtml(item.mesh_status)}${
+                  item.mesh_status === "failed" && item.mesh_status_log.length
+                    ? `: ${escapeHtml(item.mesh_status_log[item.mesh_status_log.length - 1])}`
+                    : ""
+                }`
+              : "")
+          : "No mesh uploaded."
+      }</p>
+      <input type="file" id="mesh-file" style="max-width:320px" />
+      <button id="mesh-upload-btn" style="margin-top:0.6em">Upload / replace mesh</button>
+    `;
+    document.getElementById("danger-heading").insertAdjacentHTML("beforebegin", meshSectionHtml);
+
+    document.getElementById("mesh-upload-btn").addEventListener("click", async () => {
+      const file = document.getElementById("mesh-file").files[0];
+      if (!file) return;
+      const fd = new FormData();
+      fd.append("mesh_file", file);
+      await api.uploadMesh(itemId, fd);
+      load();
+    });
+  }
+
+  content.querySelectorAll("[data-revoke]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      await KIND.revokeAccess(itemId, btn.dataset.revoke);
+      load();
+    });
+  });
+
+  content.querySelectorAll("[data-cd-toggle]").forEach((cb) => {
+    cb.addEventListener("change", async () => {
+      await KIND.grantAccess(itemId, cb.dataset.cdToggle, cb.checked);
+      load();
+    });
+  });
+
+  const grantBtn = document.getElementById("grant-btn");
+  if (grantBtn) {
+    grantBtn.addEventListener("click", async () => {
+      const userId = document.getElementById("grant-select").value;
+      // Safely check for the grant-cd checkbox since it won't exist for non-mesh types
+      const canDownload = document.getElementById("grant-cd")?.checked || false;
+      await KIND.grantAccess(itemId, userId, canDownload);
+      load();
+    });
+  }
+
+  document.getElementById("delete-btn").addEventListener("click", async () => {
+    if (!confirm(`Delete "${item.title}"? This removes its files permanently.`)) return;
+    await KIND.del(itemId);
+    window.location.href = "/index.html";
+  });
+}
+
+function escapeHtml(s) {
+  const d = document.createElement("div");
+  d.textContent = s;
+  return d.innerHTML;
+}
+
+load();

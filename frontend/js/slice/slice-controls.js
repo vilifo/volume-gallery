@@ -3,7 +3,7 @@
 // reload, so this section keeps no state of its own: everything lives in SliceState.
 
 import { textureFormatFor } from "./geometry.js";
-import { ANGLE_LIMITS } from "./cursor.js?v=mpr2";
+import { ANGLE_LIMITS } from "./cursor.js";
 import { TF_LABELS, TF_PRESET_NAMES, insertStop } from "./transfer-function.js";
 import { mountCurveEditor } from "./opacity-curve.js";
 import { resampleHistogram } from "../histogram.js";

@@ -11,15 +11,15 @@
 // (a PaneGeometry), fetches the blocks that plan reads from (the ones most pixels need first) and shows the image
 // as it fills in.
 
-import { createPlaneClient } from "./worker-plane-client.js?v=mpr2";
-import { SliceRenderer, requestSliceDevice } from "./slice-renderer.js?v=mpr2";
-import { SliceState } from "./cursor.js?v=mpr2";
-import { bindTouchGestures } from "./touch-gestures.js?v=org6";
+import { createPlaneClient } from "./worker-plane-client.js";
+import { SliceRenderer, requestSliceDevice } from "./slice-renderer.js";
+import { SliceState } from "./cursor.js";
+import { bindTouchGestures } from "./touch-gestures.js";
 import { lutFor, needsLut } from "./transfer-function.js";
-import { Overlay3D } from "./overlay-3d.js?v=mpr2";
-import { hitHandle, paneMeasureSvg, pointFromPane, roundPoint } from "./measure.js?v=mpr2";
-import { Measure3D } from "./measure-3d.js?v=mpr2";
-import { ensureMeasureStyles } from "./measure-ui.js?v=meas1";
+import { Overlay3D } from "./overlay-3d.js";
+import { hitHandle, paneMeasureSvg, pointFromPane, roundPoint } from "./measure.js";
+import { Measure3D } from "./measure-3d.js";
+import { ensureMeasureStyles } from "./measure-ui.js";
 import { niceScaleLength } from "../scalebar.js";
 import {
   lineInBox, AXES, AXIS_INFO, AXIS_COLORS, absView, clamp, clipLineToPolygon, dragWindow, isAligned,

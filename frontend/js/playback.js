@@ -2,8 +2,8 @@
 // looping for as long as the page is open. The same descriptions (specs) as the animation renderer; here
 // they run on the clock instead of being rendered frame by frame.
 
-import { passFraction, playPose, prepareSpec, readPose, resetTfSignature, sweepIndices, writePose } from "/js/animate.js?v=tl1";
-import { afterFrames, waitForLoaded } from "/js/render-capture.js?v=org4";
+import { passFraction, playPose, prepareSpec, readPose, resetTfSignature, sweepIndices, writePose } from "./animate.js";
+import { afterFrames, waitForLoaded } from "./render-capture.js";
 
 const PRELOAD_MAX_POSES = 160;
 

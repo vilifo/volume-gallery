@@ -1,7 +1,7 @@
 // The "Measure" section of the viewer's control panel (the ruler switch, where 3D clicks land, the list of
 // measurements) and the CSS the measuring tools share. The measurements live in SliceState; this only shows them.
 
-import { deltas, distance, formatLength, measureLabel, measuresCsv, voxelDistance, MAX_MEASURES } from "./measure.js?v=mpr2";
+import { deltas, distance, formatLength, measureLabel, measuresCsv, voxelDistance, MAX_MEASURES } from "./measure.js";
 
 const STYLE = `
 .slice-pane[data-measuring="1"] { cursor: crosshair; }

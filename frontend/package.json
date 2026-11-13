@@ -1,0 +1,16 @@
+{
+  "name": "volume-gallery-frontend",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Volume Gallery frontend, bundled with Webpack (content-hashed file names: no ?v= cache busting)",
+  "scripts": {
+    "build": "webpack --mode production",
+    "watch": "webpack --mode development --watch",
+    "test": "node --test \"tests/*.test.mjs\""
+  },
+  "devDependencies": {
+    "html-webpack-plugin": "5.6.3",
+    "webpack": "5.97.1",
+    "webpack-cli": "6.0.1"
+  }
+}

@@ -1,7 +1,7 @@
 // The description of an item is clipped where space is short (the viewer's top bar, a gallery row).
 // Making that text clickable opens the whole of it in a floating panel (see floating-panel.js).
 
-import { openFloatingPanel } from "/js/floating-panel.js?v=org2";
+import { openFloatingPanel } from "./floating-panel.js";
 
 /**
  * @param {HTMLElement} el   the element showing the (possibly clipped) description

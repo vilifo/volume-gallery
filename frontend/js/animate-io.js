@@ -1,7 +1,7 @@
 // Where the frames of an animation go: a zip of image files (split into parts below ~1.8 GB), or an
 // H.264 MP4 video written with WebCodecs and a small built-in MP4 muxer.
 
-import { encodeImage, FORMATS, fileSafe } from "/js/export-image.js?v=org2";
+import { encodeImage, FORMATS, fileSafe } from "./export-image.js";
 
 // ------------------------------------------------------------------------------------- ZIP
 

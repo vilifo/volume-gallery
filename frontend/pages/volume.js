@@ -1,0 +1,1963 @@
+// The page script of viewers/volume.html (it was an inline <script type="module"> there). Bundled by webpack.config.js.
+    import { api, requireLogin, getRole, getUsername, renderShell, wireLogout } from "../js/api.js";
+    import { syncHistogram } from "../js/histogram.js";
+import { insertStop, sampleStops, rgbToHex, decodeTf, encodeTf } from "../js/slice/transfer-function.js";
+    import { KilnViewer } from "kiln-render";
+    import {
+      ATLAS_VRAM_OPTIONS_MB,
+      formatVram,
+      loadSavedAtlasMB,
+      planAtlas,
+      saveAtlasMB,
+    } from "../js/atlas-budget.js";
+    import { setupSliceIntegration } from "../js/slice/slice-integration.js";
+    import { niceScaleLength } from "../js/scalebar.js";
+    import { toggleHelpPanel } from "../js/help.js";
+    import { makeDescriptionExpandable } from "../js/description.js";
+    import { openExportPanel } from "../js/export-image.js";
+    import { createTimeline } from "../js/timeline.js";
+    import { decodeSpec, ANIM_PARAM } from "../js/anim-url.js";
+    import { createPlayer } from "../js/playback.js";
+    import { createPathStore, createBookmarkStore } from "../js/saved-paths.js";
+    import { openBookmarksPanel } from "../js/bookmarks.js";
+    import { interpolatePose, readPose, writePose } from "../js/animate.js";
+    import { captureStill } from "../js/render-capture.js";
+    import { startBrickCache, watchDataAccess, resetDataAccessWatch, onDataAccessExpired, setDataAccess, dataAccessExpiresAt, dataAccessTtlMs } from "../js/data-access.js";
+
+    requireLogin();
+    const role = getRole();
+    const params = new URLSearchParams(window.location.search);
+    const volumeId = params.get("id");
+    // VRAM the brick atlas may use (Advanced > VRAM allocation); remembered
+    // per browser, see /js/atlas-budget.js.
+    let atlasVramMB = loadSavedAtlasMB();
+
+    const EXPAND_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M21 16v3a2 2 0 0 1-2 2h-3M3 16v3a2 2 0 0 0 2 2h3"/></svg>`;
+    const COLLAPSE_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3v3a2 2 0 0 1-2 2H4M15 3v3a2 2 0 0 0 2 2h3M4 16h3a2 2 0 0 1 2 2v3M20 16h-3a2 2 0 0 0-2 2v3"/></svg>`;
+    const CUBE_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8 12 3 3 8m18 0v8l-9 5m9-13-9 5m0 8-9-5V8m9 13v-8M3 8l9 5"/></svg>`;
+    const HELP_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.1 9a3 3 0 0 1 5.8 1c0 2-3 3-3 3M12 17h.01"/></svg>`;
+    const DOWNLOAD_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>`;
+    const RULER_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 17 17 3l4 4L7 21z"/><path d="M7 13l2 2M10 10l2 2M13 7l2 2"/></svg>`;
+    const ANIMATE_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polygon points="10 8 16 12 10 16 10 8"/></svg>`;
+    const BOOKMARK_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>`;
+    const LINK_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>`;
+
+    document.getElementById("shell").innerHTML = `
+      ${renderShell("gallery", role, getUsername())}
+      <main>
+        <div id="content" style="display:flex; flex-direction:column; height:100%;"></div>
+      </main>
+    `;
+    wireLogout();
+
+    const content = document.getElementById("content");
+    const $ = (id) => document.getElementById(id);
+
+    function escapeHtml(s) {
+      const d = document.createElement("div");
+      d.textContent = s;
+      return d.innerHTML;
+    }
+
+    function webgpuStatus() {
+      if (!window.isSecureContext) {
+        const here = window.location.origin;
+        return {
+          ok: false,
+          message:
+            `WebGPU is blocked because this page isn't loaded from a secure origin ` +
+            `(currently ${here}). Browsers only expose WebGPU on https:// or ` +
+            `http://localhost — a plain http://<ip> address doesn't qualify, even ` +
+            `with a supported browser and GPU. Put this app behind HTTPS (see the ` +
+            `README's "HTTPS" section), or for quick LAN testing in Chrome/Edge, ` +
+            `visit chrome://flags/#unsafely-treat-insecure-origin-as-secure, add ` +
+            `${here}, and relaunch the browser.`,
+        };
+      }
+      if (!("gpu" in navigator)) {
+        return {
+          ok: false,
+          message:
+            "This browser doesn't implement WebGPU. Use Chrome/Edge 113+, Safari 26+, " +
+            "or Firefox 141+, and make sure hardware acceleration is enabled in the " +
+            "browser's settings.",
+        };
+      }
+      return { ok: true };
+    }
+
+    // ------------------------------------------------------------------
+    // View state <-> URL. Parameter names and formats follow the upstream
+    // kiln-render basic-viewer share link (mode, wc, ww, density, iso, tf,
+    // tfpts, up, scale, cam, clipMin, clipMax, wireframe, axis, slices,
+    // sliceVis), plus `id` (this volume) and `minLevel` (max detail level).
+    // ------------------------------------------------------------------
+    const MODES = ["dvr", "mip", "iso", "lod"];
+    const UP_AXES = ["x", "y", "z", "-x", "-y", "-z"];
+    const TF_PRESETS = [
+      ["coolwarm", "Cool-Warm"], ["grayscale", "Grayscale"],
+      ["grayscale-inverted", "Grayscale (inverted)"], ["hot", "Hot"],
+      ["cool", "Cool"], ["viridis", "Viridis"], ["plasma", "Plasma"],
+      ["seismic", "Seismic"],
+    ];
+
+    const fx = (v, digits = 3) => Number(v).toFixed(digits);
+
+    function stateToParams(state, minLevel) {
+      const p = new URLSearchParams();
+      p.set("id", volumeId);
+      p.set("mode", state.mode);
+      p.set("wc", fx(state.windowCenter));
+      p.set("ww", fx(state.windowWidth));
+      p.set("density", fx(state.densityScale, 2));
+      p.set("iso", fx(state.isoValue));
+      p.set("tf", state.tfPreset);
+      if (state.tfPreset === "custom" && state.tfColorStops) p.set("tfcol", encodeTf({ preset: "custom", stops: state.tfColorStops }));
+      p.set("tfpts", state.tfPoints.map((pt) => `${fx(pt.x)},${fx(pt.y)}`).join(","));
+      p.set("up", state.upAxis);
+      p.set("scale", fx(state.renderScale, 2));
+      p.set("cam", state.cam.map((v) => fx(v)).join(","));
+      if (state.clipMin.some((v) => v !== 0)) p.set("clipMin", state.clipMin.map((v) => fx(v)).join(","));
+      if (state.clipMax.some((v) => v !== 1)) p.set("clipMax", state.clipMax.map((v) => fx(v)).join(","));
+      if (state.showWireframe) p.set("wireframe", "1");
+      if (state.showAxis) p.set("axis", "1");
+      if (minLevel != null) p.set("minLevel", String(minLevel));
+      return p;
+    }
+
+    // Lossless variant used when reloading in place (no URL rounding involved).
+    function stateToOptions(state) {
+      return {
+        mode: state.mode,
+        windowCenter: state.windowCenter,
+        windowWidth: state.windowWidth,
+        densityScale: state.densityScale,
+        isoValue: state.isoValue,
+        renderScale: state.renderScale,
+        tfPreset: state.tfPreset,
+        tfColorStops: state.tfColorStops ? state.tfColorStops.map((st) => ({ ...st })) : null,
+        tfPoints: state.tfPoints.map((pt) => ({ x: pt.x, y: pt.y })),
+        upAxis: state.upAxis,
+        cam: state.cam,
+        clipMin: state.clipMin,
+        clipMax: state.clipMax,
+        showWireframe: state.showWireframe,
+        showAxis: state.showAxis,
+      };
+    }
+
+    function numList(str, counts) {
+      if (!str) return undefined;
+      const parts = str.split(",").map(Number);
+      return counts.includes(parts.length) && parts.every(Number.isFinite) ? parts : undefined;
+    }
+
+    function paramsToOptions(p, numLodLevels) {
+      const o = {};
+      const num = (key) => {
+        if (!p.has(key)) return undefined;
+        const v = Number(p.get(key));
+        return Number.isFinite(v) ? v : undefined;
+      };
+      const mode = p.get("mode");
+      if (MODES.includes(mode)) o.mode = mode;
+      const wc = num("wc"); if (wc !== undefined) o.windowCenter = wc;
+      const ww = num("ww"); if (ww !== undefined) o.windowWidth = ww;
+      const density = num("density"); if (density !== undefined) o.densityScale = density;
+      const iso = num("iso"); if (iso !== undefined) o.isoValue = iso;
+      const scale = num("scale"); if (scale !== undefined) o.renderScale = scale;
+      const tf = p.get("tf");
+      if (TF_PRESETS.some(([v]) => v === tf)) o.tfPreset = tf;
+      else if (tf === "custom") {
+        // custom colour stops travel in `tfcol` ("pos:rrggbb,..."); a malformed value drops the whole custom map
+        const custom = decodeTf(p.get("tfcol"));
+        if (custom && custom.preset === "custom") { o.tfPreset = "custom"; o.tfColorStops = custom.stops; }
+      }
+      const tfpts = (p.get("tfpts") || "").split(",").filter((x) => x !== "").map(Number);
+      if (tfpts.length >= 2 && tfpts.length % 2 === 0 && tfpts.every(Number.isFinite)) {
+        o.tfPoints = [];
+        for (let i = 0; i < tfpts.length; i += 2) o.tfPoints.push({ x: tfpts[i], y: tfpts[i + 1] });
+      }
+      const up = p.get("up");
+      if (UP_AXES.includes(up)) o.upAxis = up;
+      const cam = numList(p.get("cam"), [3, 6, 12]); if (cam) o.cam = cam;  // 12: a rolled view (kiln patch 0003)
+      const clipMin = numList(p.get("clipMin"), [3]); if (clipMin) o.clipMin = clipMin;
+      const clipMax = numList(p.get("clipMax"), [3]); if (clipMax) o.clipMax = clipMax;
+      if (p.get("wireframe") === "1") o.showWireframe = true;
+      if (p.get("axis") === "1") o.showAxis = true;
+
+      let minLevel = null;
+      if (p.has("minLevel")) {
+        const v = parseInt(p.get("minLevel"), 10);
+        if (Number.isInteger(v) && v >= 0 && numLodLevels && v < numLodLevels) minLevel = v;
+      }
+      return { options: o, minLevel };
+    }
+
+    // ------------------------------------------------------------------
+    // UI state that must survive a reload of the viewer (the side panel is
+    // rebuilt for each KilnViewer, so its open/closed state lives here).
+    // ------------------------------------------------------------------
+    const uiState = { panelOpen: true, infoOpen: false, sceneOpen: true, advancedOpen: false, panelScroll: 0, scaleBar: true, freeRotation: true };
+
+    function setPanelOpen(open) {
+      uiState.panelOpen = open;
+      const panel = document.querySelector(".ctl-panel");
+      if (panel) panel.hidden = !open;
+      $("panel-open").hidden = open;
+    }
+
+    function showStatus(text, { busy = true } = {}) {
+      const el = $("status");
+      el.style.display = "flex";
+      el.replaceChildren();
+      if (busy) {
+        const sp = document.createElement("div");
+        sp.className = "spinner";
+        el.append(sp);
+      }
+      const span = document.createElement("span");
+      span.textContent = text;
+      el.append(span);
+    }
+
+    // state: "off" | "indeterminate" | "determinate"
+    function setLoadUi(state, fraction = 0, text = "") {
+      const on = state !== "off";
+      $("load-progress").classList.toggle("active", on);
+      $("load-progress").classList.toggle("indeterminate", state === "indeterminate");
+      $("load-chip").classList.toggle("active", on);
+      $("load-progress-bar").style.width = state === "determinate" ? `${Math.round(fraction * 100)}%` : "";
+      if (text) $("load-text").textContent = text;
+    }
+
+    let currentViewer = null;
+    let histogramPromise = null; // GET /api/volumes/{id}/histogram, started with the first load
+    let histogramData = null; // its result; drawn behind the transfer function curve
+    // Extra URL parameters owned by the slice views (cursor, layout, window); set once they exist
+    let sliceUrlParams = () => ({});
+
+    async function init() {
+      if (!volumeId) {
+        content.innerHTML = `<div class="error-box" style="margin:1.4em">No volume specified.</div>`;
+        return;
+      }
+      let volume;
+      try {
+        volume = await api.getVolume(volumeId);
+      } catch (err) {
+        const safeMessage = escapeHtml(String(err?.message ?? "Failed to load volume."));
+        content.innerHTML = `<div class="error-box" style="margin:1.4em">${safeMessage}</div>`;
+        return;
+      }
+
+      content.innerHTML = `
+        <div class="viewer-topbar">
+          <div class="viewer-titles">
+            <h1>${escapeHtml(volume.title)}</h1>
+            ${volume.description ? `<div class="viewer-desc">${escapeHtml(volume.description)}</div>` : ""}
+          </div>
+          <div class="viewer-topbar-actions">
+            <div class="layout-seg" id="layout-seg" role="group" aria-label="View layout">
+              <button type="button" data-layout="3d" title="3D view only">3D</button>
+              <button type="button" data-layout="quad" title="3D view and the three slice views">Quad</button>
+              <button type="button" data-layout="xy" title="XY pane: slices along Z (drag a crosshair line to tilt the planes)">XY</button>
+              <button type="button" data-layout="xz" title="XZ plane: slices along Y">XZ</button>
+              <button type="button" data-layout="yz" title="YZ plane: slices along X">YZ</button>
+            </div>
+            <button id="help-btn" class="icon-btn" aria-pressed="false" title="Show help for this viewer next to the view">${HELP_ICON}<span class="icon-btn-label">Help</span></button>
+            <button id="bookmarks-btn" class="icon-btn" title="Save this view and come back to it later">${BOOKMARK_ICON}<span class="icon-btn-label">Bookmarks</span></button>
+            <button id="measure-btn" class="icon-btn" aria-pressed="false" title="Measure distances: click two points in a slice pane or in the 3D view">${RULER_ICON}<span class="icon-btn-label">Measure</span></button>
+            <button id="animate-btn" class="icon-btn" title="Animation timeline: a camera path with clipping and transfer function changes, a 3D turntable or a slice sweep; play it or render a video">${ANIMATE_ICON}<span class="icon-btn-label">Animate</span></button>
+            <button id="export-btn" class="icon-btn" title="Save the view or a slice as an image file at full resolution">${DOWNLOAD_ICON}<span class="icon-btn-label">Export</span></button>
+            <button id="share-btn" class="icon-btn" title="Copy a link to this exact view">${LINK_ICON}<span class="icon-btn-label">Share</span></button>
+            ${
+              volume.mesh_status === "ready"
+                ? `<button id="view-mesh" class="icon-btn" title="Open the attached mesh in the 3D mesh viewer">${CUBE_ICON}<span class="icon-btn-label">View mesh</span></button>`
+                : ""
+            }
+            <button id="fullscreen-btn" class="icon-btn primary">${EXPAND_ICON}<span class="icon-btn-label">Fullscreen</span></button>
+          </div>
+        </div>
+        <div class="viewer-canvas-wrap" id="canvas-wrap">
+          <div class="viewer-canvas-area" id="canvas-area">
+            <div class="slice-grid" id="slice-grid" data-layout="3d">
+              <div class="slice-pane slice-pane-3d" id="pane-3d" data-visible="1"><canvas id="canvas"></canvas><div class="scale-bar" id="scale-bar" hidden><span class="scale-bar-label"></span><div class="scale-bar-line"></div></div></div>
+              <div data-axis="xy"></div><div data-axis="xz"></div><div data-axis="yz"></div>
+            </div>
+            <div class="viewer-progress" id="load-progress"><div class="viewer-progress-bar" id="load-progress-bar"></div></div>
+            <div class="viewer-load-chip" id="load-chip"><div class="spinner"></div><span id="load-text">Loading\u2026</span></div>
+            <div class="viewer-status" id="status"></div>
+            <button type="button" class="ctl-chip" id="panel-open" style="right:12px; top:12px" hidden>Controls</button>
+          </div>
+        </div>
+        <div id="anim-dock"></div>
+      `;
+
+      const descEl = content.querySelector(".viewer-desc");
+      if (descEl) makeDescriptionExpandable(descEl, { title: volume.title, text: volume.description });
+
+      const canvasWrap = $("canvas-wrap");
+      const canvasArea = $("canvas-area");
+
+      $("panel-open").addEventListener("click", () => setPanelOpen(true));
+
+      const fullscreenBtn = $("fullscreen-btn");
+      fullscreenBtn.addEventListener("click", () => {
+        if (document.fullscreenElement) {
+          document.exitFullscreen();
+        } else {
+          canvasWrap.requestFullscreen().catch((err) => alert(`Couldn't enter fullscreen: ${err.message}`));
+        }
+      });
+      document.addEventListener("fullscreenchange", () => {
+        const isFull = document.fullscreenElement === canvasWrap;
+        fullscreenBtn.innerHTML = isFull
+          ? `${COLLAPSE_ICON}<span class="icon-btn-label">Exit fullscreen</span>`
+          : `${EXPAND_ICON}<span class="icon-btn-label">Fullscreen</span>`;
+      });
+
+      const gpu = webgpuStatus();
+      if (!gpu.ok) {
+        $("layout-seg").hidden = true;
+        showStatus(gpu.message, { busy: false });
+        return;
+      }
+
+      // Levels are sharded-volume LOD indices: 0 = full resolution, higher
+      // = coarser. Defaulting to the middle of the pyramid means the finest
+      // (most memory/bandwidth-hungry) half is never streamed unless the
+      // user explicitly asks for it — see the "Max detail level" control.
+      const numLevels = volume.num_lod_levels;
+      const fromUrl = paramsToOptions(params, numLevels);
+      const defaultMinLevel = numLevels && numLevels > 1 ? Math.floor(numLevels / 2) : null;
+      let activeMinLevel = fromUrl.minLevel ?? defaultMinLevel;
+      // View/transfer-function state to hand to the next KilnViewer: initially
+      // whatever the URL says, afterwards a snapshot of the live viewer.
+      let nextOptions = fromUrl.options;
+
+      // KilnViewer only tells its engine about a size change when the canvas
+      // size differs from the element's current size. A canvas that was used
+      // by a previous viewer already has the right size, so the new engine
+      // never got sized and nothing was drawn. Every (re)load therefore uses
+      // a brand-new canvas (starting at 1x1, so a resize is always seen).
+      // loadToken discards the result of a load superseded by a newer one.
+      let loadToken = 0;
+
+      let stopStats = null;
+      let stopScaleBar = null;
+      let urlSync = null;
+
+      // Slice views (xy / xz / yz panes + quad layout). Nothing is
+      // fetched or allocated until a slice layout is chosen or the URL asks for one.
+      const slices = setupSliceIntegration({
+        grid: $("slice-grid"),
+        seg: $("layout-seg"),
+        getAccessUrl: async () => (await api.sliceAccessUrl(volumeId)).url,
+        params,
+        debug: params.get("debug") === "slices",
+        onError: (message) => {
+          showStatus(message, { busy: false });
+          setTimeout(() => { if (currentViewer) $("status").style.display = "none"; }, 6000);
+        },
+      });
+      sliceUrlParams = () => slices.toParams();
+      let initialLayoutApplied = false;
+
+      function replaceCanvas() {
+        const canvas = document.createElement("canvas");
+        canvas.id = "canvas";
+        canvas.width = 1;
+        canvas.height = 1;
+        $("canvas").replaceWith(canvas);
+        return canvas;
+      }
+
+      async function loadVolume(minLevel, overrideOptions = null) {
+        const token = ++loadToken;
+        activeMinLevel = minLevel;
+
+        // Snapshot the live view + transfer function BEFORE tearing anything
+        // down, so a reload (e.g. a new max detail level) changes nothing visually.
+        if (currentViewer) {
+          urlSync?.stop();
+          urlSync = null;
+          nextOptions = stateToOptions(currentViewer.getState());
+        }
+        if (overrideOptions) nextOptions = { ...nextOptions, ...overrideOptions }; // e.g. a bookmark's render settings
+        showStatus(currentViewer ? "Reloading volume\u2026" : "Requesting WebGPU device\u2026");
+        setLoadUi("indeterminate", 0, "Loading\u2026");
+        if (stopStats) {
+          stopStats();
+          stopStats = null;
+        }
+        if (stopScaleBar) {
+          stopScaleBar();
+          stopScaleBar = null;
+        }
+        if (currentViewer) {
+          const old = currentViewer;
+          currentViewer = null;
+          slices.detachViewer();
+          try {
+            old.dispose();
+          } catch (err) {
+            console.warn("Viewer dispose failed:", err);
+          }
+        }
+        canvasWrap.querySelector(".ctl-panel")?.remove();
+        if (token !== loadToken) return;
+
+        try {
+          histogramPromise = histogramPromise || api.volumeHistogram(volumeId); // fetched once, in parallel
+          const access = await api.volumeDataAccessUrl(volumeId, minLevel);
+          if (token !== loadToken) return;
+          // The brick cache worker (js/sw.js). On the first visit this waits until it controls the page,
+          // so the first load is cached too; it never blocks for long or fails the load.
+          await startBrickCache();
+          watchDataAccess(volumeId); // asks for a reload when the data link expires
+          resetDataAccessWatch();    // this is a fresh link: allow the notice again
+          // Renew the token in the background before it runs out, without rebuilding the viewer
+          setDataAccess({
+            url: access.url,
+            ttlMs: (access.expires_in_minutes || 0) * 60000,
+            renew: async () => (await api.volumeDataAccessUrl(volumeId, minLevel)).url,
+          });
+
+          if (token !== loadToken) return;
+
+          // The atlas gets the VRAM the user selected, but no more than this
+          // dataset can fill. The engine clamps it to the device limits and
+          // steps it down if the allocation fails.
+          const atlas = await planAtlas(access.url, { vramMB: atlasVramMB });
+          if (token !== loadToken) return;
+          console.info(`[atlas] ${Math.round(atlas.budgetBytes / 1e6)} MB budget (${atlas.source})`);
+          const viewer = await KilnViewer.create(replaceCanvas(), access.url, {
+            ...nextOptions,
+            atlasBudgetBytes: atlas.budgetBytes,
+          });
+          if (token !== loadToken) {
+            viewer.dispose();
+            return;
+          }
+          currentViewer = viewer;
+          $("status").style.display = "none";
+          histogramData = await histogramPromise; // null if the volume has none: the preview then has no backdrop
+          if (token !== loadToken) {
+            viewer.dispose();
+            return;
+          }
+          syncHistogram(viewer, histogramData);
+          slices.setHistogram(histogramData); // the slice controls draw it behind their opacity curve
+          buildControlPanel(viewer, canvasWrap, {
+            numLodLevels: numLevels,
+            minLevel,
+            onMinLevelChange: (newMinLevel) => loadVolume(newMinLevel),
+            atlasVramMB,
+            onAtlasVramChange: (mb) => {
+              atlasVramMB = mb;
+              saveAtlasMB(mb);
+              loadVolume(activeMinLevel);
+            },
+          });
+          stopStats = startStatsLoop(viewer, atlas);
+          stopScaleBar = startScaleBar(viewer, $("pane-3d"), $("scale-bar"));
+          if (!uiState.freeRotation) viewer.camera.setFreeRotation?.(false);
+          urlSync = startUrlSync(viewer, () => activeMinLevel);
+          slices.attachViewer(viewer);
+          slices.mountControls(canvasWrap.querySelector(".ctl-panel-body"));
+          if (!initialLayoutApplied) {
+            initialLayoutApplied = true;
+            slices.applyInitial();
+          }
+          startAutoplay();
+          openBookmarkLink();
+        } catch (err) {
+          if (token !== loadToken) return;
+          console.error(err);
+          setLoadUi("off");
+          showStatus(`Could not load volume: ${err.message}`, { busy: false });
+        }
+      }
+
+      loadVolume(activeMinLevel);
+
+      // ---- Bookmarks: saved views (camera, render settings, slice position)
+      const bookmarkStore = createBookmarkStore({ api, volumeId, canShare: role === "admin" || role === "editor" });
+
+      // A small JPEG of the current 3D view, for the list. Best effort: a bookmark is fine without it.
+      async function viewThumbnail(viewer) {
+        try {
+          const bitmap = await createImageBitmap(await viewer.captureImage("image/png"), { resizeWidth: 240, resizeQuality: "medium" });
+          const c = document.createElement("canvas");
+          c.width = bitmap.width;
+          c.height = bitmap.height;
+          c.getContext("2d").drawImage(bitmap, 0, 0);
+          bitmap.close?.();
+          const url = c.toDataURL("image/jpeg", 0.72);
+          return url.length < 55000 ? url : null;
+        } catch (_) {
+          return null;
+        }
+      }
+
+      async function captureBookmark() {
+        const viewer = currentViewer;
+        if (!viewer) throw new Error("The 3D view is not ready yet");
+        const options = stateToOptions(viewer.getState());
+        delete options.renderScale; // a performance setting of this screen, not part of a view
+        let pose = null;
+        try { pose = readPose(viewer.camera); } catch (_) { /* no free-rotation camera: the view still restores */ }
+        const sliceParams = {};
+        for (const [k, val] of Object.entries(sliceUrlParams())) sliceParams[k] = String(val);
+        return {
+          options,
+          pose,
+          min_level: Number.isInteger(activeMinLevel) ? activeMinLevel : null,
+          slices: Object.keys(sliceParams).length ? sliceParams : null,
+          thumb: await viewThumbnail(viewer),
+        };
+      }
+
+      // The camera glides to a pose in a moment instead of jumping
+      function flyTo(viewer, target, ms = 800) {
+        return new Promise((resolve) => {
+          let from;
+          try { from = readPose(viewer.camera); } catch (_) { writePose(viewer.camera, target); resolve(); return; }
+          viewer.camera.setFreeRotation?.(true);
+          const t0 = performance.now();
+          const step = (now) => {
+            if (viewer !== currentViewer) { resolve(); return; }
+            const t = Math.min(1, (now - t0) / ms);
+            const eased = t * t * (3 - 2 * t);
+            writePose(viewer.camera, t >= 1 ? target : interpolatePose(from, target, eased));
+            if (t < 1) requestAnimationFrame(step); else resolve();
+          };
+          requestAnimationFrame(step);
+        });
+      }
+
+      async function restoreBookmark(entry) {
+        const b = entry.spec;
+        player.stop(); // a running path would fight the camera
+        if (b.slices || slices.views) {
+          const layout = b.slices?.layout || "3d";
+          await slices.requestLayout(layout);
+          if (slices.views && b.slices) slices.views.state.applyParams({ ...b.slices, layout });
+        }
+        const viewer = currentViewer;
+        if (!viewer) return;
+        const current = stateToOptions(viewer.getState());
+        const { cam, ...want } = b.options;
+        const levelChanged = Number.isInteger(b.min_level) && b.min_level !== activeMinLevel;
+        const settingsChanged = Object.keys(want).some((k) => JSON.stringify(want[k]) !== JSON.stringify(current[k]));
+        if (settingsChanged || levelChanged) {
+          // other render settings (mode, transfer function, clipping, ...): rebuild the viewer with them
+          await loadVolume(levelChanged ? b.min_level : activeMinLevel, { ...want, ...(cam ? { cam } : {}) });
+        } else if (b.pose) {
+          await flyTo(viewer, b.pose);
+        } else if (cam) {
+          await loadVolume(activeMinLevel, { cam });
+        }
+      }
+
+      // Playing a camera path, turntable or slice sweep on screen by itself, and the saved paths (this browser's,
+      // and the shared ones editors keep on the server). ?play=<id> in the link starts a shared one.
+      const player = createPlayer({
+        host: canvasWrap,
+        getViewer: () => currentViewer,
+        getSlices: () => slices.views,
+        is3dVisible: () => $("pane-3d").dataset.visible === "1" && !!currentViewer,
+        onChange: (state) => {
+          if (state !== "idle") return;
+          const url = new URL(window.location.href); // stopped: the link no longer starts it again
+          if (url.searchParams.has("play") || url.searchParams.has(ANIM_PARAM)) {
+            url.searchParams.delete("play");
+            url.searchParams.delete(ANIM_PARAM);
+            history.replaceState(history.state, "", url.pathname + url.search + url.hash);
+          }
+        },
+      });
+      const pathStore = createPathStore({ api, volumeId, canShare: role === "admin" || role === "editor" });
+      let autoplayStarted = false;
+      let bookmarkLinkOpened = false;
+      async function openBookmarkLink() { // ?bookmark=<id>
+        const id = params.get("bookmark");
+        if (!id || bookmarkLinkOpened) return;
+        bookmarkLinkOpened = true;
+        try {
+          await restoreBookmark(await bookmarkStore.getShared(id));
+        } catch (err) {
+          console.error("[bookmark link]", err);
+          showStatus(`Could not open the bookmark: ${err.message}`, { busy: false });
+        }
+      }
+      async function startAutoplay() {
+        const id = params.get("play");
+        const animText = params.get(ANIM_PARAM); // a link to an animation that was never saved: the animation is in the link
+        if ((!id && !animText) || autoplayStarted) return;
+        autoplayStarted = true;
+        try {
+          let spec;
+          if (id) spec = (await pathStore.getShared(id)).spec;
+          else {
+            spec = await decodeSpec(animText);
+            if (!spec) throw new Error("The animation in this link is damaged, too long or from a newer version");
+          }
+          if (spec.kind === "slices") await slices.requestLayout(spec.axis);
+          getTimeline().load(spec); // the timeline shows what plays (it stays hidden until Animate is pressed)
+          await player.play(spec);
+        } catch (err) {
+          console.error("[autoplay]", err);
+          showStatus(`Could not start the saved path: ${err.message}`, { busy: false });
+        }
+      }
+
+      // Last resort when the background renewal of the data token (see setDataAccess) has failed: rebuilds the
+      // viewer with a fresh one. The view, transfer function and clipping carry over, the bricks come back
+      // from the browser's brick cache or the server. Resolves with the new viewer.
+      async function refreshDataAccess() {
+        await loadVolume(activeMinLevel);
+        if (!currentViewer) throw new Error("Access to the volume\u2019s data could not be renewed");
+        return currentViewer;
+      }
+
+      // Share view URL button
+      // Help: a floating panel, not a dialog, so the view stays usable while it is open.
+      const helpBtn = document.getElementById("help-btn");
+      helpBtn.addEventListener("click", () => {
+        const open = toggleHelpPanel({ topic: "volume", role: getRole(), onClose: () => helpBtn.setAttribute("aria-pressed", "false") });
+        helpBtn.setAttribute("aria-pressed", String(open));
+      });
+
+      // Export: the 3D render at render scale 1.00 once everything has been streamed in, or a slice at
+      // one pixel per voxel. Not modal, so it can stay open while you move to the next slice.
+      const capture3d = async (onProgress) => {
+        for (let attempt = 0; ; attempt++) {
+          let viewer = currentViewer;
+          if (!viewer) throw new Error("The 3D view is not ready yet");
+          let expired = false;
+          const unsubscribe = onDataAccessExpired(() => { expired = true; });
+          try {
+            if (dataAccessExpiresAt() != null && dataAccessExpiresAt() - Date.now() < Math.min(60000, dataAccessTtlMs() / 10)) {
+              onProgress("Renewing access to the data\u2026");
+              viewer = await refreshDataAccess();
+            }
+            const current = viewer;
+            return await captureStill(current, { isCurrent: () => current === currentViewer, onProgress, expired: () => expired });
+          } catch (err) {
+            if (!err.expired || attempt >= 2) throw err;
+            onProgress("Renewing access to the data\u2026");
+            await refreshDataAccess(); // then draw it again
+          } finally {
+            unsubscribe();
+          }
+        }
+      };
+
+      const exportBtn = document.getElementById("export-btn");
+      exportBtn.addEventListener("click", () => {
+        const open = openExportPanel({
+          anchor: exportBtn,
+          baseName: volume.slug,
+          description: volume.title,
+          onClose: () => exportBtn.setAttribute("aria-pressed", "false"),
+          targets: () => {
+            const list = [];
+            if (currentViewer && $("pane-3d").dataset.visible === "1") list.push({ id: "3d", kind: "3d", label: "3D render", name: "3d" });
+            for (const s of slices.views?.visibleSlices() ?? []) list.push({ id: s.axis, kind: "slice", label: s.label, name: s.name });
+            return list;
+          },
+          sizeOf: (id, area) => {
+            if (id === "3d") { const c = $("canvas"); return c ? { width: c.width, height: c.height } : null; }
+            return slices.views ? slices.views.exportRegion(id, area) : null;
+          },
+          capture: (id, opts, onProgress) => {
+            if (id === "3d") return capture3d(onProgress);
+            onProgress("Loading the slice\u2026");
+            return slices.views.exportSlice(id, opts);
+          },
+          note3d: () => (activeMinLevel > 0
+            ? `It uses the data up to Max detail level ${activeMinLevel}; set that to 0 under Advanced for the finest detail.`
+            : ""),
+        });
+        exportBtn.setAttribute("aria-pressed", String(!!open));
+      });
+
+      const bookmarksBtn = document.getElementById("bookmarks-btn");
+      bookmarksBtn.addEventListener("click", () => {
+        const open = openBookmarksPanel({
+          anchor: bookmarksBtn,
+          store: bookmarkStore,
+          capture: captureBookmark,
+          restore: restoreBookmark,
+          onClose: () => bookmarksBtn.setAttribute("aria-pressed", "false"),
+        });
+        bookmarksBtn.setAttribute("aria-pressed", String(!!open));
+      });
+
+      // The ruler: measures distances in the slice panes and the 3D view. Its measurements live in the slice views'
+      // state (they are made on demand); the button follows the ruler's state, which M and the Measure section change too.
+      const measureBtn = document.getElementById("measure-btn");
+      measureBtn.addEventListener("click", () => slices.toggleMeasure());
+      slices.onMeasuring((on) => measureBtn.setAttribute("aria-pressed", String(on)));
+
+      // The animation timeline docks below the panes. It is made when first needed (a link can play an animation
+      // before Animate is pressed) and keeps its settings and views while it is hidden.
+      const animateBtn = document.getElementById("animate-btn");
+      let timeline = null;
+      function getTimeline() {
+        if (!timeline) {
+          timeline = createTimeline({
+            dock: $("anim-dock"),
+            baseName: volume.slug,
+            description: volume.title,
+            getViewer: () => currentViewer,
+            getSlices: () => slices.views,
+            getCanvas: () => $("canvas"),
+            pane: $("pane-3d"),
+            player,
+            store: pathStore,
+            bookmarks: bookmarkStore,
+            access: {
+              expiresAt: dataAccessExpiresAt,
+              ttlMs: dataAccessTtlMs,
+              renew: refreshDataAccess,
+              onExpired: onDataAccessExpired,
+            },
+            onToggle: (open) => {
+              animateBtn.setAttribute("aria-pressed", String(open));
+              window.dispatchEvent(new Event("resize")); // the panes gained or lost height
+            },
+          });
+        }
+        return timeline;
+      }
+      animateBtn.addEventListener("click", () => getTimeline().toggle());
+
+      document.getElementById("share-btn").addEventListener("click", async () => {
+        const currentViewQuery =
+          window.location.search.replace(/^\?/, "") +
+          (window.location.hash ? "&" + window.location.hash.slice(1) : "");
+        const btn = document.getElementById("share-btn");
+        const origHtml = btn.innerHTML;
+
+        // Readers just copy the direct current view URL
+        if (role !== "editor" && role !== "admin") {
+          try {
+            await navigator.clipboard.writeText(window.location.href);
+            btn.textContent = "Copied!";
+            setTimeout(() => { btn.innerHTML = origHtml; }, 1200);
+          } catch (_) {}
+          return;
+        }
+
+        let cfg;
+        try {
+          cfg = await api.suggestShareCode();
+        } catch (_) {
+          cfg = { min_length: 4, max_length: 16, suggested_code: "" };
+        }
+
+        let modalRoot = document.getElementById("modal-root");
+        if (!modalRoot) {
+          modalRoot = document.createElement("div");
+          modalRoot.id = "modal-root";
+          document.body.appendChild(modalRoot);
+        }
+
+        const DESC_DIRECT =
+          "Copies a direct link to this camera angle and transfer function. The recipient must sign in with an account that has access.";
+        const DESC_TIMED =
+          "Generates a short, time-limited public link (/s/code) that opens this exact view directly without signing in.";
+
+        modalRoot.innerHTML = `
+          <div class="modal-backdrop" id="share-modal-backdrop">
+            <div class="modal share-modal" role="dialog" aria-modal="true" aria-labelledby="share-modal-title">
+              <div class="share-modal-head">
+                <h2 id="share-modal-title">Share current view</h2>
+              </div>
+
+              <div class="share-mode-switch" id="share-mode-switch" data-mode="direct" role="tablist">
+                <div class="share-mode-thumb"></div>
+                <button type="button" class="share-mode-btn active" data-set-mode="direct" role="tab" aria-selected="true">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/>
+                    <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+                  </svg>
+                  <span>Members only</span>
+                </button>
+                <button type="button" class="share-mode-btn" data-set-mode="timed" role="tab" aria-selected="false">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <circle cx="12" cy="12" r="10"/>
+                    <line x1="2" y1="12" x2="22" y2="12"/>
+                    <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>
+                  </svg>
+                  <span>Public token link</span>
+                </button>
+              </div>
+
+              <p class="share-mode-desc" id="share-mode-desc">${DESC_DIRECT}</p>
+              <div id="modal-error" style="display:none;margin-bottom:0.9em" class="error-box"></div>
+
+              <div class="share-drawer" id="timed-drawer">
+                <div class="share-drawer-inner">
+                  <div class="share-drawer-card">
+                    <div class="field" style="margin:0">
+                      <label for="m-code">Short link name (${cfg.min_length}–${cfg.max_length} chars)</label>
+                      <div class="share-code-row">
+                        <span class="share-code-prefix">/s/</span>
+                        <input id="m-code" class="mono" value="${escapeHtml(cfg.suggested_code)}" minlength="${cfg.min_length}" maxlength="${cfg.max_length}" />
+                        <button type="button" class="share-regen-btn" id="m-regen" title="Generate new random code" aria-label="Generate new random code">
+                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M21 2v6h-6"/>
+                            <path d="M3 12a9 9 0 0 1 15-6.7L21 8"/>
+                            <path d="M3 22v-6h6"/>
+                            <path d="M21 12a9 9 0 0 1-15 6.7L3 16"/>
+                          </svg>
+                        </button>
+                      </div>
+                    </div>
+
+                    <div class="field" style="margin:0">
+                      <label for="m-exp">Expires after</label>
+                      <select id="m-exp">
+                        <option value="60">1 hour</option>
+                        <option value="1440" selected>24 hours</option>
+                        <option value="10080">7 days</option>
+                        <option value="43200">30 days</option>
+                        <option value="262800">6 months</option>
+                        <option value="525600">1 year</option>
+                        <option value="0">Never</option>
+                      </select>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="modal-actions">
+                <button type="button" id="m-cancel">Cancel</button>
+                <button type="button" class="primary" id="m-submit" style="display:inline-flex;align-items:center;gap:0.45em">
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
+                    <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+                  </svg>
+                  <span id="m-submit-label">Copy direct link</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        `;
+
+        let mode = "direct";
+        const switchEl = document.getElementById("share-mode-switch");
+        const descEl = document.getElementById("share-mode-desc");
+        const drawerEl = document.getElementById("timed-drawer");
+        const submitLabel = document.getElementById("m-submit-label");
+        const errBox = document.getElementById("modal-error");
+
+        const close = () => { modalRoot.innerHTML = ""; };
+        document.getElementById("m-cancel").addEventListener("click", close);
+        document.getElementById("share-modal-backdrop").addEventListener("click", (e) => {
+          if (e.target === e.currentTarget) close();
+        });
+
+        switchEl.querySelectorAll("[data-set-mode]").forEach((tabBtn) => {
+          tabBtn.addEventListener("click", () => {
+            mode = tabBtn.dataset.setMode;
+            switchEl.dataset.mode = mode;
+            switchEl.querySelectorAll("[data-set-mode]").forEach((b) => {
+              const active = b.dataset.setMode === mode;
+              b.classList.toggle("active", active);
+              b.setAttribute("aria-selected", String(active));
+            });
+            descEl.textContent = mode === "timed" ? DESC_TIMED : DESC_DIRECT;
+            drawerEl.classList.toggle("open", mode === "timed");
+            submitLabel.textContent = mode === "timed" ? "Create & copy link" : "Copy direct link";
+            errBox.style.display = "none";
+          });
+        });
+
+        document.getElementById("m-regen").addEventListener("click", async () => {
+          const n = await api.suggestShareCode();
+          document.getElementById("m-code").value = n.suggested_code;
+        });
+
+        document.getElementById("m-submit").addEventListener("click", async () => {
+          errBox.style.display = "none";
+          try {
+            let linkToCopy = window.location.href;
+            if (mode === "timed") {
+              const code = document.getElementById("m-code").value.trim();
+              const exp = parseInt(document.getElementById("m-exp").value, 10);
+              const res = await api.createShare({
+                code,
+                asset_type: "volume",
+                asset_id: Number(volumeId),
+                expires_in_minutes: exp,
+                view_query: currentViewQuery,
+              });
+              linkToCopy = res.url;
+            }
+            if (navigator.clipboard) await navigator.clipboard.writeText(linkToCopy);
+            btn.textContent = "Copied!";
+            setTimeout(() => { btn.innerHTML = origHtml; }, 1200);
+            close();
+          } catch (err) {
+            errBox.textContent = err.message;
+            errBox.style.display = "block";
+          }
+        });
+      });
+      const viewMeshBtn = $("view-mesh");
+      if (viewMeshBtn) {
+        viewMeshBtn.addEventListener("click", () => {
+          window.location.href = `/viewers/mesh.html?volume=${encodeURIComponent(volumeId)}`;
+        });
+      }
+
+      const downloadBtn = $("download-mesh");
+      if (downloadBtn) {
+        downloadBtn.addEventListener("click", async () => {
+          try {
+            const access = await api.meshAccessUrl(volumeId);
+            window.location.href = access.url;
+          } catch (err) {
+            alert(err.message);
+          }
+        });
+      }
+    }
+
+    // Keeps the page URL in sync with the live view (camera, mode, transfer
+    // function, clip range, ...) so a reload or a copied link restores it.
+    function startUrlSync(viewer, getMinLevel) {
+      let last = window.location.search;
+      const write = () => {
+        try {
+          const p = stateToParams(viewer.getState(), getMinLevel());
+          for (const [k, v] of Object.entries(sliceUrlParams())) p.set(k, v);
+          const now = new URLSearchParams(window.location.search);
+          const play = now.get("play"); // a link that plays a saved path
+          if (play) p.set("play", play);
+          const anim = now.get(ANIM_PARAM); // a link that carries an animation that was not saved
+          if (anim) p.set(ANIM_PARAM, anim);
+          const qs = "?" + p.toString();
+          if (qs !== last) {
+            history.replaceState(history.state, "", window.location.pathname + qs + window.location.hash);
+            last = qs;
+          }
+        } catch (err) {
+          // replaceState can be rate-limited by the browser; the next tick retries.
+        }
+      };
+      const timer = setInterval(write, 500);
+      write();
+      return { flush: write, stop: () => { write(); clearInterval(timer); } };
+    }
+
+    // The side panel: a segmented mode switch, a "swap region" whose contents
+    // depend on the selected mode (transfer function + windowing + density
+    // for DVR, windowing for MIP, + iso value for ISO), a collapsible Scene
+    // section (up axis, wireframe/axis overlays, per-axis clip range in voxel
+    // coordinates), a closed-by-default Info section (live render statistics)
+    // and a collapsible Advanced section (render scale, max detail level,
+    // LOD/jitter/TAA/indirection). The slice views have their own section.
+    function buildControlPanel(viewer, container, lodOptions) {
+
+      const renderer = viewer.renderer;
+      const camera = viewer.camera;
+      const tf = viewer.transferFunction;
+      // "Custom" colour stops need kiln-render patch 0007; without it the preset list stays as it was.
+      const canCustomColours = typeof tf.setColorStops === "function";
+      const tfPresetChoices = canCustomColours ? [...TF_PRESETS, ["custom", "Custom"]] : TF_PRESETS;
+      const [dimX, dimY, dimZ] = viewer.metadata.dimensions;
+      const dims = { X: dimX, Y: dimY, Z: dimZ };
+
+      const state = {
+        mode: ["dvr", "mip", "iso"].includes(viewer.mode) ? viewer.mode : "dvr",
+        lod: viewer.mode === "lod",
+        tfPreset: tf.preset,
+        upAxis: camera.getUpAxis(),
+        clipMinX: Math.round(renderer.clipMin[0] * dimX),
+        clipMinY: Math.round(renderer.clipMin[1] * dimY),
+        clipMinZ: Math.round(renderer.clipMin[2] * dimZ),
+        clipMaxX: Math.round(renderer.clipMax[0] * dimX) || dimX,
+        clipMaxY: Math.round(renderer.clipMax[1] * dimY) || dimY,
+        clipMaxZ: Math.round(renderer.clipMax[2] * dimZ) || dimZ,
+      };
+
+      function effectiveMode() {
+        if (state.lod && state.mode === "dvr") return "lod";
+        return state.mode; // MIP/ISO have no LOD-streaming variant
+      }
+      function applyMode() { viewer.mode = effectiveMode(); }
+
+      const dirty = () => {
+        renderer.markDirty();
+        renderer.resetAccumulation();
+      };
+
+      const arrowSvg = `<svg class="ctl-panel-arrow" viewBox="0 0 8 8" width="8" height="8"><path d="M2 0l4 4-4 4z" fill="currentColor"/></svg>`;
+      const collapsibleArrow = arrowSvg.replace('class="ctl-panel-arrow"', 'class="ctl-collapsible-arrow"');
+
+      const panel = document.createElement("aside");
+      panel.className = "ctl-panel";
+      panel.hidden = !uiState.panelOpen;
+      panel.innerHTML = `
+        <div class="ctl-panel-header">
+          <span>Volume controls</span>
+          <button type="button" class="ctl-close" data-role="panel-close" aria-label="Close controls" title="Close">\u00d7</button>
+        </div>
+        <div class="ctl-panel-body">
+          <div class="ctl-segmented" data-role="mode-segmented">
+            ${["dvr", "mip", "iso"].map((m) => `
+              <button type="button" class="ctl-segment${state.mode === m ? " active" : ""}" data-mode="${m}">
+                ${m === "dvr" ? "DVR" : m === "mip" ? "MIP" : "ISO"}
+              </button>`).join("")}
+          </div>
+
+          <div class="ctl-swap-region" data-role="swap-region"></div>
+
+          <div class="ctl-collapsible${uiState.sceneOpen ? " open" : ""}" data-key="sceneOpen">
+            <button type="button" class="ctl-collapsible-header">
+              ${collapsibleArrow}
+              <span class="ctl-eyebrow">Scene</span>
+            </button>
+            <div class="ctl-collapsible-body">
+              <label class="ctl-select-row">
+                <span class="ctl-row-label ctl-select-label">Up Axis</span>
+                <select class="ctl-select-input" data-role="up-axis">
+                  ${UP_AXES.map((a) =>
+                    `<option value="${a}"${state.upAxis === a ? " selected" : ""}>${a.toUpperCase()}</option>`
+                  ).join("")}
+                </select>
+              </label>
+              <label class="ctl-toggle-row">
+                <span class="ctl-row-label ctl-toggle-label">Wireframe</span>
+                <input type="checkbox" class="ctl-toggle-input" data-role="wireframe" ${renderer.showWireframe ? "checked" : ""}>
+                <span class="ctl-toggle-track"></span>
+              </label>
+              <label class="ctl-toggle-row">
+                <span class="ctl-row-label ctl-toggle-label">Axes</span>
+                <input type="checkbox" class="ctl-toggle-input" data-role="axes" ${renderer.showAxis ? "checked" : ""}>
+                <span class="ctl-toggle-track"></span>
+              </label>
+              ${typeof camera.setFreeRotation === "function" ? `<label class="ctl-toggle-row" title="On: drag turns the volume freely about the screen's axes, over the poles, and Shift + drag rolls it. Off: turntable, the chosen up axis stays up.">
+                <span class="ctl-row-label ctl-toggle-label">Free rotation</span>
+                <input type="checkbox" class="ctl-toggle-input" data-role="freerot" ${camera.isFreeRotation() ? "checked" : ""}>
+                <span class="ctl-toggle-track"></span>
+              </label>` : ""}
+              <label class="ctl-toggle-row" title="Length reference at the orbit target, assuming the voxel spacing in volume.json is in micrometres">
+                <span class="ctl-row-label ctl-toggle-label">Scale bar (3D view)</span>
+                <input type="checkbox" class="ctl-toggle-input" data-role="scalebar" ${uiState.scaleBar ? "checked" : ""}>
+                <span class="ctl-toggle-track"></span>
+              </label>
+              <div data-role="clip-rows">
+                ${["X", "Y", "Z"].map((axis) => `
+                  <div class="ctl-slider-row">
+                    <span class="ctl-row-label ctl-slider-label">Clip ${axis}</span>
+                    <div class="ctl-range-track" data-role="clip-track-${axis}">
+                      <div class="ctl-range-fill" data-role="clip-fill-${axis}"></div>
+                      <input type="range" class="ctl-range-input" data-role="clip-min-${axis}" min="0" max="${dims[axis]}" step="1" value="${state["clipMin" + axis]}">
+                      <input type="range" class="ctl-range-input" data-role="clip-max-${axis}" min="0" max="${dims[axis]}" step="1" value="${state["clipMax" + axis]}">
+                    </div>
+                    <span class="ctl-row-value ctl-mono" data-role="clip-value-${axis}">${state["clipMin" + axis]}\u2013${state["clipMax" + axis]}</span>
+                  </div>
+                `).join("")}
+              </div>
+            </div>
+          </div>
+
+          <div class="ctl-collapsible${uiState.infoOpen ? " open" : ""}" data-key="infoOpen">
+            <button type="button" class="ctl-collapsible-header">
+              ${collapsibleArrow}
+              <span class="ctl-eyebrow">Info</span>
+            </button>
+            <div class="ctl-collapsible-body">
+              <div class="viewer-stats-text" id="stats-text">\u2014</div>
+            </div>
+          </div>
+          <div class="ctl-collapsible${uiState.advancedOpen ? " open" : ""}" data-key="advancedOpen">
+            <button type="button" class="ctl-collapsible-header">
+              ${collapsibleArrow}
+              <span class="ctl-eyebrow">Advanced</span>
+            </button>
+            <div class="ctl-collapsible-body">
+              <div class="ctl-slider-row">
+                <span class="ctl-row-label ctl-slider-label">Render Scale</span>
+                <div class="ctl-slider-track">
+                  <div class="ctl-slider-fill" data-role="fill-renderScale"></div>
+                  <input type="range" class="ctl-slider-input" data-role="slider-renderScale" min="0.25" max="1" step="0.25" value="${viewer.renderScale}">
+                </div>
+                <span class="ctl-row-value ctl-mono" data-role="value-renderScale">${viewer.renderScale.toFixed(2)}</span>
+              </div>
+              ${
+                lodOptions.numLodLevels && lodOptions.numLodLevels > 1
+                  ? `
+              <label class="ctl-select-row" title="Level 0 = full resolution; higher levels are coarser downsamples. Levels finer than this are never streamed, regardless of how close the camera gets. Changing it reloads the volume; the view and transfer function are kept.">
+                <span class="ctl-row-label ctl-select-label">Max detail level</span>
+                <select class="ctl-select-input" data-role="min-level">
+                  ${Array.from({ length: lodOptions.numLodLevels }, (_, i) => i)
+                    .map((i) => {
+                      const label = i === 0 ? "0 (full res)" : i === lodOptions.numLodLevels - 1 ? `${i} (coarsest)` : String(i);
+                      const selected = i === (lodOptions.minLevel ?? 0) ? " selected" : "";
+                      return `<option value="${i}"${selected}>${label}</option>`;
+                    })
+                    .join("")}
+                </select>
+              </label>`
+                  : ""
+              }
+              <label class="ctl-select-row" title="Upper limit for the GPU memory used to cache volume bricks. A larger allocation keeps more of the volume resident, so less is evicted and downloaded again; it is never larger than the volume needs, and the engine lowers it if the GPU cannot allocate it. Changing it reloads the volume; the view and transfer function are kept.">
+                <span class="ctl-row-label ctl-select-label">VRAM allocation</span>
+                <select class="ctl-select-input" data-role="atlas-vram">
+                  ${ATLAS_VRAM_OPTIONS_MB.map(
+                    (mb) => `<option value="${mb}"${mb === lodOptions.atlasVramMB ? " selected" : ""}>${formatVram(mb)}</option>`
+                  ).join("")}
+                </select>
+              </label>
+              <label class="ctl-toggle-row${state.mode !== "dvr" ? " disabled" : ""}" title="Only available for DVR mode">
+                <span class="ctl-row-label ctl-toggle-label">LOD Levels</span>
+                <input type="checkbox" class="ctl-toggle-input" data-role="lod" ${state.lod ? "checked" : ""} ${state.mode !== "dvr" ? "disabled" : ""}>
+                <span class="ctl-toggle-track"></span>
+              </label>
+              <label class="ctl-toggle-row">
+                <span class="ctl-row-label ctl-toggle-label">Jitter</span>
+                <input type="checkbox" class="ctl-toggle-input" data-role="jitter" ${renderer.enableJitter ? "checked" : ""}>
+                <span class="ctl-toggle-track"></span>
+              </label>
+              <label class="ctl-toggle-row">
+                <span class="ctl-row-label ctl-toggle-label">TAA</span>
+                <input type="checkbox" class="ctl-toggle-input" data-role="taa" ${renderer.enableTAA ? "checked" : ""}>
+                <span class="ctl-toggle-track"></span>
+              </label>
+              <label class="ctl-toggle-row">
+                <span class="ctl-row-label ctl-toggle-label">Indirection</span>
+                <input type="checkbox" class="ctl-toggle-input" data-role="indirection" ${renderer.useIndirection ? "checked" : ""}>
+                <span class="ctl-toggle-track"></span>
+              </label>
+            </div>
+          </div>
+        </div>
+      `;
+      container.appendChild(panel);
+
+      const panelBody = panel.querySelector(".ctl-panel-body");
+      panelBody.scrollTop = uiState.panelScroll;
+      panelBody.addEventListener("scroll", () => { uiState.panelScroll = panelBody.scrollTop; });
+      panel.querySelector('[data-role="panel-close"]').addEventListener("click", () => setPanelOpen(false));
+      $("panel-open").hidden = uiState.panelOpen;
+
+      // --- generic slider row (single handle): wires an <input type=range>
+      // plus its fill bar and numeric readout. Wiring only paints the current
+      // value; `apply(value)` runs on user input only, so merely building the
+      // panel (e.g. after a reload) can never nudge the view. ---
+      function wireSlider(root, role, apply, format) {
+        const input = root.querySelector(`[data-role="slider-${role}"]`);
+        const fill = root.querySelector(`[data-role="fill-${role}"]`);
+        const value = root.querySelector(`[data-role="value-${role}"]`);
+        const paint = () => {
+          const v = parseFloat(input.value);
+          const pct = ((v - parseFloat(input.min)) / (parseFloat(input.max) - parseFloat(input.min))) * 100;
+          fill.style.width = `calc(6px + (100% - 12px) * ${pct / 100})`;
+          value.textContent = format(v);
+        };
+        input.addEventListener("input", () => { paint(); apply(parseFloat(input.value)); });
+        paint();
+      }
+
+      // --- generic dual-handle range row (clip sliders), values in voxel
+      // units. Both <input type=range> share one visual track; each only
+      // captures pointer events on its own thumb (see .ctl-range-input CSS),
+      // and JS clamps min <= max on interaction. ---
+      function wireClipAxis(axis, dim, apply) {
+        const minInput = panel.querySelector(`[data-role="clip-min-${axis}"]`);
+        const maxInput = panel.querySelector(`[data-role="clip-max-${axis}"]`);
+        const fill = panel.querySelector(`[data-role="clip-fill-${axis}"]`);
+        const valueEl = panel.querySelector(`[data-role="clip-value-${axis}"]`);
+        const paint = () => {
+          let lo = parseInt(minInput.value, 10);
+          let hi = parseInt(maxInput.value, 10);
+          if (lo > hi) { [lo, hi] = [hi, lo]; minInput.value = lo; maxInput.value = hi; }
+          const loPct = (lo / dim) * 100;
+          const hiPct = (hi / dim) * 100;
+          fill.style.left = `calc(${loPct}% + ${6 - loPct / 100 * 12}px)`;
+          fill.style.width = `calc(${hiPct - loPct}% - ${(hiPct - loPct) / 100 * 12}px)`;
+          valueEl.textContent = `${lo}\u2013${hi}`;
+          return [lo, hi];
+        };
+        const onInput = () => { const [lo, hi] = paint(); apply(lo / dim, hi / dim); };
+        minInput.addEventListener("input", onInput);
+        maxInput.addEventListener("input", onInput);
+        paint();
+      }
+
+      // --- transfer function editor: the gradient/opacity curve is drawn by
+      // kiln-render's renderPreview() on the bottom canvas; the control points
+      // are drawn on a transparent overlay that also receives all pointer
+      // input. Pointer capture keeps a drag alive when the cursor leaves the
+      // canvas (or the panel) and values are clamped to 0..1, so every extreme
+      // is reachable. Drag a point or a line segment to move it, double-click
+      // empty space or a line to add a point, double-click a point to remove it.
+      // The first and last point stay at x = 0 and x = 1 (kiln-render re-adds
+      // them otherwise); only their opacity moves. ---
+      let tfResizeObserver = null;
+      function wireTfCanvas(root) {
+        const canvas = root.querySelector(".ctl-tf-canvas");
+        const overlay = root.querySelector(".ctl-tf-overlay");
+        let drag = null; // { type: "point", index, ... } | { type: "line", index, startPt, startP0, startP1, ... }; both: { startX, startY (client px), moved }
+        let hover = -1; // the point under the pointer (drawn larger)
+        const X_GAP = 0.002; // closest two points may get along x
+        const DRAG_SLOP = 3; // px the pointer must travel before a press becomes a drag (a plain click or double-click moves nothing)
+
+        function redraw() {
+          const rect = canvas.getBoundingClientRect();
+          if (rect.width === 0 || rect.height === 0) return; // panel closed
+          const dpr = window.devicePixelRatio || 1;
+          const cw = Math.max(1, Math.round(rect.width * dpr));
+          const ch = Math.max(1, Math.round(rect.height * dpr));
+          if (canvas.width !== cw || canvas.height !== ch) {
+            canvas.width = cw;
+            canvas.height = ch;
+          }
+          syncHistogram(viewer, histogramData); // no-op unless the intensity axis changed (float data)
+          tf.renderPreview(canvas, viewer.windowCenter, viewer.windowWidth);
+
+          const stageRect = overlay.getBoundingClientRect();
+          const ow = Math.round(stageRect.width * dpr);
+          const oh = Math.round(stageRect.height * dpr);
+          if (overlay.width !== ow || overlay.height !== oh) {
+            overlay.width = ow;
+            overlay.height = oh;
+          }
+          const ctx = overlay.getContext("2d");
+          ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+          ctx.clearRect(0, 0, stageRect.width, stageRect.height);
+
+          const ox = rect.left - stageRect.left;
+          const oy = rect.top - stageRect.top;
+          const points = tf.getOpacityPoints();
+
+          if (drag?.type === "line" && points[drag.index] && points[drag.index + 1]) {
+            const p0 = points[drag.index];
+            const p1 = points[drag.index + 1];
+            ctx.beginPath();
+            ctx.moveTo(ox + p0.x * rect.width, oy + (1 - p0.y) * rect.height);
+            ctx.lineTo(ox + p1.x * rect.width, oy + (1 - p1.y) * rect.height);
+            ctx.lineWidth = 3;
+            ctx.strokeStyle = "#e8a33d";
+            ctx.stroke();
+          }
+
+          ctx.lineWidth = 2;
+          points.forEach((p, i) => {
+            const active =
+              (drag?.type === "point" && drag.index === i) ||
+              (drag?.type === "line" && (drag.index === i || drag.index + 1 === i));
+            const lit = active || (!drag && hover === i);
+            ctx.beginPath();
+            ctx.arc(ox + p.x * rect.width, oy + (1 - p.y) * rect.height, lit ? 7 : 5.5, 0, Math.PI * 2);
+            ctx.fillStyle = lit ? "#ffc15e" : "#e8a33d";
+            ctx.strokeStyle = lit ? "#ffffff" : "rgba(20,23,28,0.9)";
+            ctx.fill();
+            ctx.stroke();
+          });
+        }
+
+        // Normalised (0..1) position relative to the preview canvas. Clamped,
+        // so a pointer that left the canvas still maps to its nearest edge.
+        function pointFromEvent(evt) {
+          const rect = canvas.getBoundingClientRect();
+          const x = Math.min(1, Math.max(0, (evt.clientX - rect.left) / rect.width));
+          const y = Math.min(1, Math.max(0, 1 - (evt.clientY - rect.top) / rect.height));
+          return { x, y };
+        }
+
+        function nearestPointIndex(pt, thresholdPx = 11) {
+          const points = tf.getOpacityPoints();
+          const rect = canvas.getBoundingClientRect();
+          let best = -1, bestDist = Infinity;
+          points.forEach((p, i) => {
+            const dx = (p.x - pt.x) * rect.width;
+            const dy = (p.y - pt.y) * rect.height;
+            const dist = Math.sqrt(dx * dx + dy * dy);
+            if (dist < bestDist) { bestDist = dist; best = i; }
+          });
+          return bestDist <= thresholdPx ? best : -1;
+        }
+
+        function nearestSegmentIndex(pt, thresholdPx = 10) {
+          const points = tf.getOpacityPoints();
+          const rect = canvas.getBoundingClientRect();
+          const px = pt.x * rect.width;
+          const py = pt.y * rect.height;
+          let best = -1, bestDist = Infinity;
+          for (let i = 0; i < points.length - 1; i++) {
+            const ax = points[i].x * rect.width;
+            const ay = points[i].y * rect.height;
+            const bx = points[i + 1].x * rect.width;
+            const by = points[i + 1].y * rect.height;
+            const abx = bx - ax;
+            const aby = by - ay;
+            const lenSq = abx * abx + aby * aby;
+            const t = lenSq > 0 ? Math.min(1, Math.max(0, ((px - ax) * abx + (py - ay) * aby) / lenSq)) : 0;
+            const dist = Math.hypot(px - (ax + t * abx), py - (ay + t * aby));
+            if (dist < bestDist) {
+              bestDist = dist;
+              best = i;
+            }
+          }
+          return bestDist <= thresholdPx ? best : -1;
+        }
+
+        function applyPoints(points) {
+          tf.setOpacityPoints(points);
+          dirty();
+          redraw();
+        }
+
+        function endDrag() {
+          if (drag === null) return;
+          drag = null;
+          overlay.style.cursor = "crosshair";
+          redraw();
+        }
+
+        overlay.addEventListener("pointerdown", (evt) => {
+          if (evt.button !== 0) return;
+          evt.preventDefault();
+          const pt = pointFromEvent(evt);
+          const points = tf.getOpacityPoints();
+          const ptIdx = nearestPointIndex(pt);
+          const press = { startX: evt.clientX, startY: evt.clientY, moved: false };
+          if (ptIdx >= 0) {
+            drag = { type: "point", index: ptIdx, ...press };
+          } else {
+            const segIdx = nearestSegmentIndex(pt);
+            if (segIdx >= 0) {
+              drag = {
+                type: "line",
+                index: segIdx,
+                startPt: pt,
+                startP0: { x: points[segIdx].x, y: points[segIdx].y },
+                startP1: { x: points[segIdx + 1].x, y: points[segIdx + 1].y },
+                ...press,
+              };
+            }
+          }
+          if (drag) {
+            overlay.setPointerCapture(evt.pointerId);
+            overlay.style.cursor = "grabbing";
+            redraw();
+          }
+        });
+        overlay.addEventListener("pointermove", (evt) => {
+          const pt = pointFromEvent(evt);
+          if (drag === null) {
+            const idx = nearestPointIndex(pt);
+            overlay.style.cursor = idx >= 0 || nearestSegmentIndex(pt) >= 0 ? "grab" : "crosshair";
+            if (idx !== hover) { hover = idx; redraw(); }
+            return;
+          }
+          if (!drag.moved) {
+            if (Math.hypot(evt.clientX - drag.startX, evt.clientY - drag.startY) < DRAG_SLOP) return;
+            drag.moved = true;
+          }
+          const points = tf.getOpacityPoints();
+          if (drag.type === "point") {
+            const idx = drag.index;
+            if (idx < 0 || idx >= points.length) return;
+            let x = pt.x;
+            if (idx === 0) x = 0;
+            else if (idx === points.length - 1) x = 1;
+            else {
+              const lo = points[idx - 1].x + X_GAP, hi = points[idx + 1].x - X_GAP;
+              x = lo > hi ? (points[idx - 1].x + points[idx + 1].x) / 2 : Math.min(hi, Math.max(lo, x));
+            }
+            points[idx] = { x, y: pt.y };
+            applyPoints(points);
+          } else if (drag.type === "line") {
+            const idx = drag.index;
+            if (idx < 0 || idx + 1 >= points.length) return;
+            const { startPt, startP0, startP1 } = drag;
+            const dx = pt.x - startPt.x;
+            const dy = pt.y - startPt.y;
+            // A segment that has an end point (x = 0 or 1) as one of its ends can only slide up and down.
+            const pinned = idx === 0 || idx + 1 === points.length - 1;
+            const minDx = pinned ? 0 : points[idx - 1].x + X_GAP - startP0.x;
+            const maxDx = pinned ? 0 : points[idx + 2].x - X_GAP - startP1.x;
+            const clampedDx = minDx > maxDx ? 0 : Math.min(maxDx, Math.max(minDx, dx));
+            const minDy = -Math.min(startP0.y, startP1.y);
+            const maxDy = 1 - Math.max(startP0.y, startP1.y);
+            const clampedDy = Math.min(maxDy, Math.max(minDy, dy));
+            points[idx] = { x: startP0.x + clampedDx, y: startP0.y + clampedDy };
+            points[idx + 1] = { x: startP1.x + clampedDx, y: startP1.y + clampedDy };
+            applyPoints(points);
+          }
+        });
+        overlay.addEventListener("pointerleave", () => { if (!drag && hover !== -1) { hover = -1; redraw(); } });
+        overlay.addEventListener("pointerup", endDrag);
+        overlay.addEventListener("pointercancel", endDrag);
+        overlay.addEventListener("lostpointercapture", endDrag);
+        overlay.addEventListener("dblclick", (evt) => {
+          const pt = pointFromEvent(evt);
+          const points = tf.getOpacityPoints();
+          const idx = nearestPointIndex(pt);
+          if (idx >= 0) {
+            if (idx <= 0 || idx >= points.length - 1) return; // keep the end points
+            points.splice(idx, 1);
+          } else {
+            if (points.some((p) => Math.abs(p.x - pt.x) < X_GAP)) return; // no room: a point is already there along x
+            points.push(pt);
+            points.sort((a, b) => a.x - b.x);
+          }
+          applyPoints(points);
+        });
+
+        tfResizeObserver?.disconnect();
+        tfResizeObserver = new ResizeObserver(() => redraw());
+        tfResizeObserver.observe(overlay);
+
+        redraw();
+        return redraw;
+      }
+
+      // --- colour editor (preset "Custom"): a strip under the TF canvas with one handle per colour
+      // stop. Drag a handle to move it (the end stops stay at 0 and 1), click the strip to add a stop
+      // coloured like the map at that spot, double-click or Delete to remove one, arrow keys nudge the
+      // selected stop. The colour box and position field below edit the selected stop. kiln-render
+      // keeps the stops (tf.getColorStops()), so share links and in-place reloads carry them. ---
+      let selStop = 0;
+      let lastCustomStops = null; // restored when "Custom" is picked again after a built-in preset
+      const MIN_GAP = 0.001;
+
+      // The current colour map as a short list of stops (collinear ones dropped), the starting point
+      // when switching from a built-in preset to editing.
+      function currentColourStops() {
+        const n = 17;
+        let stops = Array.from({ length: n }, (_, i) => ({ pos: i / (n - 1), color: rgbToHex(tf.getColor(i / (n - 1))) }));
+        for (let i = 1; i < stops.length - 1;) {
+          const a = stops[i - 1], b = stops[i + 1];
+          const expect = sampleStops([a, b], stops[i].pos);
+          const got = tf.getColor(stops[i].pos);
+          if (expect.every((v, k) => Math.abs(v - got[k]) <= 3)) stops.splice(i, 1); else i++;
+        }
+        return stops;
+      }
+
+      function wireColorEditor(root) {
+        const host = root.querySelector('[data-role="tf-colors"]');
+        let bar = null, drag = null;
+        let lastAdd = -Infinity; // when a click last added a stop: its double-click must not delete it again
+        let pressedStop = -1; // the stop the last press landed on (a double-click's own coordinates are rounded, so it is not hit-tested again)
+
+        const gradient = (stops) =>
+          `linear-gradient(to right, ${stops.map((s) => `${s.color} ${(s.pos * 100).toFixed(2)}%`).join(", ")})`;
+
+        function commit(stops) {
+          tf.setColorStops(stops);
+          state.tfPreset = tf.preset;
+          dirty();
+          if (redrawTf) redrawTf();
+          paint();
+        }
+
+        function paint() {
+          const stops = tf.getColorStops();
+          if (!bar || !stops) return;
+          selStop = Math.min(selStop, stops.length - 1);
+          bar.style.background = gradient(stops);
+          if (bar.children.length !== stops.length) {
+            bar.replaceChildren(...stops.map(() => Object.assign(document.createElement("div"), { className: "ctl-cs-stop" })));
+          }
+          stops.forEach((s, i) => {
+            const el = bar.children[i];
+            el.style.left = `${s.pos * 100}%`;
+            el.style.setProperty("--c", s.color);
+            el.classList.toggle("sel", i === selStop);
+            el.classList.toggle("end", i === 0 || i === stops.length - 1);
+          });
+          const interior = selStop > 0 && selStop < stops.length - 1;
+          const colorInput = host.querySelector('[data-role="cs-color"]');
+          if (colorInput.value !== stops[selStop].color) colorInput.value = stops[selStop].color;
+          const posInput = host.querySelector('[data-role="cs-pos"]');
+          if (document.activeElement !== posInput) posInput.value = stops[selStop].pos.toFixed(3);
+          posInput.disabled = !interior;
+          host.querySelector('[data-role="cs-remove"]').disabled = !interior;
+        }
+
+        function build() {
+          bar = null;
+          if (!tf.getColorStops()) {
+            host.innerHTML = canCustomColours
+              ? `<button type="button" class="ctl-mini-btn" data-role="cs-edit">Edit colours&hellip;</button>`
+              : "";
+            host.hidden = !canCustomColours;
+            host.querySelector('[data-role="cs-edit"]')?.addEventListener("click", () => {
+              selectPreset("custom");
+              root.querySelector('[data-role="tf-preset"]').value = "custom";
+            });
+            return;
+          }
+          host.hidden = false;
+          host.innerHTML = `
+            <div class="ctl-cs-bar" data-role="cs-bar" tabindex="0" title="Click to add a colour stop; drag a stop to move it; double-click or press Delete to remove it"></div>
+            <div class="ctl-cs-row">
+              <input type="color" data-role="cs-color" aria-label="Colour of the selected stop" title="Colour of the selected stop">
+              <label class="ctl-cs-pos">Pos <input type="number" data-role="cs-pos" min="0" max="1" step="0.01" aria-label="Position of the selected stop"></label>
+              <span class="ctl-cs-spacer"></span>
+              <button type="button" class="ctl-mini-btn" data-role="cs-remove" title="Remove the selected stop">Remove</button>
+              <button type="button" class="ctl-mini-btn" data-role="cs-reverse" title="Flip the colour map">Reverse</button>
+            </div>`;
+          bar = host.querySelector('[data-role="cs-bar"]');
+          wire();
+          paint();
+        }
+
+        function posFromEvent(evt) {
+          const rect = bar.getBoundingClientRect();
+          return Math.min(1, Math.max(0, (evt.clientX - rect.left) / rect.width));
+        }
+        function hitStop(pos) {
+          const stops = tf.getColorStops();
+          const widthPx = bar.getBoundingClientRect().width;
+          let best = -1, bestDist = Infinity;
+          stops.forEach((s, i) => {
+            const d = Math.abs(s.pos - pos) * widthPx;
+            if (d < bestDist) { bestDist = d; best = i; }
+          });
+          return bestDist <= 8 ? best : -1;
+        }
+        function removeStop(i) {
+          const stops = tf.getColorStops();
+          if (i <= 0 || i >= stops.length - 1) return;
+          stops.splice(i, 1);
+          selStop = Math.min(selStop, stops.length - 1);
+          commit(stops);
+        }
+        function moveStop(i, pos) {
+          const stops = tf.getColorStops();
+          if (i <= 0 || i >= stops.length - 1) return;
+          stops[i].pos = Math.min(stops[i + 1].pos - MIN_GAP, Math.max(stops[i - 1].pos + MIN_GAP, pos));
+          commit(stops);
+        }
+
+        function wire() {
+          bar.addEventListener("pointerdown", (evt) => {
+            if (evt.button !== 0) return;
+            evt.preventDefault();
+            bar.focus();
+            bar.setPointerCapture(evt.pointerId);
+            const pos = posFromEvent(evt);
+            let idx = hitStop(pos);
+            if (idx < 0) {
+              const stops = insertStop(tf.getColorStops(), pos);
+              idx = stops.reduce((best, s, i) => (Math.abs(s.pos - pos) < Math.abs(stops[best].pos - pos) ? i : best), 0);
+              selStop = idx;
+              lastAdd = performance.now();
+              commit(stops);
+            }
+            selStop = idx;
+            pressedStop = idx;
+            drag = { index: idx };
+            paint();
+          });
+          bar.addEventListener("pointermove", (evt) => {
+            if (drag) moveStop(drag.index, posFromEvent(evt));
+          });
+          const endDrag = () => { drag = null; };
+          bar.addEventListener("pointerup", endDrag);
+          bar.addEventListener("pointercancel", endDrag);
+          bar.addEventListener("lostpointercapture", endDrag);
+          bar.addEventListener("dblclick", (evt) => {
+            // (a double-click on empty strip adds a stop with its first click; the second one must not remove it)
+            if (performance.now() - lastAdd < 600) return;
+            if (pressedStop > 0) removeStop(pressedStop);
+          });
+          bar.addEventListener("keydown", (evt) => {
+            if (evt.key === "Delete" || evt.key === "Backspace") {
+              evt.preventDefault();
+              removeStop(selStop);
+            } else if (evt.key === "ArrowLeft" || evt.key === "ArrowRight") {
+              evt.preventDefault();
+              const step = (evt.shiftKey ? 0.05 : 0.01) * (evt.key === "ArrowLeft" ? -1 : 1);
+              moveStop(selStop, tf.getColorStops()[selStop].pos + step);
+            }
+          });
+          host.querySelector('[data-role="cs-color"]').addEventListener("input", (evt) => {
+            const stops = tf.getColorStops();
+            stops[selStop].color = evt.target.value;
+            commit(stops);
+          });
+          host.querySelector('[data-role="cs-pos"]').addEventListener("change", (evt) => {
+            const v = Number(evt.target.value);
+            if (Number.isFinite(v)) moveStop(selStop, v);
+            paint();
+          });
+          host.querySelector('[data-role="cs-remove"]').addEventListener("click", () => removeStop(selStop));
+          host.querySelector('[data-role="cs-reverse"]').addEventListener("click", () => {
+            const stops = tf.getColorStops().map((s) => ({ ...s, pos: 1 - s.pos })).sort((a, b) => a.pos - b.pos);
+            selStop = stops.length - 1 - selStop;
+            commit(stops);
+          });
+        }
+
+        build();
+        return build;
+      }
+
+      // Switches the colour map: a built-in preset, or "custom" (the last custom stops, else the
+      // current colours as an editable starting point).
+      function selectPreset(value) {
+        if (value === "custom") {
+          const stops = tf.getColorStops() ?? lastCustomStops ?? currentColourStops();
+          selStop = 0;
+          tf.setColorStops(stops);
+        } else {
+          const keep = tf.getColorStops();
+          if (keep) lastCustomStops = keep;
+          tf.setPreset(value);
+        }
+        state.tfPreset = tf.preset;
+        dirty();
+        if (redrawTf) redrawTf();
+        if (rebuildColorEditor) rebuildColorEditor();
+      }
+      let rebuildColorEditor = null;
+
+      // --- swap region: rebuilt whenever the mode changes, since which
+      // controls are relevant differs by mode. ---
+      let redrawTf = null;
+      function renderSwapRegion() {
+        const swap = panel.querySelector('[data-role="swap-region"]');
+        const showDensity = state.mode === "dvr";
+        const showIso = state.mode === "iso";
+        swap.innerHTML = `
+          <label class="ctl-select-row">
+            <span class="ctl-row-label ctl-select-label">Preset</span>
+            <select class="ctl-select-input" data-role="tf-preset">
+              ${tfPresetChoices.map(([v, label]) => `<option value="${v}"${state.tfPreset === v ? " selected" : ""}>${label}</option>`).join("")}
+            </select>
+          </label>
+          <div class="ctl-tf-canvas-container">
+            <div class="ctl-tf-stage">
+              <canvas class="ctl-tf-canvas"></canvas>
+              <canvas class="ctl-tf-overlay"></canvas>
+            </div>
+            <div class="ctl-tf-colors" data-role="tf-colors"></div>
+          </div>
+          <div class="ctl-tf-help">Drag points or lines &#x00b7; double-click to add or remove</div>
+          <div class="ctl-slider-row">
+            <span class="ctl-row-label ctl-slider-label">Center</span>
+            <div class="ctl-slider-track">
+              <div class="ctl-slider-fill" data-role="fill-center"></div>
+              <input type="range" class="ctl-slider-input" data-role="slider-center" min="0" max="1" step="0.01" value="${viewer.windowCenter}">
+            </div>
+            <span class="ctl-row-value ctl-mono" data-role="value-center">${viewer.windowCenter.toFixed(2)}</span>
+          </div>
+          <div class="ctl-slider-row">
+            <span class="ctl-row-label ctl-slider-label">Width</span>
+            <div class="ctl-slider-track">
+              <div class="ctl-slider-fill" data-role="fill-width"></div>
+              <input type="range" class="ctl-slider-input" data-role="slider-width" min="0.01" max="1" step="0.01" value="${viewer.windowWidth}">
+            </div>
+            <span class="ctl-row-value ctl-mono" data-role="value-width">${viewer.windowWidth.toFixed(2)}</span>
+          </div>
+          ${showDensity ? `
+          <div class="ctl-slider-row">
+            <span class="ctl-row-label ctl-slider-label">Density</span>
+            <div class="ctl-slider-track">
+              <div class="ctl-slider-fill" data-role="fill-density"></div>
+              <input type="range" class="ctl-slider-input" data-role="slider-density" min="0.1" max="10" step="0.1" value="${renderer.densityScale}">
+            </div>
+            <span class="ctl-row-value ctl-mono" data-role="value-density">${renderer.densityScale.toFixed(2)}</span>
+          </div>` : ""}
+          ${showIso ? `
+          <div class="ctl-slider-row">
+            <span class="ctl-row-label ctl-slider-label">Iso value</span>
+            <div class="ctl-slider-track">
+              <div class="ctl-slider-fill" data-role="fill-iso"></div>
+              <input type="range" class="ctl-slider-input" data-role="slider-iso" min="0" max="1" step="0.001" value="${viewer.isoValue}">
+            </div>
+            <span class="ctl-row-value ctl-mono" data-role="value-iso">${viewer.isoValue.toFixed(3)}</span>
+          </div>` : ""}
+        `;
+
+        wireSlider(swap, "center", (v) => { viewer.windowCenter = v; if (redrawTf) redrawTf(); }, (v) => v.toFixed(2));
+        wireSlider(swap, "width", (v) => { viewer.windowWidth = v; if (redrawTf) redrawTf(); }, (v) => v.toFixed(2));
+        if (showDensity) wireSlider(swap, "density", (v) => { renderer.densityScale = v; dirty(); }, (v) => v.toFixed(2));
+        if (showIso) wireSlider(swap, "iso", (v) => { viewer.isoValue = v; }, (v) => v.toFixed(3));
+
+        swap.querySelector('[data-role="tf-preset"]').addEventListener("change", (evt) => {
+          selectPreset(evt.target.value);
+        });
+
+        redrawTf = wireTfCanvas(swap);
+        rebuildColorEditor = wireColorEditor(swap);
+      }
+      renderSwapRegion();
+
+      // --- mode segmented control ---
+      panel.querySelectorAll('[data-role="mode-segmented"] .ctl-segment').forEach((btn) => {
+        btn.addEventListener("click", () => {
+          state.mode = btn.dataset.mode;
+          panel.querySelectorAll('[data-role="mode-segmented"] .ctl-segment').forEach((b) =>
+            b.classList.toggle("active", b === btn)
+          );
+          applyMode();
+          renderSwapRegion();
+          // LOD toggle availability depends on mode — update the Advanced
+          // section's toggle state rather than re-render the whole panel.
+          const lodInput = panel.querySelector('[data-role="lod"]');
+          const lodRow = lodInput.closest(".ctl-toggle-row");
+          const lodAvailable = state.mode === "dvr";          lodInput.disabled = !lodAvailable;
+          lodRow.classList.toggle("disabled", !lodAvailable);
+        });
+      });
+
+      // --- Scene section ---
+      panel.querySelector('[data-role="up-axis"]').addEventListener("change", (evt) => {
+        camera.setUpAxis(evt.target.value);
+      });
+      panel.querySelector('[data-role="wireframe"]').addEventListener("change", (evt) => {
+        renderer.showWireframe = evt.target.checked;
+      });
+      panel.querySelector('[data-role="axes"]').addEventListener("change", (evt) => {
+        renderer.showAxis = evt.target.checked;
+      });
+      panel.querySelector('[data-role="freerot"]')?.addEventListener("change", (evt) => {
+        uiState.freeRotation = evt.target.checked;
+        camera.setFreeRotation(evt.target.checked);
+      });
+      panel.querySelector('[data-role="scalebar"]').addEventListener("change", (evt) => {
+        uiState.scaleBar = evt.target.checked;
+        $("scale-bar").hidden = !uiState.scaleBar || !$("scale-bar").dataset.ready;
+      });
+
+      wireClipAxis("X", dimX, (lo, hi) => { renderer.clipMin[0] = lo; renderer.clipMax[0] = hi; dirty(); });
+      wireClipAxis("Y", dimY, (lo, hi) => { renderer.clipMin[1] = lo; renderer.clipMax[1] = hi; dirty(); });
+      wireClipAxis("Z", dimZ, (lo, hi) => { renderer.clipMin[2] = lo; renderer.clipMax[2] = hi; dirty(); });
+
+      // An animation changes the transfer function (colours, opacity curve, window, density): the panel follows.
+      let tfFrame = 0;
+      const onTfChanged = (evt) => {
+        if (!panel.isConnected) { window.removeEventListener("vg-tf-changed", onTfChanged); return; } // the panel was rebuilt
+        cancelAnimationFrame(tfFrame);
+        tfFrame = requestAnimationFrame(() => {
+          state.tfPreset = tf.preset;
+          const presetSelect = panel.querySelector('[data-role="tf-preset"]');
+          if (presetSelect && [...presetSelect.options].some((o) => o.value === tf.preset)) presetSelect.value = tf.preset;
+          const show = (role, value) => {
+            const input = panel.querySelector(`[data-role="slider-${role}"]`);
+            const label = panel.querySelector(`[data-role="value-${role}"]`);
+            if (input && Number.isFinite(value)) { input.value = value; if (label) label.textContent = value.toFixed(2); }
+          };
+          show("center", viewer.windowCenter);
+          show("width", viewer.windowWidth);
+          show("density", renderer.densityScale);
+          if (redrawTf) redrawTf();
+          if (evt.detail?.settled && rebuildColorEditor) rebuildColorEditor(); // the colour editor follows once the animation is over
+        });
+      };
+      window.addEventListener("vg-tf-changed", onTfChanged);
+
+      // --- Advanced section ---
+      wireSlider(panel, "renderScale", (v) => { viewer.renderScale = v; }, (v) => v.toFixed(2));
+      const minLevelSelect = panel.querySelector('[data-role="min-level"]');
+      if (minLevelSelect) {
+        minLevelSelect.addEventListener("change", (evt) => {
+          // Which levels exist at all is baked into the signed URL kiln-render
+          // fetches from, so this reloads the viewer. The current view and
+          // transfer function are carried over (see loadVolume()).
+          lodOptions.onMinLevelChange(parseInt(evt.target.value, 10));
+        });
+      }
+      panel.querySelector('[data-role="atlas-vram"]').addEventListener("change", (evt) => {
+        // The atlas is allocated when the viewer is created, so this reloads
+        // it (view and transfer function carried over, as for max detail level).
+        lodOptions.onAtlasVramChange(parseInt(evt.target.value, 10));
+      });
+      panel.querySelector('[data-role="lod"]').addEventListener("change", (evt) => {
+        state.lod = evt.target.checked;
+        applyMode();
+      });
+      panel.querySelector('[data-role="jitter"]').addEventListener("change", (evt) => {
+        renderer.enableJitter = evt.target.checked;
+      });
+      panel.querySelector('[data-role="taa"]').addEventListener("change", (evt) => {
+        renderer.enableTAA = evt.target.checked;
+      });
+      panel.querySelector('[data-role="indirection"]').addEventListener("change", (evt) => {
+        renderer.useIndirection = evt.target.checked;
+      });
+
+      // --- collapsible sections (Scene / Advanced); open state is remembered
+      // across reloads in uiState ---
+      panel.querySelectorAll(".ctl-collapsible").forEach((section) => {
+        section.querySelector(".ctl-collapsible-header").addEventListener("click", () => {
+          section.classList.toggle("open");
+          uiState[section.dataset.key] = section.classList.contains("open");
+        });
+      });
+    }
+
+    // "10³ ≈ 580 MB": the atlas textures the engine actually allocated.
+    function atlasVramLabel(viewer, meta, atlas) {
+      const r = viewer.engine.resources;
+      const texBytes = meta.bitDepth <= 8 ? 1 : 2;
+      const mb = Math.round((r.numChannels * r.atlasSize ** 3 * texBytes) / 1e6);
+      return `${r.gridSize}\u00b3 \u2248 ${mb} MB${atlasCapWarning(r, texBytes, atlas) ? " \u26a0 capped" : ""}`;
+    }
+
+    // Stock kiln-render never allocates more than a 10^3 atlas. If the budget
+    // allowed an 11^3 one and the engine still stopped at 10^3 or less, either
+    // the bundle was not patched (backend/kiln-patches) or the GPU ran out of
+    // memory and the engine stepped down (it logs that as a [Kiln] warning).
+    let atlasCapWarned = false;
+    function atlasCapWarning(r, texBytes, atlas) {
+      const grid11Bytes = r.numChannels * texBytes * (11 * 66) ** 3;
+      const capped = r.gridSize <= 10 && atlas.budgetBytes >= grid11Bytes;
+      if (capped && !atlasCapWarned) {
+        atlasCapWarned = true;
+        console.error(
+          `[atlas] ${Math.round(atlas.budgetBytes / 1e6)} MB requested but the atlas is ${r.gridSize}\u00b3 ` +
+          `(\u2248${Math.round((r.numChannels * r.atlasSize ** 3 * texBytes) / 1e6)} MB). ` +
+          "The kiln-render bundle is probably unpatched (the Docker `kiln` stage applies " +
+          "backend/kiln-patches; rebuild the image and hard-refresh) or the GPU ran out of memory."
+        );
+      }
+      return capped;
+    }
+
+    // Drives the info box and the loading indicator for one viewer. Returns a
+    // function that stops it.
+    // ------------------------------------------------------------------
+    // Scale bar. The voxel spacing in volume.json (metadata.voxelSpacing) is taken to be micrometres.
+    // The camera is a perspective one orbiting a target and its distance is in "normalized" units,
+    // in which the longest physical edge of the volume is 1. So what lies at the orbit target (the
+    // middle of the view unless panned) is drawn at
+    //   pixels per normalized unit = canvas height / (2 * distance * tan(fovY / 2))
+    // and the bar is exact there; nearer or farther parts of the volume are drawn larger or smaller.
+    // ------------------------------------------------------------------
+    function startScaleBar(viewer, pane, el) {
+      const { dimensions, voxelSpacing } = viewer.metadata;
+      el.hidden = true;
+      delete el.dataset.ready;
+      if (!voxelSpacing || !voxelSpacing.every((s) => s > 0)) return () => {};
+      const umPerNormalized = Math.max(...dimensions.map((n, i) => n * voxelSpacing[i]));
+      const label = el.querySelector(".scale-bar-label");
+      const line = el.querySelector(".scale-bar-line");
+      const tanHalfFov = Math.tan(viewer.camera.fovY / 2);
+      let raf = 0;
+      let last = "";
+      const tick = () => {
+        raf = requestAnimationFrame(tick);
+        const canvas = pane.querySelector("canvas");
+        const h = canvas?.clientHeight;
+        const w = canvas?.clientWidth;
+        const distance = viewer.camera.getOrbitState()[2];
+        if (!h || !w || !(distance > 0)) return;
+        const umPerPx = (umPerNormalized * 2 * distance * tanHalfFov) / h;
+        const maxPx = Math.max(60, Math.min(150, w * 0.25));
+        const key = `${umPerPx.toPrecision(4)}|${maxPx}`;
+        if (key === last) return;
+        last = key;
+        const nice = niceScaleLength(umPerPx * maxPx);
+        if (!nice) return;
+        const { um, text } = nice;
+        line.style.width = `${Math.round(um / umPerPx)}px`;
+        label.textContent = text;
+        el.dataset.ready = "1";
+        el.hidden = !uiState.scaleBar;
+      };
+      tick();
+      return () => {
+        cancelAnimationFrame(raf);
+        el.hidden = true;
+      };
+    }
+
+    function startStatsLoop(viewer, atlas) {
+      const statsEl = $("stats-text");
+      const meta = viewer.metadata;
+      let frames = 0;
+      let lastFpsTime = performance.now();
+      let fps = 0;
+
+      viewer.onBeforeFrame = () => {
+        frames++;
+        const now = performance.now();
+        if (now - lastFpsTime >= 500) {
+          fps = (frames * 1000) / (now - lastFpsTime);
+          frames = 0;
+          lastFpsTime = now;
+        }
+      };
+
+      let running = true;
+      let rafId = 0;
+      let lastUiTime = 0;
+      let lastLoaded = -1;
+      let lastBytes = -1;
+      let lastActivity = performance.now();
+      let idleSince = null;
+
+      function frame(now) {
+        if (!running) return;
+        rafId = requestAnimationFrame(frame);
+        if (now - lastUiTime < 250) return;
+        lastUiTime = now;
+
+        const s = viewer.streamingManager.getStats();
+
+        // Loading = bricks still queued/in flight, or the streamer hasn't
+        // produced its first desired set yet. "Still making progress" guards
+        // against a full atlas leaving requests queued forever.
+        if (s.loadedCount !== lastLoaded || s.totalBytesDownloaded !== lastBytes) {
+          lastLoaded = s.loadedCount;
+          lastBytes = s.totalBytesDownloaded;
+          lastActivity = now;
+        }
+        const started = s.desiredCount > 0 || s.pendingCount > 0;
+        const busy = !started || (s.pendingCount > 0 && now - lastActivity < 3000);
+        if (busy) {
+          idleSince = null;
+          if (!started) {
+            setLoadUi("indeterminate", 0, "Preparing\u2026");
+          } else {
+            const frac = s.desiredCount > 0 ? Math.min(1, s.loadedCount / s.desiredCount) : 0;
+            setLoadUi("determinate", frac, `Loading ${Math.round(frac * 100)}%  (${s.loadedCount}/${s.desiredCount} bricks)`);
+          }
+        } else {
+          idleSince ??= now;
+          if (now - idleSince > 600) setLoadUi("off"); // short grace period avoids flicker
+        }
+
+        if (uiState.infoOpen) {
+          const [dx, dy, dz] = meta.dimensions;
+          const mb = (s.totalBytesDownloaded / (1024 * 1024)).toFixed(1);
+          const kbs = (s.bytesPerSecond / 1024).toFixed(0);
+          statsEl.textContent =
+            `fps          ${fps.toFixed(0)}\n` +
+            `dimensions   ${dx}\u00d7${dy}\u00d7${dz}\n` +
+            `bit depth    ${meta.bitDepth}-bit \u00d7 ${meta.numChannels}ch\n` +
+            `lod levels   ${meta.maxLod + 1}\n` +
+            `bricks       ${s.loadedCount}/${s.desiredCount} loaded\n` +
+            `atlas        ${s.atlasUsage}/${s.atlasCapacity}\n` +
+            `atlas vram   ${atlasVramLabel(viewer, meta, atlas)} (${atlas.source})\n` +
+            `downloaded   ${mb} MB (${kbs} KB/s)\n` +
+            (s.timeToFirstRender != null ? `first frame  ${s.timeToFirstRender.toFixed(0)} ms\n` : "");
+        }
+      }
+      rafId = requestAnimationFrame(frame);
+
+      return () => {
+        running = false;
+        cancelAnimationFrame(rafId);
+        viewer.onBeforeFrame = undefined;
+        setLoadUi("off");
+      };
+    }
+
+    init();

@@ -32,7 +32,16 @@ export VG_SECRET_KEY=$(python -c "import secrets; print(secrets.token_hex(32))")
 export VG_ADMIN_PASSWORD='pick-a-password'  # only used to create the first admin
 uvicorn app.main:app --reload --port 8000
 ```
-Then open `http://localhost:8000`, sign in as `admin` with the password you set.
+The frontend is bundled with webpack, and the backend serves the result (`frontend/dist`), so build it once first
+(Node 20+; `KILN_RENDER_LIB` is the patched `kiln-render.js` that the Docker build makes in its `kiln` stage, with the
+`blosc-*.js`/`lz4-*.js`/`zstd-*.js` files next to it):
+```bash
+cd frontend
+npm ci
+KILN_RENDER_LIB=/path/to/kiln-render/lib/kiln-render.js npm run build   # or `npm run watch` while editing
+```
+Then open `http://localhost:8000`, sign in as `admin` with the password you set. (The Potree and 3DHOP viewers load their
+libraries from `frontend/dist/vendor`, which only the Docker image fills: the point cloud and mesh viewers need it.)
 
 ## Documentation
 

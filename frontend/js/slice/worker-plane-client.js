@@ -14,12 +14,11 @@
 // (or a worker cannot be started) createPlaneClient() returns the plain PlaneClient and everything runs on the
 // main thread as before.
 
-import { PlaneClient, PlaneError } from "./plane-client.js?v=mpr2";
-import { SharedBlockCache } from "./block-cache.js?v=mpr2";
+import { PlaneClient, PlaneError } from "./plane-client.js";
+import { SharedBlockCache } from "./block-cache.js";
 import { textureFormatFor } from "./geometry.js";
 
 const abortError = () => new DOMException("aborted", "AbortError");
-const WORKER_URL = new URL("./slice-worker.js?v=mpr2", import.meta.url);
 const SUM_KEYS = ["loads", "cached", "fetched", "bytes", "aborted"];
 const LAST_KEYS = ["lastMs", "lastPlanMs", "lastServerPlanMs", "lastFirstMs", "lastBlocks"];
 
@@ -138,7 +137,8 @@ export class WorkerPlaneClient {
   _worker(axis) {
     let w = this._workers.get(axis);
     if (w) return w;
-    w = new Worker(WORKER_URL, { type: "module", name: `slice-${axis}` });
+    // (webpack finds the worker by this exact form and bundles slice-worker.js as a script of its own)
+    w = new Worker(/* webpackChunkName: "slice-worker" */ new URL("./slice-worker.js", import.meta.url), { name: `slice-${axis}` });
     w.onmessage = (e) => this._onMessage(axis, w, e.data);
     w.onerror = (e) => this._onCrash(axis, e.message || "The slice worker failed");
     w.postMessage({ type: "init", baseUrl: this.baseUrl, cache: this.cache.init, maxInflight: this.maxInflight });

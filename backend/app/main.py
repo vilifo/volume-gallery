@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager
+import re
 import threading
 from pathlib import Path
 
@@ -102,6 +103,24 @@ app.include_router(paths.router)
 app.include_router(bookmarks.router)
 app.include_router(admin.router)
 
+class FrontendFiles(StaticFiles):
+    """The bundled frontend (webpack, see frontend/webpack.config.js). A file whose name carries the hash of its
+    content (js/volume.3fa9c0d1b2e4.js, css/style.9bd1e0c4a7f2.css) never changes under that name: browsers may
+    keep it for good. The HTML pages are what names those files, so they are revalidated on every visit (an ETag
+    makes that a 304 when nothing changed). Anything else (/vendor) keeps StaticFiles' defaults."""
+
+    _HASHED = re.compile(r"\.[0-9a-f]{12}\.(?:js|css)(?:\.map)?$")
+
+    def file_response(self, full_path, *args, **kwargs):
+        response = super().file_response(full_path, *args, **kwargs)
+        name = Path(full_path).name
+        if self._HASHED.search(name):
+            response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        elif name.endswith((".html", ".css")):  # (.css: the plain css/style.css that the pages the server writes use)
+            response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
 # Serve the frontend (single-page-ish static site) at the root.
 @app.get("/js/sw.js", include_in_schema=False)
 def service_worker():
@@ -114,4 +133,4 @@ def service_worker():
     )
 
 
-app.mount("/", StaticFiles(directory=settings.FRONTEND_DIR, html=True), name="frontend")
+app.mount("/", FrontendFiles(directory=settings.FRONTEND_DIR, html=True), name="frontend")

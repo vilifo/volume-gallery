@@ -1,0 +1,496 @@
+// The page script of upload.html (it was an inline <script type="module"> there). Bundled by webpack.config.js.
+import {api, requireLogin, getRole, getUsername, renderShell, wireLogout} from "../js/api.js";
+import { pageHint } from "../js/help.js";
+
+requireLogin();
+const role = getRole();
+if (role !== "editor" && role !== "admin") {
+    window.location.href = "/index.html";
+}
+
+// Deliberately NOT using the JS RegExp "v" (unicodeSets) flag or an HTML
+// pattern="..." attribute here — browsers increasingly compile <input
+// pattern> with the "v" flag, whose character-class grammar is stricter
+// (and inconsistent across engines) than a plain RegExp literal like
+// this one. Keep this in sync with SLUG_RE in backend/app/routers/assets.py.
+const SLUG_RE = /^[a-z0-9][a-z0-9_-]{1,62}$/;
+
+function escapeHtml(str) {
+    return str.replace(/[&<>"']/g, m => ({
+        "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+    }[m]));
+}
+
+function formatBytes(bytes) {
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1048576) return `${(bytes / 1024).toFixed(1)} KB`;
+    return `${(bytes / 1048576).toFixed(1)} MB`;
+}
+
+document.getElementById("shell").innerHTML = `
+  ${renderShell("upload", role, getUsername())}
+  <main>
+    <h1>Upload asset</h1>
+    <p class="subtitle">
+      Provide TIFF stack either in zip or as individual files. A mesh file is optional.
+    </p>
+    ${pageHint("upload", role)}
+    <div id="error" style="display:none" class="error-box"></div>
+
+    <div class="source-toggle">
+      <button type="button" id="src-tiff" class="active">TIFF stack (.zip or .tif files)</button>
+      <button type="button" id="src-mesh">Mesh file (.stl, .obj, .ply, \u2026)</button>
+      <button type="button" id="src-pointcloud">Point cloud file (.laz, .las, .ply, \u2026)</button>
+    </div>
+
+    <form id="form">
+      <div class="field">
+        <label for="slug">Slug (used in URLs, lowercase, no spaces)</label>
+        <input id="slug" required placeholder="femur-scan-01" />
+      </div>
+      <div class="field">
+        <label for="title">Title</label>
+        <input id="title" required placeholder="Femur scan #01" />
+      </div>
+      <div class="field">
+        <label for="description">Description</label>
+        <input id="description" placeholder="Optional" />
+      </div>
+      <div class="field">
+        <label for="thumbnail_file">Thumbnail</label>
+        <input id="thumbnail_file" type="file" accept="image/png,image/jpeg,image/webp" />
+        <div class="field-hint">Optional. PNG, JPEG or WebP image shown in the gallery. It can be changed later under Manage.</div>
+      </div>
+
+      <div id="tiff-section">
+        <div class="field">
+          <label>TIFF upload mode</label>
+          <div class="source-toggle" style="margin-bottom:0.5rem">
+            <button type="button" id="tiff-mode-zip" class="active">Single .zip of TIFFs</button>
+            <button type="button" id="tiff-mode-stack">TIFF stack (individual .tif files)</button>
+          </div>
+        </div>
+
+        <div class="field" id="tiff-zip-field">
+          <label for="tiff_zip">TIFF archive (.zip)</label>
+          <input id="tiff_zip" type="file" accept=".zip" />
+          <div class="field-hint">
+            A flat .zip of single-slice .tif/.tiff files (one per Z position). Filenames
+            are sorted to determine slice order, so name them so alphabetical order
+            matches acquisition order (e.g. slice_0001.tif, slice_0002.tif, \u2026).
+          </div>
+        </div>
+
+        <div class="field" id="tiff-stack-field" style="display:none">
+          <label for="tiff_files">TIFF stack files (.tif, .tiff)</label>
+          <input id="tiff_files" type="file" accept=".tif,.tiff,image/tiff" multiple />
+          <div class="field-hint">
+            Select multiple individual .tif/.tiff files (one per Z position). Filenames
+            are sorted alphabetically to determine slice order.
+          </div>
+          <div id="tiff-file-list" style="display:none; margin-top:0.75rem; max-height:220px; overflow-y:auto; border:1px solid rgba(128,128,128,0.3); border-radius:6px; padding:0.5rem 0.75rem; font-size:0.875rem;"></div>
+        </div>
+
+        <div class="field" id="tiff-spacing-field">
+          <label>Voxel spacing (\u00b5m)</label>
+          <div style="display:grid; grid-template-columns:repeat(3, 1fr); gap:0.75rem;">
+            <div>
+              <label for="spacing_x" style="font-size:0.8rem; opacity:0.8;">X (\u00b5m)</label>
+              <input id="spacing_x" type="number" step="any" min="0.0001" value="1.0" required placeholder="1.0" />
+            </div>
+            <div>
+              <label for="spacing_y" style="font-size:0.8rem; opacity:0.8;">Y (\u00b5m)</label>
+              <input id="spacing_y" type="number" step="any" min="0.0001" value="1.0" required placeholder="1.0" />
+            </div>
+            <div>
+              <label for="spacing_z" style="font-size:0.8rem; opacity:0.8;">Z (\u00b5m)</label>
+              <input id="spacing_z" type="number" step="any" min="0.0001" value="1.0" required placeholder="1.0" />
+            </div>
+          </div>
+          <div class="field-hint">Physical voxel dimensions in micrometers (\u00b5m) along X, Y, and Z (slice thickness).</div>
+        </div>
+      </div>
+
+      <div class="field" id="mesh-field">
+        <label for="mesh_file">Mesh file (.stl, .obj, .ply, \u2026)</label>
+        <input id="mesh_file" type="file" accept=".stl,.3mf,.ply,.obj,.glb,.gltf" />
+      </div>
+
+      <div class="field" id="texture-field" style="display:none">
+        <label for="texture_files">Texture files (optional)</label>
+        <input id="texture_files" type="file" multiple accept=".png,.jpg,.jpeg,.bmp,.tga,.tif,.tiff,.webp,.mtl,.bin" />
+        <div class="field-hint" id="texture-hint"></div>
+      </div>
+
+      <div class="field" id="pointcloud-field" style="display:none">
+        <label for="pointcloud_file">Point cloud file (.laz, .las, .ply, \u2026)</label>
+        <input id="pointcloud_file" type="file" accept=".las,.laz,.ply,.xyz,.ptx,.pts,.e57" />
+      </div>
+
+      <button type="submit" class="primary">Upload</button>
+    </form>
+
+    <div class="upload-progress" id="upload-progress" style="display:none">
+      <div class="stage-label">
+        <div class="spinner" id="progress-spinner"></div>
+        <svg class="checkmark" id="progress-check" style="display:none" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>
+        <span id="progress-label">Uploading\u2026</span>
+      </div>
+      <div class="bar-track" id="progress-track">
+        <div class="bar-fill" id="progress-fill"></div>
+      </div>
+      <div class="bar-percent" id="progress-percent">0%</div>
+      <div id="file-progress-list" style="display:none; margin-top:1rem; max-height:260px; overflow-y:auto; border:1px solid rgba(128,128,128,0.25); border-radius:6px; padding:0.5rem 0.75rem; font-size:0.85rem;"></div>
+    </div>
+  </main>
+`;
+wireLogout();
+
+let source = "tiff";
+let tiffMode = "zip"; // "zip" | "stack"
+
+const srcTiffBtn = document.getElementById("src-tiff");
+const srcMeshBtn = document.getElementById("src-mesh");
+const srcPointCloudBtn = document.getElementById("src-pointcloud");
+const tiffSection = document.getElementById("tiff-section");
+const meshField = document.getElementById("mesh-field");
+const pointCloudField = document.getElementById("pointcloud-field");
+
+const tiffModeZipBtn = document.getElementById("tiff-mode-zip");
+const tiffModeStackBtn = document.getElementById("tiff-mode-stack");
+const tiffZipField = document.getElementById("tiff-zip-field");
+const tiffStackField = document.getElementById("tiff-stack-field");
+const tiffFilesInput = document.getElementById("tiff_files");
+const tiffFileList = document.getElementById("tiff-file-list");
+
+const spacingInputs = [
+    document.getElementById("spacing_x"),
+    document.getElementById("spacing_y"),
+    document.getElementById("spacing_z"),
+];
+
+function setSource(next) {
+    source = next;
+    srcTiffBtn.classList.toggle("active", source === "tiff");
+    srcMeshBtn.classList.toggle("active", source === "mesh");
+    srcPointCloudBtn.classList.toggle("active", source === "pointcloud");
+
+    tiffSection.style.display = source === "tiff" ? "" : "none";
+    meshField.style.display = source === "mesh" || source === "tiff" ? "" : "none";
+    updateTextureField();
+    pointCloudField.style.display = source === "pointcloud" ? "" : "none";
+
+    spacingInputs.forEach(input => {
+        input.required = source === "tiff";
+    });
+}
+
+function setTiffMode(next) {
+    tiffMode = next;
+    tiffModeZipBtn.classList.toggle("active", tiffMode === "zip");
+    tiffModeStackBtn.classList.toggle("active", tiffMode === "stack");
+
+    tiffZipField.style.display = tiffMode === "zip" ? "" : "none";
+    tiffStackField.style.display = tiffMode === "stack" ? "" : "none";
+}
+
+srcTiffBtn.addEventListener("click", () => setSource("tiff"));
+srcMeshBtn.addEventListener("click", () => setSource("mesh"));
+
+// --- texture files: for the mesh formats whose textures are separate files (OBJ, PLY, glTF) --------------------
+const TEXTURE_HINTS = {
+  obj: "An OBJ names its material (.mtl) and its texture images; choose them here too (all at once). With only the image, choose just the image: it is used as the texture.",
+  ply: "Choose the texture image the PLY refers to.",
+  gltf: "A glTF refers to a .bin file and to texture images; choose them here too (all at once).",
+};
+function meshExtension() {
+  const f = document.getElementById("mesh_file").files[0];
+  return f ? f.name.split(".").pop().toLowerCase() : "";
+}
+function updateTextureField() {
+  const field = document.getElementById("texture-field");
+  const ext = meshExtension();
+  const shown = (source === "mesh" || source === "tiff") && ext in TEXTURE_HINTS;
+  field.style.display = shown ? "" : "none";
+  document.getElementById("texture-hint").textContent = shown ? TEXTURE_HINTS[ext] : "";
+  if (!shown) document.getElementById("texture_files").value = ""; // (a GLB or 3MF holds its texture inside; STL has none)
+}
+document.getElementById("mesh_file").addEventListener("change", updateTextureField);
+srcPointCloudBtn.addEventListener("click", () => setSource("pointcloud"));
+
+tiffModeZipBtn.addEventListener("click", () => setTiffMode("zip"));
+tiffModeStackBtn.addEventListener("click", () => setTiffMode("stack"));
+
+function getSortedStackFiles() {
+    return Array.from(tiffFilesInput.files).sort((a, b) => a.name.localeCompare(b.name));
+}
+
+tiffFilesInput.addEventListener("change", () => {
+    const files = getSortedStackFiles();
+    if (files.length === 0) {
+        tiffFileList.style.display = "none";
+        tiffFileList.innerHTML = "";
+        return;
+    }
+    const totalBytes = files.reduce((acc, f) => acc + f.size, 0);
+    tiffFileList.style.display = "block";
+    tiffFileList.textContent = "";
+
+    const summary = document.createElement("div");
+    summary.style.fontWeight = "600";
+    summary.style.marginBottom = "0.4rem";
+    summary.textContent = `Selected ${files.length} slice${files.length === 1 ? "" : "s"} (${formatBytes(totalBytes)} total, sorted by filename):`;
+
+    const list = document.createElement("ol");
+    list.style.margin = "0";
+    list.style.paddingLeft = "1.5rem";
+
+    files.forEach(f => {
+        const item = document.createElement("li");
+        item.style.padding = "0.15rem 0";
+        item.style.display = "flex";
+        item.style.justifyContent = "space-between";
+        item.style.gap = "1rem";
+
+        const nameSpan = document.createElement("span");
+        nameSpan.style.wordBreak = "break-all";
+        nameSpan.textContent = f.name;
+
+        const sizeSpan = document.createElement("span");
+        sizeSpan.style.opacity = "0.65";
+        sizeSpan.style.whiteSpace = "nowrap";
+        sizeSpan.textContent = formatBytes(f.size);
+
+        item.appendChild(nameSpan);
+        item.appendChild(sizeSpan);
+        list.appendChild(item);
+    });
+
+    tiffFileList.appendChild(summary);
+    tiffFileList.appendChild(list);
+});
+
+const form = document.getElementById("form");
+const errorBox = document.getElementById("error");
+const progressBox = document.getElementById("upload-progress");
+const progressTrack = document.getElementById("progress-track");
+const progressFill = document.getElementById("progress-fill");
+const progressPercent = document.getElementById("progress-percent");
+const progressLabel = document.getElementById("progress-label");
+const progressSpinner = document.getElementById("progress-spinner");
+const progressCheck = document.getElementById("progress-check");
+const fileProgressList = document.getElementById("file-progress-list");
+
+let activeUploadFiles = [];
+let activeUploadTotal = 1;
+// A row per file is thousands of DOM nodes for a TIFF stack, all rewritten on every progress
+// event of every file in flight, which slows the page down (and so the upload). Past this many
+// files only the overall bar is shown.
+const FILE_LIST_MAX = 50;
+
+function initFileProgressList(files) {
+    activeUploadFiles = files || [];
+    activeUploadTotal = activeUploadFiles.reduce((acc, f) => acc + (f.size || 1), 0) || 1;
+    if (!files || files.length === 0 || files.length > FILE_LIST_MAX) {
+        fileProgressList.style.display = "none";
+        fileProgressList.innerHTML = "";
+        return;
+    }
+    fileProgressList.style.display = "block";
+    fileProgressList.innerHTML = files.map((f, i) => `
+        <div id="fprog-row-${i}" style="padding:0.35rem 0; border-bottom:1px solid rgba(128,128,128,0.15);">
+            <div style="display:flex; justify-content:space-between; gap:0.5rem; margin-bottom:0.2rem;">
+                <span style="word-break:break-all;">${escapeHtml(f.name)}</span>
+                <span id="fprog-pct-${i}" style="opacity:0.75; white-space:nowrap;">0%</span>
+            </div>
+            <div class="bar-track" style="height:4px;">
+                <div class="bar-fill" id="fprog-bar-${i}" style="width:0%;"></div>
+            </div>
+        </div>
+    `).join("");
+}
+
+function updateFileProgressList(fraction) {
+    if (!activeUploadFiles || activeUploadFiles.length === 0) return;
+    if (activeUploadFiles.length > FILE_LIST_MAX) {
+        if (fraction < 1) progressLabel.textContent = `Uploading ${activeUploadFiles.length} files\u2026`;
+        return;
+    }
+    const totalSize = activeUploadTotal;
+    const uploadedBytes = fraction * totalSize;
+    let cumulative = 0;
+    let currentIdx = 0;
+
+    activeUploadFiles.forEach((f, i) => {
+        const fSize = f.size || 1;
+        const fileUploaded = Math.max(0, Math.min(fSize, uploadedBytes - cumulative));
+        const filePct = Math.round((fileUploaded / fSize) * 100);
+        cumulative += fSize;
+
+        if (filePct > 0 && filePct < 100) currentIdx = i;
+        else if (filePct === 100) currentIdx = i + 1;
+
+        const bar = document.getElementById(`fprog-bar-${i}`);
+        const pctEl = document.getElementById(`fprog-pct-${i}`);
+        if (bar) bar.style.width = `${filePct}%`;
+        if (pctEl) pctEl.textContent = filePct === 100 ? "\u2713 100%" : `${filePct}%`;
+    });
+
+    const clampedIdx = Math.min(currentIdx + 1, activeUploadFiles.length);
+    if (fraction < 1 && activeUploadFiles.length > 1) {
+        progressLabel.textContent = `Uploading file ${clampedIdx} of ${activeUploadFiles.length}\u2026`;
+    }
+}
+
+function setIndeterminate(label) {
+    progressTrack.classList.add("indeterminate");
+    progressPercent.textContent = "";
+    progressLabel.textContent = label;
+}
+
+function setProgress(fraction) {
+    progressTrack.classList.remove("indeterminate");
+    const pct = Math.round(fraction * 100);
+    progressFill.style.width = `${pct}%`;
+    progressPercent.textContent = `${pct}%`;
+    progressLabel.textContent = pct < 100 ? "Uploading\u2026" : "Finishing up\u2026";
+    updateFileProgressList(fraction);
+    if (pct >= 100) setIndeterminate("Finishing up\u2026");
+}
+
+form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    errorBox.style.display = "none";
+
+    const slug = document.getElementById("slug").value.trim();
+    if (!SLUG_RE.test(slug)) {
+        errorBox.textContent =
+            "Slug must start with a lowercase letter or digit, and contain only " +
+            "lowercase letters, digits, hyphens, and underscores (2\u201363 characters).";
+        errorBox.style.display = "block";
+        return;
+    }
+
+    let sourceFile;
+    let tiffFiles = [];
+    let errorMessage;
+    let spacingX, spacingY, spacingZ;
+
+    switch (source) {
+        case "tiff":
+            spacingX = parseFloat(document.getElementById("spacing_x").value);
+            spacingY = parseFloat(document.getElementById("spacing_y").value);
+            spacingZ = parseFloat(document.getElementById("spacing_z").value);
+            if (!(spacingX > 0 && spacingY > 0 && spacingZ > 0)) {
+                errorBox.textContent = "Provide positive voxel spacing values in \u00b5m for X, Y, and Z.";
+                errorBox.style.display = "block";
+                return;
+            }
+            if (tiffMode === "zip") {
+                sourceFile = document.getElementById("tiff_zip").files[0];
+                errorMessage = "Choose a TIFF stack .zip file.";
+                if (sourceFile) tiffFiles = [sourceFile];
+            } else {
+                tiffFiles = getSortedStackFiles();
+                sourceFile = tiffFiles[0];
+                errorMessage = "Choose one or more .tif/.tiff files for the TIFF stack.";
+            }
+            break;
+        case "mesh":
+            sourceFile = document.getElementById("mesh_file").files[0];
+            errorMessage = "Choose a mesh file (.stl, .obj, .ply, etc.).";
+            break;
+        case "pointcloud":
+            sourceFile = document.getElementById("pointcloud_file").files[0];
+            errorMessage = "Choose a point cloud file (.laz, .las, .ply, .xyz, .ptx, .pts or .e57).";
+            break;
+    }
+
+    if (!sourceFile) {
+        errorBox.textContent = errorMessage;
+        errorBox.style.display = "block";
+        return;
+    }
+
+    const fd = new FormData();
+    fd.append("slug", slug);
+    fd.append("title", document.getElementById("title").value.trim());
+    fd.append("description", document.getElementById("description").value.trim());
+
+    const filesToTrack = [];
+    switch (source) {
+        case "tiff":
+            for (const spacing of [String(spacingX), String(spacingY), String(spacingZ)]){
+                fd.append("spacing", spacing);
+            }
+            if (tiffMode === "zip") {
+                fd.append("tiff_zip", sourceFile);
+            } else {
+                for (const file of tiffFiles) {
+                    fd.append("tiff_files", file);
+                }
+            }
+            filesToTrack.push(...tiffFiles);
+            break;
+        case "mesh":
+            fd.append("mesh_file", sourceFile);
+            filesToTrack.push(sourceFile);
+            break;
+        case "pointcloud":
+            fd.append("pointcloud_file", sourceFile);
+            filesToTrack.push(sourceFile);
+            break;
+    }
+    const meshFile = document.getElementById("mesh_file").files[0];
+    if (meshFile && source !== "mesh") {
+        fd.append("mesh_file", meshFile);
+        filesToTrack.push(meshFile);
+    }
+    if (meshFile && (source === "mesh" || source === "tiff")) {
+        // the texture files that come with the mesh (the API calls the field differently for a volume's mesh)
+        for (const tex of document.getElementById("texture_files").files) {
+            fd.append(source === "mesh" ? "texture_files" : "mesh_texture_files", tex);
+            filesToTrack.push(tex);
+        }
+    }
+    const thumbnailFile = document.getElementById("thumbnail_file").files[0];
+    if (thumbnailFile) {
+        fd.append("thumbnail_file", thumbnailFile);
+        filesToTrack.push(thumbnailFile);
+    }
+
+    form.style.display = "none";
+    progressBox.style.display = "block";
+    progressSpinner.style.display = "block";
+    progressCheck.style.display = "none";
+    initFileProgressList(filesToTrack);
+    setProgress(0);
+
+    try {
+        let asset;
+        if (source === "tiff") {
+            asset = await api.createVolumeWithProgress(fd, setProgress);
+        } else if (source === "mesh") {
+            asset = await api.createMeshWithProgress(fd, setProgress);
+        } else if (source === "pointcloud") {
+            asset = await api.createPointCloudWithProgress(fd, setProgress);
+        }
+        updateFileProgressList(1);
+        progressSpinner.style.display = "none";
+        progressCheck.style.display = "block";
+        progressTrack.classList.remove("indeterminate");
+        progressFill.style.width = "100%";
+        progressPercent.textContent = "";
+        progressLabel.textContent = "Uploaded \u2014 processing in the background";
+        console.log(asset);
+        console.log(asset.id);
+        setTimeout(() => {
+            window.location.href = `/index.html?justUploaded=${asset.id}`;
+        }, 500);
+    } catch (err) {
+        form.style.display = "";
+        progressBox.style.display = "none";
+        errorBox.textContent = err.message;
+        errorBox.style.display = "block";
+    }
+});

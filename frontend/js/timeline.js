@@ -9,8 +9,8 @@
 import {
   hasClip, hasTf, isClipped, passFraction, playPose, poseOfBookmark, prepareSpec, readPose, readTf,
   renderAnimation, resetTfSignature, SIZES, sweepIndices, writePose, keyTimes,
-} from "/js/animate.js?v=tl1";
-import { ANIM_MAX_CHARS, ANIM_PARAM, encodeSpec } from "/js/anim-url.js?v=tl1";
+} from "./animate.js";
+import { ANIM_MAX_CHARS, ANIM_PARAM, encodeSpec } from "./anim-url.js";
 
 const esc = (t) => String(t ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));

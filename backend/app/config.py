@@ -100,9 +100,10 @@ class Settings:
 
     # --- Frontend static files ---
     # In the Docker image this is /frontend (see Dockerfile). For local dev
-    # (`uvicorn app.main:app --reload` from backend/), fall back to ../frontend.
+    # (`uvicorn app.main:app --reload` from backend/), fall back to ../frontend/dist, which
+    # `npm run build` in frontend/ makes (the pages are bundled by webpack, see the README).
     _default_frontend = "/frontend" if Path("/frontend").exists() else str(
-        Path(__file__).resolve().parent.parent.parent / "frontend"
+        Path(__file__).resolve().parent.parent.parent / "frontend" / "dist"
     )
     FRONTEND_DIR: str = os.environ.get("VG_FRONTEND_DIR", _default_frontend)
 

@@ -1,4 +1,4 @@
-// One pane's slice worker (see worker-plane-client.js, which starts three: xy, xz, yz).
+// One pane's slice worker (see worker-plane-client.js, which starts three: xy, xz, yz). Bundled by webpack as a worker script.
 //
 // It does what the main thread's PlaneClient does for a plane - POST .../plan, the missing blocks streamed from
 // POST .../blocks, a PlaneAssembler building the image - off the main thread, against the block cache that the
@@ -10,8 +10,8 @@
 // Messages to the page:    refresh { stale } (the token ran out: send a new url) | update { id, init?, rows?, pending, complete }
 //   | done { id, plan, stats } | error { id, name, message, status }
 
-import { PlaneClient, PlaneError } from "./plane-client.js?v=mpr2";
-import { SharedBlockCache } from "./block-cache.js?v=mpr2";
+import { PlaneClient, PlaneError } from "./plane-client.js";
+import { SharedBlockCache } from "./block-cache.js";
 
 const FLUSH_MS = 8;
 

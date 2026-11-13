@@ -2,9 +2,29 @@
 
 ## Stack Overview
 *   **Backend:** FastAPI app (SQLite for users/volumes/access, JWT auth).
-*   **Frontend:** Static HTML/CSS/JS gallery UI + vendored `kiln-render` library.
+*   **Frontend:** HTML/CSS/JS gallery UI bundled with webpack (see below) + the `kiln-render` library.
 *   **nginx:** Reverse proxy config + self-signed cert generator.
 *   **Workers:** Redis & RQ based job queues for background processing.
+
+## Frontend build
+
+`frontend/` is built with webpack (`frontend/webpack.config.js`; `npm run build` makes `frontend/dist`, which is what the
+backend serves; the Dockerfile does it in its `frontend` stage).
+
+*   Each page (`*.html`, `viewers/*.html`) is a template whose script is `pages/<name>.js` (an entry); the template puts
+    in the stylesheet and the small `theme-init` script. Modules import each other with relative paths.
+*   Every output file carries a hash of its content (`js/volume.3fa9c0d1b2e4.js`), so there is **no `?v=` cache busting**
+    to maintain: a changed file has a new name, an unchanged one keeps its name and stays in the browser's cache. The
+    server sends hashed files with `Cache-Control: immutable` and the HTML pages with `no-cache`
+    (`FrontendFiles` in `backend/app/main.py`).
+*   `kiln-render` is bundled into the volume page. The lazy chunks it loads (Zarr codecs) become files of their own.
+*   Not hashed: `js/sw.js` (the service worker keeps its URL), `favicon.ico` and `css/style.css` (asked for by their plain
+    names: by the browser on its own, and by the page the server writes for a dead share link; `STATIC_FILES` in the
+    webpack config lists such files), and `/vendor` (the prebuilt Potree and 3DHOP libraries the viewer pages load as
+    classic scripts; the Docker image adds them).
+*   The slice workers (`js/slice/slice-worker.js`) are found by webpack through `new Worker(new URL(...))` in
+    `worker-plane-client.js` and built as scripts of their own.
+*   Tests: `npm test` (Node's test runner, no browser) in `frontend/`.
 
 ## Background Processing & Processing Directory
 

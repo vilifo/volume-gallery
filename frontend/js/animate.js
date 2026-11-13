@@ -4,8 +4,8 @@
 // waited for until all the data it needs has streamed in and the image has converged) and goes to an MP4
 // video or a zip of images. The timeline panel (timeline.js) is the user interface for all of it.
 
-import { Mp4Sink, ZipSink, canEncodeVideo } from "/js/animate-io.js?v=org3";
-import { waitForRefined, captureRgba, afterFrames, resizeCanvasTo, accessExpiredError } from "/js/render-capture.js?v=org4";
+import { Mp4Sink, ZipSink, canEncodeVideo } from "./animate-io.js";
+import { waitForRefined, captureRgba, afterFrames, resizeCanvasTo, accessExpiredError } from "./render-capture.js";
 
 // ------------------------------------------------------------------------- camera poses (pure maths)
 
@@ -473,7 +473,7 @@ export const SIZES = { current: "Current view size", "1280x720": "1280 \u00d7 72
 async function saveFiles(sink) {
   const files = await sink.finish();
   sink.saved = true;
-  const { downloadBlob } = await import("/js/export-image.js?v=org2");
+  const { downloadBlob } = await import("./export-image.js");
   for (const f of files) { downloadBlob(f.blob, f.filename); await new Promise((r) => setTimeout(r, 400)); }
   return files.map((f) => f.filename).join(", ");
 }
